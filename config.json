@@ -1,0 +1,46 @@
+{
+  "mappings": [
+    {
+      "from": "https://api.openai.com/v1*",
+      "to": "https://p-q.p-q.co/v1*",
+      "listen": 8081,
+      "cc": ["http://localhost:8082/cc"]
+    },
+    {
+      "from": "/static/*",
+      "local": "./static/*"
+    },
+    {
+      "from": "https://local.dev/*",
+      "local": "./static/*",
+      "listen": {
+        "port": 8083,
+        "cert": "auto"
+      }
+    },
+    {
+      "from": "https://secure.local/*",
+      "to": "http://localhost:9999/*",
+      "listen": {
+        "port": 8443,
+        "cert": {
+          "cert": "./.cert/server.crt",
+          "key": "./.cert/server.key"
+        }
+      }
+    },
+    {
+      "from": "https://www.codebuddy.ai/v2*",
+      "to": "https://p-q.p-q.co/api/ai/v1*",
+      "headers": {
+        "Authorization": "Bearer your-custom-token",
+        "X-Custom-Header": "custom-value",
+        "User-Agent": "Custom-Proxy/1.0"
+      },
+      "match": "<title>(.*)</title>",
+      "replace": {
+        "Google": "MyProxy"
+      }
+    }
+  ]
+}
