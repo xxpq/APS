@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -24,6 +25,7 @@ type MapRemoteProxy struct {
 }
 
 func NewMapRemoteProxy(config *Config, harLogger *HarLogger) *MapRemoteProxy {
+	// 默认不使用代理的 transport
 	transport := &http.Transport{
 		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 		DialContext: (&net.Dialer{
@@ -49,6 +51,39 @@ func NewMapRemoteProxy(config *Config, harLogger *HarLogger) *MapRemoteProxy {
 	}
 }
 
+// createProxyClient 为指定的代理 URL 创建 HTTP 客户端
+func (p *MapRemoteProxy) createProxyClient(proxyURL string) (*http.Client, error) {
+	if proxyURL == "" {
+		return p.client, nil
+	}
+
+	parsedProxy, err := url.Parse(proxyURL)
+	if err != nil {
+		return nil, err
+	}
+
+	transport := &http.Transport{
+		Proxy:           http.ProxyURL(parsedProxy),
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		DialContext: (&net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		MaxIdleConns:          100,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+	}
+
+	return &http.Client{
+		Transport: transport,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+		Timeout: 60 * time.Second,
+	}, nil
+}
+
 func (p *MapRemoteProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodOptions {
 		setCorsHeaders(w.Header())
@@ -67,7 +102,7 @@ func (p *MapRemoteProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	originalURL := p.buildOriginalURL(r)
-	targetURL, matched, mapping := p.mapRequestWithMapping(originalURL)
+	targetURL, matched, mapping := p.mapRequestWithMappingAndMethod(originalURL, r.Method)
 
 	if matched {
 		if mapping.Local != "" {
@@ -80,7 +115,19 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		log.Printf("[%s] %s (NO MAPPING)", r.Method, originalURL)
 	}
 
-	proxyReq, err := http.NewRequest(r.Method, targetURL, r.Body)
+	// 读取并可能修改请求体
+	var requestBody io.Reader = r.Body
+	if matched && mapping != nil {
+		modifiedBody, err := p.modifyRequestBody(r, mapping)
+		if err != nil {
+			http.Error(w, "Failed to modify request body", http.StatusInternalServerError)
+			log.Printf("Error modifying request body: %v", err)
+			return
+		}
+		requestBody = bytes.NewBuffer(modifiedBody)
+	}
+
+	proxyReq, err := http.NewRequest(r.Method, targetURL, requestBody)
 	if err != nil {
 		http.Error(w, "Failed to create proxy request", http.StatusInternalServerError)
 		log.Printf("Error creating request: %v", err)
@@ -97,21 +144,80 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	proxyReq.Header.Set("X-Forwarded-Host", r.Host)
 	proxyReq.Header.Set("X-Forwarded-Proto", getScheme(r))
 
+	// 选择使用的 HTTP 客户端（可能带代理）
+	client := p.client
+	var proxyManager *ProxyManager
+	
 	if matched && mapping != nil {
-		if len(mapping.Headers) > 0 {
-			log.Printf("[HEADERS] Applying %d custom headers", len(mapping.Headers))
-			for key, value := range mapping.Headers {
-				proxyReq.Header.Set(key, value)
-				log.Printf("[HEADERS]   %s: %s", key, value)
+		// 应用来自 from 配置的请求头
+		fromConfig := mapping.GetFromConfig()
+		if fromConfig != nil && len(fromConfig.Headers) > 0 {
+			headers, headersToRemove := fromConfig.GetAllHeaders()
+			if len(headersToRemove) > 0 {
+				log.Printf("[REQUEST HEADERS] Removing %d headers", len(headersToRemove))
+				for _, key := range headersToRemove {
+					proxyReq.Header.Del(key)
+					log.Printf("[REQUEST HEADERS]   Removed: %s", key)
+				}
+			}
+			if len(headers) > 0 {
+				log.Printf("[REQUEST HEADERS] Applying %d custom headers from 'from' config", len(headers))
+				for key, value := range headers {
+					proxyReq.Header.Set(key, value)
+					log.Printf("[REQUEST HEADERS]   %s: %s", key, value)
+				}
 			}
 		}
+		
+		// 应用来自 from 配置的查询参数
+		if fromConfig != nil && len(fromConfig.QueryString) > 0 {
+			parsedURL, _ := url.Parse(targetURL)
+			query := parsedURL.Query()
+			
+			params, paramsToRemove := fromConfig.GetQueryString()
+			if len(paramsToRemove) > 0 {
+				log.Printf("[REQUEST QUERY] Removing %d query parameters", len(paramsToRemove))
+				for _, key := range paramsToRemove {
+					query.Del(key)
+					log.Printf("[REQUEST QUERY]   Removed: %s", key)
+				}
+			}
+			if len(params) > 0 {
+				log.Printf("[REQUEST QUERY] Applying %d query parameters", len(params))
+				for key, value := range params {
+					query.Set(key, value)
+					log.Printf("[REQUEST QUERY]   %s: %s", key, value)
+				}
+			}
+			
+			parsedURL.RawQuery = query.Encode()
+			targetURL = parsedURL.String()
+			proxyReq.URL = parsedURL
+		}
+		
+		// 处理代理配置
+		if fromConfig != nil && fromConfig.Proxy != nil {
+			proxyManager = NewProxyManager(fromConfig.Proxy)
+			defer proxyManager.Close()
+			
+			proxyURL := proxyManager.GetRandomProxy()
+			if proxyURL != "" {
+				proxyClient, err := p.createProxyClient(proxyURL)
+				if err != nil {
+					log.Printf("[PROXY] Error creating proxy client: %v", err)
+				} else {
+					client = proxyClient
+				}
+			}
+		}
+		
 		if len(mapping.Cc) > 0 {
 			go p.carbonCopyRequest(proxyReq, mapping.Cc)
 		}
 	}
 
 	startTime := time.Now()
-	resp, err := p.client.Do(proxyReq)
+	resp, err := client.Do(proxyReq)
 	if err != nil {
 		if p.harLogger != nil {
 			p.logHarEntry(r, nil, startTime)
@@ -127,7 +233,31 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	copyHeaders(w.Header(), resp.Header)
+	
+	// 先设置默认跨域头
 	setCorsHeaders(w.Header())
+	
+	// 然后应用来自 to 配置的响应头（覆盖默认跨域头）
+	if matched && mapping != nil {
+		toConfig := mapping.GetToConfig()
+		if toConfig != nil && len(toConfig.Headers) > 0 {
+			headers, headersToRemove := toConfig.GetAllHeaders()
+			if len(headersToRemove) > 0 {
+				log.Printf("[RESPONSE HEADERS] Removing %d headers", len(headersToRemove))
+				for _, key := range headersToRemove {
+					w.Header().Del(key)
+					log.Printf("[RESPONSE HEADERS]   Removed: %s", key)
+				}
+			}
+			if len(headers) > 0 {
+				log.Printf("[RESPONSE HEADERS] Applying %d custom headers from 'to' config", len(headers))
+				for key, value := range headers {
+					w.Header().Set(key, value)
+					log.Printf("[RESPONSE HEADERS]   %s: %s", key, value)
+				}
+			}
+		}
+	}
 
 	body, err := p.modifyResponseBody(resp, mapping)
 	if err != nil {
@@ -167,13 +297,14 @@ func (p *MapRemoteProxy) handleConnectWithIntercept(w http.ResponseWriter, r *ht
 func (p *MapRemoteProxy) shouldInterceptHost(hostname string) bool {
 	mappings := p.config.GetMappings()
 	for _, mapping := range mappings {
-		parsedFrom, err := url.Parse(mapping.From)
+		fromURL := mapping.GetFromURL()
+		parsedFrom, err := url.Parse(fromURL)
 		if err != nil {
 			continue
 		}
 
 		if parsedFrom.Host == hostname {
-			log.Printf("[DEBUG] Host %s matches mapping pattern %s", hostname, mapping.From)
+			log.Printf("[DEBUG] Host %s matches mapping pattern %s", hostname, fromURL)
 			return true
 		}
 	}
@@ -234,14 +365,25 @@ func (p *MapRemoteProxy) handleConnectWithMITM(w http.ResponseWriter, r *http.Re
 
 		log.Printf("[DEBUG] Original URL: %s", originalURL)
 
-		targetURL, matched, mapping := p.mapRequestWithMapping(originalURL)
+		targetURL, matched, mapping := p.mapRequestWithMappingAndMethod(originalURL, req.Method)
 		if matched {
 			log.Printf("[HTTPS %s] %s -> %s (✓ MAPPED)", req.Method, originalURL, targetURL)
 		} else {
 			log.Printf("[HTTPS %s] %s (✗ NO MAPPING)", req.Method, originalURL)
 		}
 
-		proxyReq, err := http.NewRequest(req.Method, targetURL, req.Body)
+		// 读取并可能修改请求体
+		var requestBody io.Reader = req.Body
+		if matched && mapping != nil {
+			modifiedBody, err := p.modifyRequestBody(req, mapping)
+			if err != nil {
+				log.Printf("Error modifying request body: %v", err)
+			} else {
+				requestBody = bytes.NewBuffer(modifiedBody)
+			}
+		}
+
+		proxyReq, err := http.NewRequest(req.Method, targetURL, requestBody)
 		if err != nil {
 			log.Printf("Error creating proxy request: %v", err)
 			break
@@ -253,14 +395,73 @@ func (p *MapRemoteProxy) handleConnectWithMITM(w http.ResponseWriter, r *http.Re
 		proxyReq.Host = targetParsed.Host
 		proxyReq.Header.Set("Host", targetParsed.Host)
 
+		// 选择使用的 HTTP 客户端（可能带代理）
+		client := p.client
+		var proxyManager *ProxyManager
+		
 		if matched && mapping != nil {
-			if len(mapping.Headers) > 0 {
-				log.Printf("[HEADERS] Applying %d custom headers", len(mapping.Headers))
-				for key, value := range mapping.Headers {
-					proxyReq.Header.Set(key, value)
-					log.Printf("[HEADERS]   %s: %s", key, value)
+			// 应用来自 from 配置的请求头
+			fromConfig := mapping.GetFromConfig()
+			if fromConfig != nil && len(fromConfig.Headers) > 0 {
+				headers, headersToRemove := fromConfig.GetAllHeaders()
+				if len(headersToRemove) > 0 {
+					log.Printf("[REQUEST HEADERS] Removing %d headers", len(headersToRemove))
+					for _, key := range headersToRemove {
+						proxyReq.Header.Del(key)
+						log.Printf("[REQUEST HEADERS]   Removed: %s", key)
+					}
+				}
+				if len(headers) > 0 {
+					log.Printf("[REQUEST HEADERS] Applying %d custom headers from 'from' config", len(headers))
+					for key, value := range headers {
+						proxyReq.Header.Set(key, value)
+						log.Printf("[REQUEST HEADERS]   %s: %s", key, value)
+					}
 				}
 			}
+			
+			// 应用来自 from 配置的查询参数
+			if fromConfig != nil && len(fromConfig.QueryString) > 0 {
+				parsedURL, _ := url.Parse(targetURL)
+				query := parsedURL.Query()
+				
+				params, paramsToRemove := fromConfig.GetQueryString()
+				if len(paramsToRemove) > 0 {
+					log.Printf("[REQUEST QUERY] Removing %d query parameters", len(paramsToRemove))
+					for _, key := range paramsToRemove {
+						query.Del(key)
+						log.Printf("[REQUEST QUERY]   Removed: %s", key)
+					}
+				}
+				if len(params) > 0 {
+					log.Printf("[REQUEST QUERY] Applying %d query parameters", len(params))
+					for key, value := range params {
+						query.Set(key, value)
+						log.Printf("[REQUEST QUERY]   %s: %s", key, value)
+					}
+				}
+				
+				parsedURL.RawQuery = query.Encode()
+				targetURL = parsedURL.String()
+				proxyReq.URL = parsedURL
+			}
+			
+			// 处理代理配置
+			if fromConfig != nil && fromConfig.Proxy != nil {
+				proxyManager = NewProxyManager(fromConfig.Proxy)
+				defer proxyManager.Close()
+				
+				proxyURL := proxyManager.GetRandomProxy()
+				if proxyURL != "" {
+					proxyClient, err := p.createProxyClient(proxyURL)
+					if err != nil {
+						log.Printf("[PROXY] Error creating proxy client: %v", err)
+					} else {
+						client = proxyClient
+					}
+				}
+			}
+			
 			if len(mapping.Cc) > 0 {
 				go p.carbonCopyRequest(proxyReq, mapping.Cc)
 			}
@@ -269,7 +470,7 @@ func (p *MapRemoteProxy) handleConnectWithMITM(w http.ResponseWriter, r *http.Re
 		log.Printf("[DEBUG] Sending request to: %s (Host: %s)", targetURL, targetParsed.Host)
 
 		startTime := time.Now()
-		resp, err := p.client.Do(proxyReq)
+		resp, err := client.Do(proxyReq)
 		if err != nil {
 			if p.harLogger != nil {
 				p.logHarEntry(req, nil, startTime)
@@ -289,7 +490,30 @@ func (p *MapRemoteProxy) handleConnectWithMITM(w http.ResponseWriter, r *http.Re
 			p.logHarEntry(req, resp, startTime)
 		}
 
+		// 先设置默认跨域头
 		setCorsHeaders(resp.Header)
+		
+		// 然后应用来自 to 配置的响应头（覆盖默认跨域头）
+		if matched && mapping != nil {
+			toConfig := mapping.GetToConfig()
+			if toConfig != nil && len(toConfig.Headers) > 0 {
+				headers, headersToRemove := toConfig.GetAllHeaders()
+				if len(headersToRemove) > 0 {
+					log.Printf("[RESPONSE HEADERS] Removing %d headers", len(headersToRemove))
+					for _, key := range headersToRemove {
+						resp.Header.Del(key)
+						log.Printf("[RESPONSE HEADERS]   Removed: %s", key)
+					}
+				}
+				if len(headers) > 0 {
+					log.Printf("[RESPONSE HEADERS] Applying %d custom headers from 'to' config", len(headers))
+					for key, value := range headers {
+						resp.Header.Set(key, value)
+						log.Printf("[RESPONSE HEADERS]   %s: %s", key, value)
+					}
+				}
+			}
+		}
 
 		body, err := p.modifyResponseBody(resp, mapping)
 		if err != nil {
@@ -361,9 +585,20 @@ func (p *MapRemoteProxy) buildOriginalURL(r *http.Request) string {
 }
 
 func (p *MapRemoteProxy) mapRequestWithMapping(originalURL string) (string, bool, *Mapping) {
+	return p.mapRequestWithMappingAndMethod(originalURL, "")
+}
+
+func (p *MapRemoteProxy) mapRequestWithMappingAndMethod(originalURL string, method string) (string, bool, *Mapping) {
 	mappings := p.config.GetMappings()
 	for i := range mappings {
 		mapping := &mappings[i]
+		
+		// 检查 method 是否匹配
+		fromConfig := mapping.GetFromConfig()
+		if fromConfig != nil && method != "" && !fromConfig.MatchesMethod(method) {
+			continue
+		}
+		
 		if matched, newURL := p.matchAndReplace(originalURL, *mapping); matched {
 			return newURL, true, mapping
 		}
@@ -372,11 +607,17 @@ func (p *MapRemoteProxy) mapRequestWithMapping(originalURL string) (string, bool
 }
 
 func (p *MapRemoteProxy) matchAndReplace(originalURL string, mapping Mapping) (bool, string) {
-	fromPattern := mapping.From
-	toPattern := mapping.To
+	fromPattern := mapping.GetFromURL()
+	toPattern := mapping.GetToURL()
 
 	log.Printf("[DEBUG] Trying to match: %s with pattern: %s", originalURL, fromPattern)
 
+	// 尝试正则表达式匹配
+	if matched, newURL := p.tryRegexMatch(originalURL, fromPattern, toPattern); matched {
+		return true, newURL
+	}
+
+	// 回退到原始的字符串匹配逻辑
 	parsedOriginal, err := url.Parse(originalURL)
 	if err != nil {
 		log.Printf("[DEBUG] Failed to parse original URL: %v", err)
@@ -479,6 +720,88 @@ func (p *MapRemoteProxy) matchAndReplace(originalURL string, mapping Mapping) (b
 
 	log.Printf("[DEBUG] ✗ No match")
 	return false, originalURL
+}
+
+// tryRegexMatch 尝试使用正则表达式匹配 URL
+func (p *MapRemoteProxy) tryRegexMatch(originalURL, fromPattern, toPattern string) (bool, string) {
+	// 检查 fromPattern 是否包含正则表达式特征（但排除简单的 * 通配符）
+	if !strings.Contains(fromPattern, "(") && !strings.Contains(fromPattern, "[") &&
+	   !strings.Contains(fromPattern, "{") && !strings.Contains(fromPattern, "^") &&
+	   !strings.Contains(fromPattern, "$") && !strings.Contains(fromPattern, "|") {
+		return false, originalURL
+	}
+
+	re, err := regexp.Compile(fromPattern)
+	if err != nil {
+		log.Printf("[DEBUG] Not a valid regex pattern: %v", err)
+		return false, originalURL
+	}
+
+	if !re.MatchString(originalURL) {
+		return false, originalURL
+	}
+
+	// 使用正则表达式替换
+	newURL := re.ReplaceAllString(originalURL, toPattern)
+	log.Printf("[DEBUG] ✓ Regex matched! %s -> %s", originalURL, newURL)
+	return true, newURL
+}
+
+// modifyRequestBody 修改请求体（如果 from 配置中有 match 或 replace）
+func (p *MapRemoteProxy) modifyRequestBody(r *http.Request, mapping *Mapping) ([]byte, error) {
+	if r.Body == nil {
+		return nil, nil
+	}
+
+	body, err := ioutil.ReadAll(r.Body)
+	if err != nil {
+		return nil, err
+	}
+	r.Body = ioutil.NopCloser(bytes.NewBuffer(body)) // Restore body
+
+	if mapping == nil {
+		return body, nil
+	}
+
+	// 使用 from 配置中的 match 和 replace（如果有）
+	fromConfig := mapping.GetFromConfig()
+	if fromConfig == nil {
+		return body, nil
+	}
+
+	// Match
+	if fromConfig.Match != "" {
+		re, err := regexp.Compile(fromConfig.Match)
+		if err != nil {
+			log.Printf("Invalid match regex in 'from' config: %v", err)
+			return body, nil // Return original body
+		}
+		matches := re.FindSubmatch(body)
+		if len(matches) > 1 {
+			body = matches[1] // Use the first capture group
+			log.Printf("[REQUEST MATCH] Extracted %d bytes from request body", len(body))
+		} else {
+			body = []byte{} // No match, return empty
+			log.Printf("[REQUEST MATCH] No match found, returning empty body")
+		}
+	}
+
+	// Replace
+	if len(fromConfig.Replace) > 0 {
+		tempBody := string(body)
+		for key, value := range fromConfig.Replace {
+			re, err := regexp.Compile(key)
+			if err != nil {
+				log.Printf("Invalid replace regex in 'from' config: %v", err)
+				continue
+			}
+			tempBody = re.ReplaceAllString(tempBody, value)
+			log.Printf("[REQUEST REPLACE] Applied replacement: %s -> %s", key, value)
+		}
+		body = []byte(tempBody)
+	}
+
+	return body, nil
 }
 
 func copyHeaders(dst, src http.Header) {
@@ -681,10 +1004,14 @@ func (p *MapRemoteProxy) serveFile(w http.ResponseWriter, r *http.Request, mappi
 	localPath := mapping.Local
 	if strings.HasSuffix(localPath, "*") {
 		basePath := strings.TrimSuffix(localPath, "*")
-		fromBasePath := strings.TrimSuffix(mapping.From, "*")
+		fromURL := mapping.GetFromURL()
+		fromBasePath := strings.TrimSuffix(fromURL, "*")
 		requestedPath := strings.TrimPrefix(r.URL.Path, fromBasePath)
 		localPath = filepath.Join(basePath, requestedPath)
 	}
+
+	// 尝试查找 index 文件
+	localPath = findIndexFile(localPath)
 
 	content, err := ioutil.ReadFile(localPath)
 	if err != nil {
@@ -698,6 +1025,28 @@ func (p *MapRemoteProxy) serveFile(w http.ResponseWriter, r *http.Request, mappi
 	setCorsHeaders(w.Header())
 	w.WriteHeader(http.StatusOK)
 	w.Write(content)
+}
+
+// findIndexFile 如果路径是目录，尝试查找 index.html 或 index.htm
+func findIndexFile(path string) string {
+	// 检查路径是否为目录
+	info, err := os.Stat(path)
+	if err != nil || !info.IsDir() {
+		return path
+	}
+
+	// 按优先级尝试 index 文件
+	indexFiles := []string{"index.html", "index.htm"}
+	for _, indexFile := range indexFiles {
+		indexPath := filepath.Join(path, indexFile)
+		if _, err := os.Stat(indexPath); err == nil {
+			log.Printf("[INDEX] Found %s for directory %s", indexFile, path)
+			return indexPath
+		}
+	}
+
+	// 没找到 index 文件，返回原路径
+	return path
 }
 
 func (p *MapRemoteProxy) modifyResponseBody(resp *http.Response, mapping *Mapping) ([]byte, error) {
@@ -715,31 +1064,40 @@ func (p *MapRemoteProxy) modifyResponseBody(resp *http.Response, mapping *Mappin
 		return body, nil
 	}
 
+	// 使用 to 配置中的 match 和 replace（如果有）
+	toConfig := mapping.GetToConfig()
+	if toConfig == nil {
+		return body, nil
+	}
+
 	// Match
-	if mapping.Match != "" {
-		re, err := regexp.Compile(mapping.Match)
+	if toConfig.Match != "" {
+		re, err := regexp.Compile(toConfig.Match)
 		if err != nil {
-			log.Printf("Invalid match regex: %v", err)
+			log.Printf("Invalid match regex in 'to' config: %v", err)
 			return body, nil // Return original body
 		}
 		matches := re.FindSubmatch(body)
 		if len(matches) > 1 {
 			body = matches[1] // Use the first capture group
+			log.Printf("[RESPONSE MATCH] Extracted %d bytes from response body", len(body))
 		} else {
 			body = []byte{} // No match, return empty
+			log.Printf("[RESPONSE MATCH] No match found, returning empty body")
 		}
 	}
 
 	// Replace
-	if len(mapping.Replace) > 0 {
+	if len(toConfig.Replace) > 0 {
 		tempBody := string(body)
-		for key, value := range mapping.Replace {
+		for key, value := range toConfig.Replace {
 			re, err := regexp.Compile(key)
 			if err != nil {
-				log.Printf("Invalid replace regex: %v", err)
+				log.Printf("Invalid replace regex in 'to' config: %v", err)
 				continue
 			}
 			tempBody = re.ReplaceAllString(tempBody, value)
+			log.Printf("[RESPONSE REPLACE] Applied replacement: %s -> %s", key, value)
 		}
 		body = []byte(tempBody)
 	}

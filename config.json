@@ -30,16 +30,29 @@
       }
     },
     {
-      "from": "https://www.codebuddy.ai/v2*",
-      "to": "https://p-q.p-q.co/api/ai/v1*",
-      "headers": {
-        "Authorization": "Bearer your-custom-token",
-        "X-Custom-Header": "custom-value",
-        "User-Agent": "Custom-Proxy/1.0"
+      "from": {
+        "url": "https://www.codebuddy.ai/v2*",
+        "method": ["GET", "POST"],
+        "headers": {
+          "Authorization": "Bearer your-custom-token",
+          "X-Custom-Header": "custom-value",
+          "User-Agent": "Custom-Proxy/1.0"
+        },
+        "match": "<title>(.*)</title>",
+        "replace": {
+          "OldText": "NewText"
+        }
       },
-      "match": "<title>(.*)</title>",
-      "replace": {
-        "Google": "MyProxy"
+      "to": {
+        "url": "https://p-q.p-q.co/api/ai/v1*",
+        "headers": {
+          "X-Response-Custom": "response-value",
+          "Access-Control-Allow-Origin": "https://specific-origin.com"
+        },
+        "match": "<data>(.*)</data>",
+        "replace": {
+          "Google": "MyProxy"
+        }
       }
     }
   ]
