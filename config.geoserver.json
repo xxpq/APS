@@ -1,0 +1,15 @@
+{
+  "servers": {
+    "default": {
+      "port": 8899
+    }
+  },
+  "proxies": null,
+  "mappings": [
+    {
+      "from": "http://localhost:8899/geoserver/*",
+      "to": "http://10.1.24.223:8089/geoserver/*",
+      "servers": "default"
+    }
+  ]
+}

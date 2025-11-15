@@ -25,7 +25,7 @@ var (
 
 const (
 	certDir      = ".cert"
-	caCertFile   = "WSP.crt"
+	caCertFile   = "Any_Proxy_Service.crt"
 	caKeyFile    = "Any_Proxy_Service.key"
 	caCommonName = "Any Proxy Service Root CA"
 	caOrg        = "Any Proxy Service"
