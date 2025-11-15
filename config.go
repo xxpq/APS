@@ -17,8 +17,9 @@ func init() {
 }
 
 type Config struct {
-	Mappings []Mapping    `json:"mappings"`
-	Server   *ListenConfig `json:"server,omitempty"` // 公共服务器配置
+	Servers  map[string]*ListenConfig `json:"servers"`
+	Proxies  map[string]interface{}   `json:"proxies"`
+	Mappings []Mapping                `json:"mappings"`
 	mu       sync.RWMutex
 }
 
@@ -39,43 +40,42 @@ func (ec *EndpointConfig) GetHeader(key string) (string, bool, bool) {
 	if ec.Headers == nil {
 		return "", false, false
 	}
-	
+
 	value, exists := ec.Headers[key]
 	if !exists {
 		return "", false, false
 	}
-	
+
 	// 如果是 nil，表示要移除这个 header
 	if value == nil {
 		return "", true, true
 	}
-	
+
 	// 如果是字符串，直接返回
 	if strValue, ok := value.(string); ok {
 		return strValue, true, false
 	}
-	
+
 	// 如果是数组，随机选择一个
 	if arrValue, ok := value.([]interface{}); ok && len(arrValue) > 0 {
-		// 特别处理 Authorization 字段的随机选择
-		if strings.EqualFold(key, "Authorization") {
-			randomIndex := rand.Intn(len(arrValue))
-			if strValue, ok := arrValue[randomIndex].(string); ok {
+		randomIndex := rand.Intn(len(arrValue))
+		if strValue, ok := arrValue[randomIndex].(string); ok {
+			if strings.EqualFold(key, "Authorization") {
 				log.Printf("[RANDOM AUTH] Selected Authorization [%d/%d]: %s", randomIndex+1, len(arrValue), maskToken(strValue))
-				return strValue, true, false
 			}
+			return strValue, true, false
 		}
 	}
-	
+
 	// 如果是字符串数组（从 JSON 解析来的）
 	if arrValue, ok := value.([]string); ok && len(arrValue) > 0 {
+		randomIndex := rand.Intn(len(arrValue))
 		if strings.EqualFold(key, "Authorization") {
-			randomIndex := rand.Intn(len(arrValue))
 			log.Printf("[RANDOM AUTH] Selected Authorization [%d/%d]: %s", randomIndex+1, len(arrValue), maskToken(arrValue[randomIndex]))
-			return arrValue[randomIndex], true, false
 		}
+		return arrValue[randomIndex], true, false
 	}
-	
+
 	return "", false, false
 }
 
@@ -84,11 +84,11 @@ func (ec *EndpointConfig) GetHeader(key string) (string, bool, bool) {
 func (ec *EndpointConfig) GetAllHeaders() (map[string]string, []string) {
 	result := make(map[string]string)
 	toRemove := make([]string, 0)
-	
+
 	if ec.Headers == nil {
 		return result, toRemove
 	}
-	
+
 	for key := range ec.Headers {
 		if value, exists, shouldRemove := ec.GetHeader(key); exists {
 			if shouldRemove {
@@ -98,7 +98,7 @@ func (ec *EndpointConfig) GetAllHeaders() (map[string]string, []string) {
 			}
 		}
 	}
-	
+
 	return result, toRemove
 }
 
@@ -107,24 +107,24 @@ func (ec *EndpointConfig) GetAllHeaders() (map[string]string, []string) {
 func (ec *EndpointConfig) GetQueryString() (map[string]string, []string) {
 	result := make(map[string]string)
 	toRemove := make([]string, 0)
-	
+
 	if ec.QueryString == nil {
 		return result, toRemove
 	}
-	
+
 	for key, value := range ec.QueryString {
 		// 如果是 nil，表示要移除这个参数
 		if value == nil {
 			toRemove = append(toRemove, key)
 			continue
 		}
-		
+
 		// 如果是字符串，添加到结果中
 		if strValue, ok := value.(string); ok {
 			result[key] = strValue
 		}
 	}
-	
+
 	return result, toRemove
 }
 
@@ -134,12 +134,12 @@ func (ec *EndpointConfig) MatchesMethod(requestMethod string) bool {
 	if ec.Method == nil {
 		return true
 	}
-	
+
 	// 如果是字符串，直接比较
 	if strMethod, ok := ec.Method.(string); ok {
 		return strings.EqualFold(strMethod, requestMethod)
 	}
-	
+
 	// 如果是数组，检查是否在数组中
 	if arrMethod, ok := ec.Method.([]interface{}); ok {
 		for _, method := range arrMethod {
@@ -151,7 +151,7 @@ func (ec *EndpointConfig) MatchesMethod(requestMethod string) bool {
 		}
 		return false
 	}
-	
+
 	// 如果是字符串数组（从 JSON 解析来的）
 	if arrMethod, ok := ec.Method.([]string); ok {
 		for _, method := range arrMethod {
@@ -161,7 +161,7 @@ func (ec *EndpointConfig) MatchesMethod(requestMethod string) bool {
 		}
 		return false
 	}
-	
+
 	return true
 }
 
@@ -181,15 +181,19 @@ func min(a, b int) int {
 }
 
 type Mapping struct {
-	From   interface{}   `json:"from"`    // 可以是字符串或 EndpointConfig 对象
-	To     interface{}   `json:"to,omitempty"` // 可以是字符串或 EndpointConfig 对象
-	Local  string        `json:"local,omitempty"`
-	Listen *ListenConfig `json:"listen,omitempty"`
-	Cc     []string      `json:"cc,omitempty"`
-	
+	From   interface{} `json:"from"`         // 可以是字符串或 EndpointConfig 对象
+	To     interface{} `json:"to,omitempty"` // 可以是字符串或 EndpointConfig 对象
+	Local  string      `json:"local,omitempty"`
+	Listen interface{} `json:"listen,omitempty"` // string or []string
+	Cc     []string    `json:"cc,omitempty"`
+	Proxy  interface{} `json:"proxy,omitempty"` // string or []string, 引用 proxies 的 key
+
 	// 解析后的内部字段
-	fromConfig *EndpointConfig
-	toConfig   *EndpointConfig
+	fromConfig   *EndpointConfig
+	toConfig     *EndpointConfig
+	listenNames  []string
+	proxyNames   []string
+	resolvedProxy *ProxyManager
 }
 
 type ListenConfig struct {
@@ -296,27 +300,27 @@ func parseEndpointConfig(data interface{}) (*EndpointConfig, error) {
 	// 如果是 map，解析为完整配置
 	if mapData, ok := data.(map[string]interface{}); ok {
 		config := &EndpointConfig{}
-		
+
 		if url, ok := mapData["url"].(string); ok {
 			config.URL = strings.TrimSpace(strings.Trim(url, "`"))
 		}
-		
+
 		if headers, ok := mapData["headers"].(map[string]interface{}); ok {
 			config.Headers = headers
 		}
-		
+
 		if querystring, ok := mapData["querystring"].(map[string]interface{}); ok {
 			config.QueryString = querystring
 		}
-		
+
 		if proxy, ok := mapData["proxy"]; ok {
 			config.Proxy = proxy
 		}
-		
+
 		if match, ok := mapData["match"].(string); ok {
 			config.Match = match
 		}
-		
+
 		if replace, ok := mapData["replace"].(map[string]interface{}); ok {
 			config.Replace = make(map[string]string)
 			for k, v := range replace {
@@ -325,11 +329,33 @@ func parseEndpointConfig(data interface{}) (*EndpointConfig, error) {
 				}
 			}
 		}
-		
+
 		return config, nil
 	}
 
 	return nil, errors.New("invalid endpoint config format")
+}
+
+func parseStringOrArray(data interface{}) []string {
+	if data == nil {
+		return nil
+	}
+	if str, ok := data.(string); ok {
+		return []string{str}
+	}
+	if arr, ok := data.([]interface{}); ok {
+		var result []string
+		for _, item := range arr {
+			if str, ok := item.(string); ok {
+				result = append(result, str)
+			}
+		}
+		return result
+	}
+	if arr, ok := data.([]string); ok {
+		return arr
+	}
+	return nil
 }
 
 func LoadConfig(filename string) (*Config, error) {
@@ -345,17 +371,25 @@ func LoadConfig(filename string) (*Config, error) {
 		return nil, err
 	}
 
+	if err := processConfig(&config); err != nil {
+		return nil, err
+	}
+
+	return &config, nil
+}
+
+func processConfig(config *Config) error {
 	// 解析并验证每个 mapping
 	validMappings := make([]Mapping, 0, len(config.Mappings))
 	for i := range config.Mappings {
 		mapping := &config.Mappings[i]
-		
+
 		// 验证 from 字段（必须存在）
 		if mapping.From == nil {
 			log.Printf("Warning: mapping %d skipped - 'from' field is required", i+1)
 			continue
 		}
-		
+
 		fromConfig, err := parseEndpointConfig(mapping.From)
 		if err != nil {
 			log.Printf("Warning: mapping %d skipped - failed to parse 'from': %v", i+1, err)
@@ -370,7 +404,7 @@ func LoadConfig(filename string) (*Config, error) {
 		// 验证 to 和 local 至少存在一个
 		hasTo := mapping.To != nil
 		hasLocal := mapping.Local != ""
-		
+
 		if !hasTo && !hasLocal {
 			log.Printf("Warning: mapping %d skipped - either 'to' or 'local' field is required", i+1)
 			continue
@@ -389,15 +423,58 @@ func LoadConfig(filename string) (*Config, error) {
 			}
 			mapping.toConfig = toConfig
 		}
-		
+
+		// 解析 listen names
+		mapping.listenNames = parseStringOrArray(mapping.Listen)
+		if len(mapping.listenNames) == 0 {
+			// 默认绑定到 default server
+			if _, ok := config.Servers["default"]; ok {
+				mapping.listenNames = []string{"default"}
+			} else {
+				log.Printf("Warning: mapping %d skipped - 'listen' is not specified and no 'default' server found", i+1)
+				continue
+			}
+		}
+
+		// 验证 listen names 是否存在
+		for _, name := range mapping.listenNames {
+			if _, ok := config.Servers[name]; !ok {
+				log.Printf("Warning: mapping %d skipped - server name '%s' not found in servers config", i+1, name)
+				continue
+			}
+		}
+
+		// 解析 proxy names
+		proxySource := mapping.Proxy
+		if fromConfig.Proxy != nil {
+			proxySource = fromConfig.Proxy
+		}
+		mapping.proxyNames = parseStringOrArray(proxySource)
+
+		// 解析并初始化代理
+		if len(mapping.proxyNames) > 0 {
+			var allProxies []string
+			for _, name := range mapping.proxyNames {
+				if proxyConfig, ok := config.Proxies[name]; ok {
+					proxies := parseStringOrArray(proxyConfig)
+					allProxies = append(allProxies, proxies...)
+				} else {
+					// 也可能是直接的 proxy url
+					allProxies = append(allProxies, name)
+				}
+			}
+			if len(allProxies) > 0 {
+				mapping.resolvedProxy = NewProxyManager(allProxies)
+			}
+		}
+
 		// 验证通过，添加到有效列表
 		validMappings = append(validMappings, *mapping)
 	}
-	
+
 	config.Mappings = validMappings
 	log.Printf("Loaded %d valid mapping rules (filtered from %d total)", len(validMappings), len(config.Mappings))
-
-	return &config, nil
+	return nil
 }
 
 func (c *Config) Reload(filename string) error {
@@ -413,72 +490,19 @@ func (c *Config) Reload(filename string) error {
 		return err
 	}
 
-	// 解析并验证每个 mapping
-	originalCount := len(newConfig.Mappings)
-	validMappings := make([]Mapping, 0, originalCount)
-	
-	for i := range newConfig.Mappings {
-		mapping := &newConfig.Mappings[i]
-		
-		// 验证 from 字段（必须存在）
-		if mapping.From == nil {
-			log.Printf("Warning: mapping %d skipped - 'from' field is required", i+1)
-			continue
-		}
-		
-		fromConfig, err := parseEndpointConfig(mapping.From)
-		if err != nil {
-			log.Printf("Warning: mapping %d skipped - failed to parse 'from': %v", i+1, err)
-			continue
-		}
-		if fromConfig == nil || fromConfig.URL == "" {
-			log.Printf("Warning: mapping %d skipped - 'from' URL is empty", i+1)
-			continue
-		}
-		mapping.fromConfig = fromConfig
-
-		// 验证 to 和 local 至少存在一个
-		hasTo := mapping.To != nil
-		hasLocal := mapping.Local != ""
-		
-		if !hasTo && !hasLocal {
-			log.Printf("Warning: mapping %d skipped - either 'to' or 'local' field is required", i+1)
-			continue
-		}
-
-		// 解析 to 配置（如果存在）
-		if hasTo {
-			toConfig, err := parseEndpointConfig(mapping.To)
-			if err != nil {
-				log.Printf("Warning: mapping %d skipped - failed to parse 'to': %v", i+1, err)
-				continue
-			}
-			if toConfig == nil || toConfig.URL == "" {
-				log.Printf("Warning: mapping %d skipped - 'to' URL is empty", i+1)
-				continue
-			}
-			mapping.toConfig = toConfig
-		}
-		
-		// 验证通过，添加到有效列表
-		validMappings = append(validMappings, *mapping)
+	if err := processConfig(&newConfig); err != nil {
+		return err
 	}
-	
-	newConfig.Mappings = validMappings
 
 	c.mu.Lock()
+	c.Servers = newConfig.Servers
+	c.Proxies = newConfig.Proxies
 	c.Mappings = newConfig.Mappings
 	c.mu.Unlock()
 
-	log.Printf("Configuration reloaded: %d valid mapping rules (filtered from %d total)", len(validMappings), originalCount)
+	log.Printf("Configuration reloaded: %d valid mapping rules", len(newConfig.Mappings))
 	for _, mapping := range c.Mappings {
-		headersInfo := ""
-		fromConfig := mapping.GetFromConfig()
-		toConfig := mapping.GetToConfig()
-		if (fromConfig != nil && len(fromConfig.Headers) > 0) || (toConfig != nil && len(toConfig.Headers) > 0) {
-			headersInfo = " (with custom headers)"
-		}
-		log.Printf("  %s -> %s%s", mapping.GetFromURL(), mapping.GetToURL(), headersInfo)
+		log.Printf("  Rule: %s -> %s on servers: %v", mapping.GetFromURL(), mapping.GetToURL(), mapping.listenNames)
 	}
 
 	return nil

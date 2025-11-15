@@ -17,15 +17,17 @@ import (
 type DedicatedProxy struct {
 	mapping *Mapping
 	client  *http.Client
+	port    int
 }
 
-func NewDedicatedProxy(mapping *Mapping) *DedicatedProxy {
+func NewDedicatedProxy(mapping *Mapping, port int) *DedicatedProxy {
 	transport := &http.Transport{
 		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 	}
 
 	return &DedicatedProxy{
 		mapping: mapping,
+		port:    port,
 		client: &http.Client{
 			Transport: transport,
 			CheckRedirect: func(req *http.Request, via []*http.Request) error {
@@ -76,12 +78,12 @@ func (p *DedicatedProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		
 		w.WriteHeader(http.StatusOK)
-		log.Printf("[DEDICATED:%d OPTIONS] %s - Handled with CORS headers", p.mapping.Listen.Port, r.URL.String())
+		log.Printf("[DEDICATED:%d OPTIONS] %s - Handled with CORS headers", p.port, r.URL.String())
 		return
 	}
-	
+
 	if p.mapping.Local != "" {
-		log.Printf("[DEDICATED:%d] %s -> [LOCAL] %s", p.mapping.Listen.Port, r.URL.String(), p.mapping.Local)
+		log.Printf("[DEDICATED:%d] %s -> [LOCAL] %s", p.port, r.URL.String(), p.mapping.Local)
 		p.serveFile(w, r)
 		return
 	}
@@ -93,7 +95,7 @@ func (p *DedicatedProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Printf("[DEDICATED:%d] %s -> %s", p.mapping.Listen.Port, r.URL.String(), targetURL)
+	log.Printf("[DEDICATED:%d] %s -> %s", p.port, r.URL.String(), targetURL)
 
 	// 读取并可能修改请求体
 	requestBody, err := p.modifyRequestBody(r)
@@ -125,13 +127,13 @@ func (p *DedicatedProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if fromConfig != nil && len(fromConfig.Headers) > 0 {
 		headers, headersToRemove := fromConfig.GetAllHeaders()
 		if len(headersToRemove) > 0 {
-			log.Printf("[DEDICATED:%d REQUEST HEADERS] Removing %d headers", p.mapping.Listen.Port, len(headersToRemove))
+			log.Printf("[DEDICATED:%d REQUEST HEADERS] Removing %d headers", p.port, len(headersToRemove))
 			for _, key := range headersToRemove {
 				proxyReq.Header.Del(key)
 			}
 		}
 		if len(headers) > 0 {
-			log.Printf("[DEDICATED:%d REQUEST HEADERS] Applying %d custom headers from 'from' config", p.mapping.Listen.Port, len(headers))
+			log.Printf("[DEDICATED:%d REQUEST HEADERS] Applying %d custom headers from 'from' config", p.port, len(headers))
 			for key, value := range headers {
 				proxyReq.Header.Set(key, value)
 			}
@@ -144,13 +146,13 @@ func (p *DedicatedProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		
 		params, paramsToRemove := fromConfig.GetQueryString()
 		if len(paramsToRemove) > 0 {
-			log.Printf("[DEDICATED:%d REQUEST QUERY] Removing %d query parameters", p.mapping.Listen.Port, len(paramsToRemove))
+			log.Printf("[DEDICATED:%d REQUEST QUERY] Removing %d query parameters", p.port, len(paramsToRemove))
 			for _, key := range paramsToRemove {
 				query.Del(key)
 			}
 		}
 		if len(params) > 0 {
-			log.Printf("[DEDICATED:%d REQUEST QUERY] Applying %d query parameters", p.mapping.Listen.Port, len(params))
+			log.Printf("[DEDICATED:%d REQUEST QUERY] Applying %d query parameters", p.port, len(params))
 			for key, value := range params {
 				query.Set(key, value)
 			}
@@ -168,7 +170,7 @@ func (p *DedicatedProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if proxyURL != "" {
 			proxyClient, err := p.createProxyClient(proxyURL)
 			if err != nil {
-				log.Printf("[DEDICATED:%d PROXY] Error creating proxy client: %v", p.mapping.Listen.Port, err)
+				log.Printf("[DEDICATED:%d PROXY] Error creating proxy client: %v", p.port, err)
 			} else {
 				client = proxyClient
 			}
@@ -197,13 +199,13 @@ func (p *DedicatedProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if toConfig != nil && len(toConfig.Headers) > 0 {
 		headers, headersToRemove := toConfig.GetAllHeaders()
 		if len(headersToRemove) > 0 {
-			log.Printf("[DEDICATED:%d RESPONSE HEADERS] Removing %d headers", p.mapping.Listen.Port, len(headersToRemove))
+			log.Printf("[DEDICATED:%d RESPONSE HEADERS] Removing %d headers", p.port, len(headersToRemove))
 			for _, key := range headersToRemove {
 				w.Header().Del(key)
 			}
 		}
 		if len(headers) > 0 {
-			log.Printf("[DEDICATED:%d RESPONSE HEADERS] Applying %d custom headers from 'to' config", p.mapping.Listen.Port, len(headers))
+			log.Printf("[DEDICATED:%d RESPONSE HEADERS] Applying %d custom headers from 'to' config", p.port, len(headers))
 			for key, value := range headers {
 				w.Header().Set(key, value)
 			}
@@ -266,18 +268,18 @@ func (p *DedicatedProxy) carbonCopyRequest(req *http.Request, ccTargets []string
 
 			ccReq, err := http.NewRequest(req.Method, targetURL, strings.NewReader(string(bodyBytes)))
 			if err != nil {
-				log.Printf("[CC DEDICATED:%d] Error creating request for %s: %v", p.mapping.Listen.Port, targetURL, err)
+				log.Printf("[CC DEDICATED:%d] Error creating request for %s: %v", p.port, targetURL, err)
 				return
 			}
 			copyHeaders(ccReq.Header, req.Header)
 
 			resp, err := p.client.Do(ccReq)
 			if err != nil {
-				log.Printf("[CC DEDICATED:%d] Error sending request to %s: %v", p.mapping.Listen.Port, targetURL, err)
+				log.Printf("[CC DEDICATED:%d] Error sending request to %s: %v", p.port, targetURL, err)
 				return
 			}
 			defer resp.Body.Close()
-			log.Printf("[CC DEDICATED:%d] Request sent to %s, status: %d", p.mapping.Listen.Port, targetURL, resp.StatusCode)
+			log.Printf("[CC DEDICATED:%d] Request sent to %s, status: %d", p.port, targetURL, resp.StatusCode)
 		}(target)
 	}
 }
@@ -328,16 +330,16 @@ func (p *DedicatedProxy) modifyRequestBody(r *http.Request) ([]byte, error) {
 	if fromConfig.Match != "" {
 		re, err := regexp.Compile(fromConfig.Match)
 		if err != nil {
-			log.Printf("[DEDICATED:%d] Invalid match regex in 'from' config: %v", p.mapping.Listen.Port, err)
+			log.Printf("[DEDICATED:%d] Invalid match regex in 'from' config: %v", p.port, err)
 			return body, nil
 		}
 		matches := re.FindSubmatch(body)
 		if len(matches) > 1 {
 			body = matches[1]
-			log.Printf("[DEDICATED:%d REQUEST MATCH] Extracted %d bytes from request body", p.mapping.Listen.Port, len(body))
+			log.Printf("[DEDICATED:%d REQUEST MATCH] Extracted %d bytes from request body", p.port, len(body))
 		} else {
 			body = []byte{}
-			log.Printf("[DEDICATED:%d REQUEST MATCH] No match found, returning empty body", p.mapping.Listen.Port)
+			log.Printf("[DEDICATED:%d REQUEST MATCH] No match found, returning empty body", p.port)
 		}
 	}
 
@@ -347,11 +349,11 @@ func (p *DedicatedProxy) modifyRequestBody(r *http.Request) ([]byte, error) {
 		for key, value := range fromConfig.Replace {
 			re, err := regexp.Compile(key)
 			if err != nil {
-				log.Printf("[DEDICATED:%d] Invalid replace regex in 'from' config: %v", p.mapping.Listen.Port, err)
+				log.Printf("[DEDICATED:%d] Invalid replace regex in 'from' config: %v", p.port, err)
 				continue
 			}
 			tempBody = re.ReplaceAllString(tempBody, value)
-			log.Printf("[DEDICATED:%d REQUEST REPLACE] Applied replacement: %s -> %s", p.mapping.Listen.Port, key, value)
+			log.Printf("[DEDICATED:%d REQUEST REPLACE] Applied replacement: %s -> %s", p.port, key, value)
 		}
 		body = []byte(tempBody)
 	}
@@ -380,16 +382,16 @@ func (p *DedicatedProxy) modifyResponseBody(resp *http.Response) ([]byte, error)
 	if toConfig.Match != "" {
 		re, err := regexp.Compile(toConfig.Match)
 		if err != nil {
-			log.Printf("[DEDICATED:%d] Invalid match regex in 'to' config: %v", p.mapping.Listen.Port, err)
+			log.Printf("[DEDICATED:%d] Invalid match regex in 'to' config: %v", p.port, err)
 			return body, nil
 		}
 		matches := re.FindSubmatch(body)
 		if len(matches) > 1 {
 			body = matches[1]
-			log.Printf("[DEDICATED:%d RESPONSE MATCH] Extracted %d bytes from response body", p.mapping.Listen.Port, len(body))
+			log.Printf("[DEDICATED:%d RESPONSE MATCH] Extracted %d bytes from response body", p.port, len(body))
 		} else {
 			body = []byte{}
-			log.Printf("[DEDICATED:%d RESPONSE MATCH] No match found, returning empty body", p.mapping.Listen.Port)
+			log.Printf("[DEDICATED:%d RESPONSE MATCH] No match found, returning empty body", p.port)
 		}
 	}
 
@@ -399,11 +401,11 @@ func (p *DedicatedProxy) modifyResponseBody(resp *http.Response) ([]byte, error)
 		for key, value := range toConfig.Replace {
 			re, err := regexp.Compile(key)
 			if err != nil {
-				log.Printf("[DEDICATED:%d] Invalid replace regex in 'to' config: %v", p.mapping.Listen.Port, err)
+				log.Printf("[DEDICATED:%d] Invalid replace regex in 'to' config: %v", p.port, err)
 				continue
 			}
 			tempBody = re.ReplaceAllString(tempBody, value)
-			log.Printf("[DEDICATED:%d RESPONSE REPLACE] Applied replacement: %s -> %s", p.mapping.Listen.Port, key, value)
+			log.Printf("[DEDICATED:%d RESPONSE REPLACE] Applied replacement: %s -> %s", p.port, key, value)
 		}
 		body = []byte(tempBody)
 	}

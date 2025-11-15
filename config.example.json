@@ -1,342 +1,79 @@
 {
-  "server": {
-    "port": 3000,
-    "cert": "auto"
+  "servers": {
+    "default": {
+      "port": 3000,
+      "cert": "auto"
+    },
+    "api_server": {
+      "port": 8081,
+      "cert": "auto"
+    },
+    "local_dev": {
+      "port": 8083
+    },
+    "openai_specific": {
+      "port": 8088
+    }
+  },
+  "proxies": {
+    "us_proxies": [
+      "http://proxy1.example.com:8080",
+      "http://proxy2.example.com:8080",
+      "http://proxy3.example.com:8080"
+    ],
+    "eu_proxies": [
+      "http://eu-proxy1.example.com:9090",
+      "http://eu-proxy2.example.com:9090"
+    ],
+    "dedicated_openai": "http://user:pass@dedicated.proxy.com:8080"
   },
   "mappings": [
     {
-      "comment": "示例1: 简单的字符串配置",
-      "from": "https://api.openai.com/v1*",
-      "to": "https://p-q.p-q.co/v1*",
-      "listen": 8081
+      "comment": "示例1: 简单的 API 转发，使用一组美国代理",
+      "listen": "api_server",
+      "from": "https://api.example.com/v1*",
+      "to": "https://backend.example.com/api/v1*",
+      "proxy": "us_proxies"
     },
     {
-      "comment": "示例2: 设置请求头和响应头",
-      "from": {
-        "url": "https://api.example.com/v1*",
-        "headers": {
-          "Authorization": "Bearer your-custom-token",
-          "X-Custom-Header": "custom-value",
-          "User-Agent": "Custom-Proxy/1.0"
-        }
-      },
-      "to": {
-        "url": "https://backend.example.com/api/v1*",
-        "headers": {
-          "Access-Control-Allow-Origin": "https://specific-domain.com",
-          "X-Response-Header": "custom-response-value"
-        }
-      }
+      "comment": "示例2: 绑定到多个监听服务，并使用多组代理（将从多组中随机选择一个代理）",
+      "listen": ["default", "api_server"],
+      "from": "https://multi.example.com/*",
+      "to": "https://backend.multi.com/*",
+      "proxy": ["us_proxies", "eu_proxies"]
     },
     {
-      "comment": "示例3: 响应体匹配和替换",
-      "from": {
-        "url": "https://www.codebuddy.ai/v2*",
-        "headers": {
-          "Authorization": "Bearer secret-token",
-          "X-API-Key": "your-api-key"
-        }
-      },
-      "to": {
-        "url": "https://p-q.p-q.co/api/ai/v1*",
-        "headers": {
-          "Content-Type": "application/json",
-          "X-Powered-By": "MyProxy"
-        },
-        "match": "\"data\":\\s*\\{([^}]+)\\}",
-        "replace": {
-          "\"status\":\"success\"": "\"status\":\"modified\"",
-          "Google": "MyProxy"
-        }
-      }
-    },
-    {
-      "comment": "示例4: 请求体和响应体双向处理",
-      "from": {
-        "url": "https://api.transform.com/*",
-        "headers": {
-          "Content-Type": "application/json"
-        },
-        "match": "\"request\":\\s*\\{([^}]+)\\}",
-        "replace": {
-          "\"oldField\"": "\"newField\"",
-          "sensitive-key": "***"
-        }
-      },
-      "to": {
-        "url": "https://backend.transform.com/*",
-        "match": "\"response\":\\s*\\{([^}]+)\\}",
-        "replace": {
-          "internal-data": "public-data"
-        }
-      }
-    },
-    {
-      "comment": "示例5: 只设置请求头",
-      "from": {
-        "url": "https://api.github.com/*",
-        "headers": {
-          "Authorization": "token ghp_your_github_token",
-          "Accept": "application/vnd.github.v3+json"
-        }
-      },
-      "to": "https://api.github.com/*"
-    },
-    {
-      "comment": "示例6: 只设置响应头和替换",
-      "from": "https://public-api.example.com/*",
-      "to": {
-        "url": "https://public-api.example.com/*",
-        "headers": {
-          "Cache-Control": "no-cache",
-          "X-Frame-Options": "DENY"
-        },
-        "replace": {
-          "sensitive-data": "***REDACTED***"
-        }
-      }
-    },
-    {
-      "comment": "示例7: 本地文件服务（使用公共服务器）",
+      "comment": "示例3: 本地静态文件服务，仅在 local_dev 服务上生效",
+      "listen": "local_dev",
       "from": "/static/*",
       "local": "./static/*"
     },
     {
-      "comment": "示例7-1: 另一个相对路径服务（也使用公共服务器）",
-      "from": "/public/*",
-      "local": "./public/*"
-    },
-    {
-      "comment": "示例7-2: 相对路径 API 服务（使用公共服务器）",
-      "from": "/api/local/*",
-      "local": "./api/*"
-    },
-    {
-      "comment": "示例8: 带 HTTPS 的本地服务",
-      "from": "https://local.dev/*",
-      "local": "./static/*",
-      "listen": {
-        "port": 8083,
-        "cert": "auto"
-      }
-    },
-    {
-      "comment": "示例9: 完整的 CORS 配置覆盖",
-      "from": "https://cors-test.example.com/*",
-      "to": {
-        "url": "https://backend.example.com/*",
-        "headers": {
-          "Access-Control-Allow-Origin": "https://trusted-site.com",
-          "Access-Control-Allow-Methods": "GET, POST, PUT",
-          "Access-Control-Allow-Headers": "Content-Type, Authorization",
-          "Access-Control-Allow-Credentials": "false"
-        }
-      }
-    },
-    {
-      "comment": "示例10: Carbon Copy 功能",
-      "from": {
-        "url": "https://webhook.example.com/api*",
-        "headers": {
-          "X-Webhook-Secret": "secret-key"
-        }
-      },
-      "to": "https://backend.example.com/api*",
-      "cc": [
-        "http://localhost:8082/backup",
-        "http://analytics.example.com/track"
-      ]
-    },
-    {
-      "comment": "示例11: 正则表达式 URL 匹配",
-      "from": "https://api\\.example\\.com/v(\\d+)/users/(\\d+)",
-      "to": "https://backend.example.com/api/v$1/user/$2"
-    },
-    {
-      "comment": "示例12: 复杂正则表达式 + 请求头",
-      "from": {
-        "url": "https://old-api\\.example\\.com/(v\\d+)/(.*)",
-        "headers": {
-          "X-API-Version": "new"
-        }
-      },
-      "to": "https://new-api.example.com/$1/$2"
-    },
-    {
-      "comment": "示例13: 请求体数据脱敏",
-      "from": {
-        "url": "https://api.example.com/submit",
-        "replace": {
-          "\"password\":\"[^\"]+\"": "\"password\":\"***\"",
-          "\"credit_card\":\"[^\"]+\"": "\"credit_card\":\"****\""
-        }
-      },
-      "to": "https://backend.example.com/submit"
-    },
-    {
-      "comment": "示例14: Authorization 数组随机负载均衡",
+      "comment": "示例4: OpenAI 请求转发，使用专有代理和特定监听端口",
+      "listen": "openai_specific",
       "from": {
         "url": "https://api.openai.com/v1*",
         "headers": {
           "Authorization": [
             "Bearer sk-proj-token1-xxxxxxxxxxxxxx",
-            "Bearer sk-proj-token2-yyyyyyyyyyyyyy",
-            "Bearer sk-proj-token3-zzzzzzzzzzzzzz"
-          ],
-          "User-Agent": "Custom-Proxy/1.0"
-        }
-      },
-      "to": "https://api.openai.com/v1*"
-    },
-    {
-      "comment": "示例15: 多个 API Key 随机轮询",
-      "from": {
-        "url": "https://api.anthropic.com/v1*",
-        "headers": {
-          "x-api-key": [
-            "sk-ant-api-key-1",
-            "sk-ant-api-key-2",
-            "sk-ant-api-key-3",
-            "sk-ant-api-key-4"
-          ],
-          "anthropic-version": "2023-06-01"
-        }
-      },
-      "to": "https://api.anthropic.com/v1*",
-      "listen": 8084
-    },
-    {
-      "comment": "示例16: QueryString 参数修改和移除",
-      "from": {
-        "url": "https://api.example.com/search*",
-        "querystring": {
-          "api_key": "my-custom-key",
-          "format": "json",
-          "debug": null,
-          "internal_flag": null
-        }
-      },
-      "to": "https://backend.example.com/search*"
-    },
-    {
-      "comment": "示例17: 移除请求头和响应头",
-      "from": {
-        "url": "https://api.example.com/data*",
-        "headers": {
-          "X-Debug-Mode": null,
-          "X-Internal-Token": null,
-          "Authorization": "Bearer new-token"
-        }
-      },
-      "to": {
-        "url": "https://backend.example.com/data*",
-        "headers": {
-          "Server": null,
-          "X-Powered-By": null,
-          "X-Custom-Header": "custom-value"
-        }
-      }
-    },
-    {
-      "comment": "示例18: QueryString 和 Headers 综合处理",
-      "from": {
-        "url": "https://api.example.com/api*",
-        "headers": {
-          "Authorization": "Bearer production-token",
-          "X-Debug": null,
-          "X-Test-Mode": null
-        },
-        "querystring": {
-          "key": "prod-key-12345",
-          "debug": null,
-          "trace": null,
-          "version": "v2"
-        }
-      },
-      "to": {
-        "url": "https://backend.example.com/api*",
-        "headers": {
-          "X-Internal-Info": null,
-          "X-Server-Version": null
-        }
-      }
-    },
-    {
-      "comment": "示例19: 使用单个 HTTP 代理",
-      "from": {
-        "url": "https://api.openai.com/v1*",
-        "headers": {
-          "Authorization": "Bearer sk-your-token"
-        },
-        "proxy": "http://proxy-user:proxy-pass@proxy.example.com:8080"
-      },
-      "to": "https://api.openai.com/v1*"
-    },
-    {
-      "comment": "示例20: 使用单个 SOCKS5 代理",
-      "from": {
-        "url": "https://api.anthropic.com/v1*",
-        "headers": {
-          "x-api-key": "sk-ant-your-key"
-        },
-        "proxy": "socks5://user:pass@socks-proxy.example.com:1080"
-      },
-      "to": "https://api.anthropic.com/v1*"
-    },
-    {
-      "comment": "示例21: 使用代理数组随机负载均衡",
-      "from": {
-        "url": "https://api.example.com/v1*",
-        "headers": {
-          "Authorization": "Bearer token"
-        },
-        "proxy": [
-          "http://proxy1.example.com:8080",
-          "http://proxy2.example.com:8080",
-          "http://proxy3.example.com:8080"
-        ]
-      },
-      "to": "https://backend.example.com/v1*"
-    },
-    {
-      "comment": "示例22: 从本地文件读取代理列表",
-      "from": {
-        "url": "https://api.example.com/v1*",
-        "headers": {
-          "Authorization": "Bearer token"
-        },
-        "proxy": "./proxy_list.txt"
-      },
-      "to": "https://backend.example.com/v1*"
-    },
-    {
-      "comment": "示例23: 从远程 URL 获取代理列表（每5分钟更新）",
-      "from": {
-        "url": "https://api.example.com/v1*",
-        "headers": {
-          "Authorization": "Bearer token"
-        },
-        "proxy": "https://proxy-provider.example.com/proxies.txt"
-      },
-      "to": "https://backend.example.com/v1*"
-    },
-    {
-      "comment": "示例24: 代理 + Authorization 数组 双重随机负载均衡",
-      "from": {
-        "url": "https://api.openai.com/v1*",
-        "headers": {
-          "Authorization": [
-            "Bearer sk-proj-token1",
-            "Bearer sk-proj-token2",
-            "Bearer sk-proj-token3"
+            "Bearer sk-proj-token2-yyyyyyyyyyyyyy"
           ]
         },
-        "proxy": [
-          "http://proxy1.example.com:8080",
-          "http://proxy2.example.com:8080"
-        ]
+        "proxy": "dedicated_openai"
       },
-      "to": "https://api.openai.com/v1*"
+      "to": "https://p-q.p-q.co/v1*"
+    },
+    {
+      "comment": "示例5: 相对路径的 API 服务，在默认服务上生效",
+      "listen": "default",
+      "from": "/api/local/*",
+      "to": "http://localhost:9000/api/*"
+    },
+    {
+      "comment": "示例6: from 是一个完整的 URL，请求将通过监听服务进行匹配和转发",
+      "listen": "api_server",
+      "from": "https://a.b.cn/*",
+      "to": "https://x.p-q.co/v2*"
     }
   ]
 }
