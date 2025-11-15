@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"crypto/tls"
 	"io"
-	"io/ioutil"
 	"log"
 	"net/http"
 	"net/url"
@@ -322,11 +321,11 @@ func (p *DedicatedProxy) modifyRequestBody(r *http.Request) ([]byte, error) {
 		return nil, nil
 	}
 
-	body, err := ioutil.ReadAll(r.Body)
+	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		return nil, err
 	}
-	r.Body = ioutil.NopCloser(bytes.NewBuffer(body)) // Restore body
+	r.Body = io.NopCloser(bytes.NewBuffer(body)) // Restore body
 
 	// 使用 from 配置中的 match 和 replace（如果有）
 	fromConfig := p.mapping.GetFromConfig()
@@ -374,11 +373,11 @@ func (p *DedicatedProxy) modifyResponseBody(resp *http.Response) ([]byte, error)
 		return nil, nil
 	}
 
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, err
 	}
-	resp.Body = ioutil.NopCloser(bytes.NewBuffer(body))
+	resp.Body = io.NopCloser(bytes.NewBuffer(body))
 
 	// 使用 to 配置中的 match 和 replace（如果有）
 	toConfig := p.mapping.GetToConfig()

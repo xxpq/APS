@@ -162,9 +162,9 @@ type EndpointConfig struct {
 	Proxy       interface{}            `json:"proxy,omitempty"`       // 支持 string、[]string、本地文件路径或远程 URL
 	Match       string                 `json:"match,omitempty"`
 	Replace     map[string]string      `json:"replace,omitempty"`
-	GRPC        *GRPCConfig            `json:"grpc,omitempty"`
-	WebSocket   *WebSocketConfig       `json:"websocket,omitempty"`
-	Script      *ScriptConfig          `json:"script,omitempty"`
+	GRPC      *GRPCConfig      `json:"grpc,omitempty"`
+	WebSocket *WebSocketConfig `json:"websocket,omitempty"`
+	Script    string           `json:"script,omitempty"`
 }
 
 // GetHeader 获取 header 值，如果是数组则随机选择一个
@@ -340,11 +340,6 @@ type Mapping struct {
 type RuleAuth struct {
 	Users  []string `json:"users,omitempty"`
 	Groups []string `json:"groups,omitempty"`
-}
-
-type ScriptConfig struct {
-	OnRequest  string `json:"onRequest,omitempty"`
-	OnResponse string `json:"onResponse,omitempty"`
 }
 
 type ListenConfig struct {

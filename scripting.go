@@ -160,18 +160,18 @@ func (s *ScriptRunner) scriptDataToRequest(data ScriptData, origReq *http.Reques
 	newReq.URL = newURL
 	newReq.Proto = data.Proto
 	newReq.Header = data.Headers
-	newReq.Body = ioutil.NopCloser(strings.NewReader(data.Body))
+	newReq.Body = io.NopCloser(strings.NewReader(data.Body))
 	newReq.ContentLength = int64(len(data.Body))
 
 	return newReq, nil
 }
 
 func (s *ScriptRunner) responseToScriptData(r *http.Response) (ScriptData, error) {
-	bodyBytes, err := ioutil.ReadAll(r.Body)
+	bodyBytes, err := io.ReadAll(r.Body)
 	if err != nil {
 		return ScriptData{}, err
 	}
-	r.Body = ioutil.NopCloser(bytes.NewBuffer(bodyBytes)) // Restore body
+	r.Body = io.NopCloser(bytes.NewBuffer(bodyBytes)) // Restore body
 
 	return ScriptData{
 		StatusCode: r.StatusCode,

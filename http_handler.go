@@ -6,10 +6,10 @@ import (
 	"crypto/tls"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"log"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -201,11 +201,11 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	// Run onRequest script if defined
 	if matched && mapping != nil {
 		fromConfig := mapping.GetFromConfig()
-		if fromConfig != nil && fromConfig.Script != nil && fromConfig.Script.OnRequest != "" {
+		if fromConfig != nil && fromConfig.Script != "" {
 			var scriptErr error
-			proxyReq, scriptErr = p.scriptRunner.RunOnRequest(proxyReq, fromConfig.Script.OnRequest)
+			proxyReq, scriptErr = p.scriptRunner.RunOnRequest(proxyReq, fromConfig.Script)
 			if scriptErr != nil {
-				log.Printf("[SCRIPT] Error running onRequest script %s: %v", fromConfig.Script.OnRequest, scriptErr)
+				log.Printf("[SCRIPT] Error running onRequest script %s: %v", fromConfig.Script, scriptErr)
 				// Decide if you want to stop the request or continue with the original
 				// http.Error(w, "Script execution failed", http.StatusInternalServerError)
 				// return
@@ -329,11 +329,11 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	// Run onResponse script if defined
 	if matched && mapping != nil {
 		toConfig := mapping.GetToConfig()
-		if toConfig != nil && toConfig.Script != nil && toConfig.Script.OnResponse != "" {
+		if toConfig != nil && toConfig.Script != "" {
 			var scriptErr error
-			resp, scriptErr = p.scriptRunner.RunOnResponse(resp, toConfig.Script.OnResponse)
+			resp, scriptErr = p.scriptRunner.RunOnResponse(resp, toConfig.Script)
 			if scriptErr != nil {
-				log.Printf("[SCRIPT] Error running onResponse script %s: %v", toConfig.Script.OnResponse, scriptErr)
+				log.Printf("[SCRIPT] Error running onResponse script %s: %v", toConfig.Script, scriptErr)
 				// Decide if you want to stop or continue with the original response
 			}
 		}
@@ -511,7 +511,7 @@ func (tr *ThrottledReader) Read(p []byte) (n int, err error) {
 
 // createClientWithP12 creates an HTTP client configured with a client certificate from a P12 file.
 func (p *MapRemoteProxy) createClientWithP12(p12Path, password string, policies FinalPolicies) (*http.Client, error) {
-	p12Bytes, err := ioutil.ReadFile(p12Path)
+	p12Bytes, err := os.ReadFile(p12Path)
 	if err != nil {
 		return nil, err
 	}

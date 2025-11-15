@@ -1,8 +1,8 @@
-# Cato Proxy Service
+# Any Proxy Service - 高级 HTTP/HTTPS/gRPC 代理转发工具
 
 ## 简介
 
-Cato Proxy Service 是一个功能强大、高度可配置、可编写脚本的多协议 API 网关和代理服务器。它专为现代开发、测试和网络调试而设计，为您提供对网络流量无与伦比的精细化控制能力，允许您检查、修改、重定向、转换和模拟各种网络条件。
+Any Proxy Service 是一个功能强大、高度可配置、可编写脚本的多协议 API 网关和代理服务器。它专为现代开发、测试和网络调试而设计，为您提供对网络流量无与伦比的精细化控制能力，允许您检查、修改、重定向、转换和模拟各种网络条件。
 
 ## ✨ 功能矩阵
 
@@ -51,7 +51,7 @@ go build .
 ### 3. 运行
 
 ```bash
-./cato-proxy-service -config=config.json
+./aps -config=config.json
 ```
 
 ### 4. 配置 HTTPS 拦截
@@ -65,7 +65,7 @@ go build .
     ```
 2.  将您的系统或浏览器的代理设置为 `127.0.0.1:8443`。
 3.  在浏览器中访问任意 HTTP 网站，然后导航到 `http://<any-domain>/.ssl` (例如 `http://example.com/.ssl`)。
-4.  下载 `cato_root_ca.crt` 证书文件。
+4.  下载 `root_ca.crt` 证书文件。
 5.  将此证书导入到您的系统或浏览器的“受信任的根证书颁发机构”中。
 
 ## 核心概念
@@ -141,9 +141,9 @@ go build .
     -   `{"Header-Name": null}`: 在 `to` 中用于移除标头。
     -   `{"Header-Name": ["val1", "val2"]}`: 在 `to` 中用于从列表中随机选择一个值。
 -   `querystring`: (可选) `object`。匹配或修改查询参数。用法同 `headers`。
--   `script`: (可选) `object`。指定用于处理请求或响应的脚本。
-    -   `from.script`: 在 **请求** 发送到目标之前执行。
-    -   `to.script`: 在从目标收到 **响应** 之后执行。
+-   `script`: (可选) `string`。指定用于处理请求或响应的脚本路径。
+    -   在 `from` 中使用: 脚本在 **请求** 发送到目标之前执行。
+    -   在 `to` 中使用: 脚本在从目标收到 **响应** 之后执行。
 -   `grpc`: (可选) `GRPCConfig` 对象。用于 gRPC 代理和转换。
 -   `websocket`: (可选) `WebSocketConfig` 对象。用于 WebSocket 消息拦截。
 
@@ -250,7 +250,7 @@ go build .
 
 ### `quotaUsage`
 
-此字段由 Cato Proxy 自动管理，用于持久化流量和请求次数的配额用量。**请勿手动修改**。
+此字段由 Any Proxy Service 自动管理，用于持久化流量和请求次数的配额用量。**请勿手动修改**。
 
 ## 高级功能与用例
 
@@ -280,8 +280,8 @@ go build .
 
 使用 Python 或 Node.js 脚本在请求或响应阶段动态修改流量。
 
--   `onRequest`: 请求脚本。在请求被发送到目标服务器 **之前** 执行。
--   `onResponse`: 响应脚本。在收到目标服务器的响应 **之后** 执行。
+-   在 `from` 规则中定义的 `script` 会在请求被发送到目标服务器 **之前** 执行。
+-   在 `to` 规则中定义的 `script` 会在收到目标服务器的响应 **之后** 执行。
 
 脚本通过标准输入接收一个 JSON 对象，并通过标准输出返回一个修改后的 JSON 对象。
 
@@ -303,9 +303,7 @@ go build .
 // config.json
 "from": {
   "url": "http://api.mycorp.com/v1/*",
-  "script": {
-    "onRequest": "./scripts/add_hmac.py"
-  }
+  "script": "./scripts/add_hmac.py"
 },
 "to": "http://internal.api/*"
 ```
@@ -362,7 +360,7 @@ if __name__ == "__main__":
     "to": {
       "url": "http://localhost:50051",
       "grpc": {
-        "metadata": { "source": "cato-proxy" } // 添加元数据
+        "metadata": { "source": "any-proxy" } // 添加元数据
       }
     }
   }
@@ -506,9 +504,7 @@ if __name__ == "__main__":
     {
       "from": {
         "url": "https://api.thirdparty.com/*",
-        "script": {
-          "onRequest": "./scripts/add_api_key.py"
-        }
+        "script": "./scripts/add_api_key.py"
       },
       "to": "https://api.thirdparty.com/*",
       "proxy": "external_proxy",

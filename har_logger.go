@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/json"
-	"io/ioutil"
 	"log"
 	"os"
 	"path/filepath"
@@ -204,7 +203,7 @@ func (h *HarLogger) saveToFile() {
 		return
 	}
 
-	err = ioutil.WriteFile(h.filePath, data, 0644)
+	err = os.WriteFile(h.filePath, data, 0644)
 	if err != nil {
 		log.Printf("Error writing HAR file %s: %v", h.filePath, err)
 	} else {
