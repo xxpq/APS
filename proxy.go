@@ -13,15 +13,19 @@ type MapRemoteProxy struct {
 	config             *Config
 	harManager         *HarLoggerManager
 	tunnelManager      *TunnelManager
+	scriptRunner       *ScriptRunner
+	trafficShaper      *TrafficShaper
+	stats              *StatsCollector
 	serverName         string
 	client             *http.Client
 	concurrencyLimiter chan struct{}
+	endpointTunnelMap  map[string]string // endpointName -> tunnelName
 }
 
-func NewMapRemoteProxy(config *Config, harManager *HarLoggerManager, tunnelManager *TunnelManager, serverName string) *MapRemoteProxy {
+func NewMapRemoteProxy(config *Config, harManager *HarLoggerManager, tunnelManager *TunnelManager, scriptRunner *ScriptRunner, trafficShaper *TrafficShaper, stats *StatsCollector, serverName string) *MapRemoteProxy {
 	// Default policies from the server config, if they exist
 	serverConfig := config.Servers[serverName]
-	policies := config.ResolvePolicies(serverConfig, &Mapping{}, nil) // Get server-level or default policies
+	policies := config.ResolvePolicies(serverConfig, &Mapping{}, nil, "") // Get server-level or default policies
 
 	transport := &http.Transport{
 		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
@@ -38,10 +42,14 @@ func NewMapRemoteProxy(config *Config, harManager *HarLoggerManager, tunnelManag
 	tunnelTransport := NewTunnelRoundTripper(tunnelManager, transport)
 
 	p := &MapRemoteProxy{
-		config:        config,
-		harManager:    harManager,
-		tunnelManager: tunnelManager,
-		serverName:    serverName,
+		config:            config,
+		harManager:        harManager,
+		tunnelManager:     tunnelManager,
+		scriptRunner:      scriptRunner,
+		trafficShaper:     trafficShaper,
+		stats:             stats,
+		serverName:        serverName,
+		endpointTunnelMap: make(map[string]string),
 		client: &http.Client{
 			Transport: tunnelTransport,
 			CheckRedirect: func(req *http.Request, via []*http.Request) error {
@@ -49,6 +57,36 @@ func NewMapRemoteProxy(config *Config, harManager *HarLoggerManager, tunnelManag
 			},
 			// Timeout is now set per-request in handleHTTP
 		},
+	}
+
+	// Build the endpoint -> tunnel reverse map
+	if config.Auth != nil {
+		if config.Auth.Users != nil {
+			for _, user := range config.Auth.Users {
+				endpoints := parseStringOrArray(user.Endpoint)
+				tunnels := parseStringOrArray(user.Tunnel)
+				if len(endpoints) > 0 && len(tunnels) > 0 {
+					// Simple association: first tunnel for all endpoints in this user
+					for _, ep := range endpoints {
+						p.endpointTunnelMap[ep] = tunnels[0]
+					}
+				}
+			}
+		}
+		if config.Auth.Groups != nil {
+			for _, group := range config.Auth.Groups {
+				endpoints := parseStringOrArray(group.Endpoint)
+				tunnels := parseStringOrArray(group.Tunnel)
+				if len(endpoints) > 0 && len(tunnels) > 0 {
+					for _, ep := range endpoints {
+						// User config takes precedence over group config
+						if _, exists := p.endpointTunnelMap[ep]; !exists {
+							p.endpointTunnelMap[ep] = tunnels[0]
+						}
+					}
+				}
+			}
+		}
 	}
 
 	// Initialize concurrency limiter if MaxThread is set at the server level
@@ -98,7 +136,7 @@ func (p *MapRemoteProxy) createProxyClient(proxyURL string) (*http.Client, error
 
 func (p *MapRemoteProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// 认证检查
-	authorized, _ := p.checkAuth(r, nil)
+	authorized, _, _ := p.checkAuth(r, nil)
 	if !authorized {
 		w.Header().Set("Proxy-Authenticate", `Basic realm="Restricted"`)
 		http.Error(w, "Proxy authentication required", http.StatusProxyAuthRequired)

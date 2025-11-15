@@ -197,6 +197,7 @@ func (tm *TunnelManager) ServeWs(tunnel *Tunnel, w http.ResponseWriter, r *http.
 	go conn.monitorHeartbeat(tunnel)
 }
 
+
 func (c *EndpointConn) monitorHeartbeat(tunnel *Tunnel) {
 	ticker := time.NewTicker(heartbeatCheckInterval)
 	defer ticker.Stop()

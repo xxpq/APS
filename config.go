@@ -3,9 +3,12 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
+	"math"
 	"math/rand"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -17,18 +20,63 @@ func init() {
 }
 
 type Config struct {
-	Servers  map[string]*ListenConfig    `json:"servers"`
-	Proxies  map[string]interface{}      `json:"proxies"`
-	Tunnels  map[string]*TunnelConfig    `json:"tunnels,omitempty"`
-	Auth     *AuthConfig                 `json:"auth,omitempty"`
-	P12s     map[string]*P12Config       `json:"p12s,omitempty"`
-	Mappings []Mapping                   `json:"mappings"`
-	mu       sync.RWMutex
+	Servers    map[string]*ListenConfig    `json:"servers"`
+	Proxies    map[string]*ProxyConfig     `json:"proxies"`
+	Tunnels    map[string]*TunnelConfig    `json:"tunnels,omitempty"`
+	Auth       *AuthConfig                 `json:"auth,omitempty"`
+	P12s       map[string]*P12Config       `json:"p12s,omitempty"`
+	Scripting  *ScriptingConfig            `json:"scripting,omitempty"`
+	Mappings   []Mapping                   `json:"mappings"`
+	QuotaUsage map[string]*QuotaUsageData  `json:"quotaUsage,omitempty"`
+	mu         sync.RWMutex
+}
+
+type QuotaUsageData struct {
+	TrafficUsed  int64 `json:"trafficUsed"`
+	RequestsUsed int64 `json:"requestsUsed"`
+}
+
+type ProxyConfig struct {
+	URLs []string `json:"urls"`
+	ConnectionPolicies
+	TrafficPolicies
+}
+
+func (pc *ProxyConfig) UnmarshalJSON(data []byte) error {
+	// Try to unmarshal as a string first
+	var singleURL string
+	if err := json.Unmarshal(data, &singleURL); err == nil {
+		pc.URLs = []string{singleURL}
+		return nil
+	}
+
+	// Try to unmarshal as an array of strings
+	var urls []string
+	if err := json.Unmarshal(data, &urls); err == nil {
+		pc.URLs = urls
+		return nil
+	}
+
+	// If that fails, try to unmarshal as a full object
+	type Alias ProxyConfig
+	var obj Alias
+	if err := json.Unmarshal(data, &obj); err != nil {
+		return err
+	}
+	*pc = ProxyConfig(obj)
+	return nil
 }
 
 type TunnelConfig struct {
 	Servers  []string `json:"servers"`
 	Password string   `json:"password,omitempty"` // AES key for encryption
+	Auth     *RuleAuth `json:"auth,omitempty"`
+	TrafficPolicies
+}
+
+type ScriptingConfig struct {
+	PythonPath string `json:"pythonPath,omitempty"`
+	NodePath   string `json:"nodePath,omitempty"`
 }
 
 type P12Config struct {
@@ -49,6 +97,13 @@ type ConnectionPolicies struct {
 	Quality     *float64 `json:"quality,omitempty"`     // 0.0 to 1.0, network quality simulation
 }
 
+// TrafficPolicies defines policies for rate limiting and traffic quotas.
+type TrafficPolicies struct {
+	RateLimit     *string `json:"rateLimit,omitempty"`    // e.g., "1mbps", "500kbps"
+	TrafficQuota  *string `json:"trafficQuota,omitempty"` // e.g., "10gb", "500mb"
+	RequestQuota  *int64  `json:"requestQuota,omitempty"`
+}
+
 type User struct {
 	Password string      `json:"password"`
 	Groups   []string    `json:"groups,omitempty"`
@@ -56,6 +111,7 @@ type User struct {
 	Endpoint interface{} `json:"endpoint,omitempty"` // string or []string
 	Tunnel   interface{} `json:"tunnel,omitempty"`   // string or []string
 	ConnectionPolicies
+	TrafficPolicies
 }
 
 type Group struct {
@@ -64,6 +120,7 @@ type Group struct {
 	Endpoint interface{} `json:"endpoint,omitempty"` // string or []string
 	Tunnel   interface{} `json:"tunnel,omitempty"`   // string or []string
 	ConnectionPolicies
+	TrafficPolicies
 }
 
 // EndpointConfig 用于配置请求或响应的详细信息
@@ -233,9 +290,11 @@ type Mapping struct {
 	Endpoint interface{} `json:"endpoint,omitempty"`
 	Tunnel   interface{} `json:"tunnel,omitempty"`
 	P12      string      `json:"p12,omitempty"` // 引用 p12s 的 key
+	Script   *ScriptConfig `json:"script,omitempty"`
 	Auth     *RuleAuth   `json:"auth,omitempty"`
 	Dump     string      `json:"dump,omitempty"`
 	ConnectionPolicies
+	TrafficPolicies
 
 	// 解析后的内部字段
 	fromConfig    *EndpointConfig
@@ -252,6 +311,11 @@ type RuleAuth struct {
 	Groups []string `json:"groups,omitempty"`
 }
 
+type ScriptConfig struct {
+	OnRequest  string `json:"onRequest,omitempty"`
+	OnResponse string `json:"onResponse,omitempty"`
+}
+
 type ListenConfig struct {
 	Port     int         `json:"port"`
 	Cert     interface{} `json:"cert,omitempty"` // string ("auto") or CertFiles
@@ -261,6 +325,7 @@ type ListenConfig struct {
 	Endpoint interface{} `json:"endpoint,omitempty"` // string or []string
 	Tunnel   interface{} `json:"tunnel,omitempty"`   // string or []string
 	ConnectionPolicies
+	TrafficPolicies
 }
 
 type ServerAuth struct {
@@ -520,8 +585,7 @@ func processConfig(config *Config) error {
 			var allProxies []string
 			for _, name := range mapping.proxyNames {
 				if proxyConfig, ok := config.Proxies[name]; ok {
-					proxies := parseStringOrArray(proxyConfig)
-					allProxies = append(allProxies, proxies...)
+					allProxies = append(allProxies, proxyConfig.URLs...)
 				} else {
 					// 也可能是直接的 proxy url
 					allProxies = append(allProxies, name)
@@ -596,52 +660,198 @@ type FinalPolicies struct {
 	Quality     float64
 }
 
-// ResolvePolicies determines the final connection policies based on the hierarchy:
-// user > group > mapping > server.
-func (c *Config) ResolvePolicies(server *ListenConfig, mapping *Mapping, user *User) FinalPolicies {
-	// Set default values
+// ResolvePolicies determines the final connection policies by taking the minimum value from all applicable levels.
+func (c *Config) ResolvePolicies(server *ListenConfig, mapping *Mapping, user *User, username string) FinalPolicies {
+	// Set default values to maximums, so any defined value will be smaller
 	final := FinalPolicies{
 		Timeout:     10 * time.Minute,
 		IdleTimeout: 100 * time.Second,
-		MaxThread:   0, // 0 means no limit
+		MaxThread:   math.MaxInt32,
 		Quality:     1.0,
 	}
 
-	// Layer 1: Server policies
-	applyPolicy(&final, &server.ConnectionPolicies)
+	// Create a list of all applicable policies
+	policies := []*ConnectionPolicies{
+		&server.ConnectionPolicies,
+		&mapping.ConnectionPolicies,
+	}
 
-	// Layer 2: Mapping policies
-	applyPolicy(&final, &mapping.ConnectionPolicies)
-
-	// Layer 3: Group policies (if user is present)
-	if user != nil && c.Auth != nil && c.Auth.Groups != nil {
-		for _, groupName := range user.Groups {
-			if group, ok := c.Auth.Groups[groupName]; ok {
-				applyPolicy(&final, &group.ConnectionPolicies)
+	if user != nil {
+		policies = append(policies, &user.ConnectionPolicies)
+		if c.Auth != nil && c.Auth.Groups != nil {
+			for _, groupName := range user.Groups {
+				if group, ok := c.Auth.Groups[groupName]; ok {
+					policies = append(policies, &group.ConnectionPolicies)
+				}
 			}
 		}
 	}
 
-	// Layer 4: User policies (highest priority)
-	if user != nil {
-		applyPolicy(&final, &user.ConnectionPolicies)
+	// Apply the "minimum wins" logic
+	for _, p := range policies {
+		if p.Timeout != nil {
+			timeout := time.Duration(*p.Timeout) * time.Second
+			if timeout < final.Timeout {
+				final.Timeout = timeout
+			}
+		}
+		if p.IdleTimeout != nil {
+			idleTimeout := time.Duration(*p.IdleTimeout) * time.Second
+			if idleTimeout < final.IdleTimeout {
+				final.IdleTimeout = idleTimeout
+			}
+		}
+		if p.MaxThread != nil && *p.MaxThread > 0 {
+			if *p.MaxThread < final.MaxThread {
+				final.MaxThread = *p.MaxThread
+			}
+		}
+		if p.Quality != nil {
+			if *p.Quality < final.Quality {
+				final.Quality = *p.Quality
+			}
+		}
+	}
+
+	// If no maxThread was set, reset to 0 (unlimited)
+	if final.MaxThread == math.MaxInt32 {
+		final.MaxThread = 0
 	}
 
 	return final
 }
 
-// applyPolicy updates the final policies from a specific policy level.
-func applyPolicy(final *FinalPolicies, specific *ConnectionPolicies) {
-	if specific.Timeout != nil {
-		final.Timeout = time.Duration(*specific.Timeout) * time.Second
+// ResolveTrafficPolicies gathers all applicable traffic policies.
+// It returns the lowest rate limit, a map of traffic quotas, and a map of request quotas.
+func (c *Config) ResolveTrafficPolicies(server *ListenConfig, mapping *Mapping, tunnel *TunnelConfig, proxy *ProxyConfig, user *User, username string) (string, map[string]string, map[string]int64, error) {
+	trafficQuotas := make(map[string]string)
+	requestQuotas := make(map[string]int64)
+	var rateLimits []string
+
+	// Gather policies from all levels
+	policies := []TrafficPolicies{}
+	sourceKeys := []string{}
+
+	if server != nil {
+		policies = append(policies, server.TrafficPolicies)
+		// Find server name for key
+		for name, s := range c.Servers {
+			if s == server {
+				sourceKeys = append(sourceKeys, fmt.Sprintf("server:%s", name))
+				break
+			}
+		}
 	}
-	if specific.IdleTimeout != nil {
-		final.IdleTimeout = time.Duration(*specific.IdleTimeout) * time.Second
+	if mapping != nil {
+		policies = append(policies, mapping.TrafficPolicies)
+		sourceKeys = append(sourceKeys, fmt.Sprintf("mapping:%s", mapping.GetFromURL()))
 	}
-	if specific.MaxThread != nil {
-		final.MaxThread = *specific.MaxThread
+	if tunnel != nil {
+		policies = append(policies, tunnel.TrafficPolicies)
+		// Find tunnel name for key
+		for name, t := range c.Tunnels {
+			if t == tunnel {
+				sourceKeys = append(sourceKeys, fmt.Sprintf("tunnel:%s", name))
+				break
+			}
+		}
 	}
-	if specific.Quality != nil {
-		final.Quality = *specific.Quality
+	if proxy != nil {
+		policies = append(policies, proxy.TrafficPolicies)
+		// Find proxy name for key
+		for name, p := range c.Proxies {
+			if p == proxy {
+				sourceKeys = append(sourceKeys, fmt.Sprintf("proxy:%s", name))
+				break
+			}
+		}
 	}
+	if user != nil {
+		policies = append(policies, user.TrafficPolicies)
+		sourceKeys = append(sourceKeys, fmt.Sprintf("user:%s", username))
+		if c.Auth != nil && c.Auth.Groups != nil {
+			for _, groupName := range user.Groups {
+				if group, ok := c.Auth.Groups[groupName]; ok {
+					policies = append(policies, group.TrafficPolicies)
+					sourceKeys = append(sourceKeys, fmt.Sprintf("group:%s", groupName))
+				}
+			}
+		}
+	}
+
+	// Process gathered policies
+	for i, p := range policies {
+		if p.RateLimit != nil {
+			rateLimits = append(rateLimits, *p.RateLimit)
+		}
+		if p.TrafficQuota != nil {
+			if i < len(sourceKeys) {
+				trafficQuotas[sourceKeys[i]] = *p.TrafficQuota
+			}
+		}
+		if p.RequestQuota != nil {
+			if i < len(sourceKeys) {
+				requestQuotas[sourceKeys[i]] = *p.RequestQuota
+			}
+		}
+	}
+
+	// Find the minimum rate limit
+	minRateLimit, err := minRate(rateLimits)
+	if err != nil {
+		return "", nil, nil, fmt.Errorf("failed to determine minimum rate limit: %w", err)
+	}
+
+	return minRateLimit, trafficQuotas, requestQuotas, nil
+}
+
+// parseRateLimit converts a rate string (e.g., "10mbps") to bytes per second.
+func parseRateLimit(rateStr string) (float64, error) {
+	if rateStr == "" {
+		return 0, nil
+	}
+	rateStr = strings.ToLower(strings.TrimSpace(rateStr))
+	var multiplier float64
+
+	if strings.HasSuffix(rateStr, "kbps") {
+		multiplier = 1024 / 8
+		rateStr = strings.TrimSuffix(rateStr, "kbps")
+	} else if strings.HasSuffix(rateStr, "mbps") {
+		multiplier = 1024 * 1024 / 8
+		rateStr = strings.TrimSuffix(rateStr, "mbps")
+	} else if strings.HasSuffix(rateStr, "gbps") {
+		multiplier = 1024 * 1024 * 1024 / 8
+		rateStr = strings.TrimSuffix(rateStr, "gbps")
+	} else {
+		return 0, fmt.Errorf("invalid rate limit unit, use kbps, mbps, or gbps")
+	}
+
+	val, err := strconv.ParseFloat(rateStr, 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid rate limit value: %w", err)
+	}
+
+	return val * multiplier, nil
+}
+
+// minRate finds the minimum rate from a slice of rate strings.
+func minRate(rates []string) (string, error) {
+	if len(rates) == 0 {
+		return "", nil
+	}
+
+	var minBps float64 = math.MaxFloat64
+	minRateStr := ""
+
+	for _, rateStr := range rates {
+		bps, err := parseRateLimit(rateStr)
+		if err != nil {
+			return "", err
+		}
+		if bps > 0 && bps < minBps {
+			minBps = bps
+			minRateStr = rateStr
+		}
+	}
+	return minRateStr, nil
 }

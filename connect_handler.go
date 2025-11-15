@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"crypto/tls"
+	"fmt"
 	"io"
 	"io/ioutil"
 	"log"
@@ -102,6 +103,73 @@ func (p *MapRemoteProxy) handleConnectWithMITM(w http.ResponseWriter, r *http.Re
 }
 
 func (p *MapRemoteProxy) handleConnectTunnel(w http.ResponseWriter, r *http.Request, destHost string) {
+	p.stats.IncTotalRequests()
+	p.stats.IncActiveConnections()
+	defer p.stats.DecActiveConnections()
+
+	// Auth and policy resolution for CONNECT should happen before tunneling
+	_, user, username := p.checkAuth(r, nil) // No specific mapping for pure CONNECT
+
+	serverConfig := p.config.Servers[p.serverName]
+	// For a simple tunnel, we don't have a mapping or tunnel context
+	rateLimit, quotas, requestQuotas, err := p.config.ResolveTrafficPolicies(serverConfig, nil, nil, nil, user, username)
+	if err != nil {
+		log.Printf("[TRAFFIC] Error resolving traffic policies for CONNECT: %v", err)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	// Check all applicable quotas
+	for source, quotaLimit := range quotas {
+		var initialUsage int64
+		if usage, ok := p.config.QuotaUsage[source]; ok {
+			initialUsage = usage.TrafficUsed
+		}
+		quota, err := p.trafficShaper.GetTrafficQuota(source, quotaLimit, initialUsage)
+		if err != nil {
+			log.Printf("[TRAFFIC] Error creating quota for %s: %v", source, err)
+			continue
+		}
+		if quota.Exceeded {
+			errMsg := fmt.Sprintf("Traffic quota exceeded for %s", source)
+			http.Error(w, errMsg, http.StatusTooManyRequests)
+			return
+		}
+	}
+
+	// Check all applicable request quotas
+	for source, quotaLimit := range requestQuotas {
+		var initialUsage int64
+		if usage, ok := p.config.QuotaUsage[source]; ok {
+			initialUsage = usage.RequestsUsed
+		}
+		quota, err := p.trafficShaper.GetRequestQuota(source, quotaLimit, initialUsage)
+		if err != nil {
+			log.Printf("[TRAFFIC] Error creating request quota for %s: %v", source, err)
+			continue
+		}
+		if !quota.AddRequest() {
+			errMsg := fmt.Sprintf("Request quota exceeded for %s", source)
+			http.Error(w, errMsg, http.StatusTooManyRequests)
+			return
+		}
+	}
+
+	// Get limiter
+	limiterKey := "global"
+	if user != nil {
+		limiterKey = username
+	} else {
+		limiterKey = getClientIP(r)
+	}
+	limiter, err := p.trafficShaper.GetLimiter(limiterKey, rateLimit)
+	if err != nil {
+		log.Printf("[TRAFFIC] Error creating limiter for CONNECT: %v", err)
+	}
+
+	// Get a tracking quota object for the writer
+	trackingQuota, _ := p.trafficShaper.GetTrafficQuota(limiterKey, "", 0)
+
 	destConn, err := net.DialTimeout("tcp", destHost, 10*time.Second)
 	if err != nil {
 		http.Error(w, "Failed to connect to destination", http.StatusServiceUnavailable)
@@ -130,15 +198,35 @@ func (p *MapRemoteProxy) handleConnectTunnel(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	// Wrap connections if limiter or quota is active
+	var clientReader io.Reader = clientConn
+	var destReader io.Reader = destConn
+
+	if limiter != nil || len(quotas) > 0 {
+		limitedClient := newLimitedReadWriteCloser(clientConn, limiter, trackingQuota)
+		clientReader = limitedClient
+
+		limitedDest := newLimitedReadWriteCloser(destConn, limiter, trackingQuota)
+		destReader = limitedDest
+	}
+
+	// Wrap for stats collection
+	statsClient := NewStatsReadWriteCloser(clientConn, p.stats)
+	statsDest := NewStatsReadWriteCloser(destConn, p.stats)
+
 	done := make(chan struct{}, 2)
 
 	go func() {
-		io.Copy(destConn, clientConn)
+		// client -> destination
+		// bytes written to statsDest are bytes received from client
+		io.Copy(statsDest, clientReader)
 		done <- struct{}{}
 	}()
 
 	go func() {
-		io.Copy(clientConn, destConn)
+		// destination -> client
+		// bytes written to statsClient are bytes sent to client
+		io.Copy(statsClient, destReader)
 		done <- struct{}{}
 	}()
 

@@ -1,724 +1,330 @@
-# Proxy Tool - 高级 HTTP/HTTPS 代理工具
+# Cato Proxy Service
 
-一个功能强大的、可配置的 HTTP/HTTPS 代理工具，支持 URL 重映射、请求/响应修改、认证、模块化代理池、动态 HAR 日志记录等高级功能。
+Cato Proxy Service 是一个功能强大、高度可配置、可编写脚本的 HTTP/HTTPS 代理服务器，专为开发、测试和网络调试而设计。它提供了对网络流量的精细控制，允许您检查、修改、重定向和模拟各种网络条件。
 
-## ✨ 核心特性
+## ✨ 功能特性
 
-- **🔄 双向数据处理**：修改请求/响应的 Headers 和 Body，支持正则匹配和替换。
-- **🔐 统一安全模型**：
-  - **用户/组认证**：可在服务器或单条规则上强制执行 `Proxy-Authorization` 认证。
-  - **自动 HTTPS 证书**：为所有服务器自动生成和管理 TLS 证书。
-- **modular 配置**：
-  - **命名服务器 (`servers`)**：定义多个可复用的监听端口，每个端口都是功能完整的代理服务器。
-  - **命名代理池 (`proxies`)**：创建可复用的上游代理服务器组，支持随机负载均衡。
-- **🎯 灵活的 URL 映射**：
-  - 字符串（支持 `*` 通配符）和正则表达式匹配。
-  - 将规则动态绑定到一个或多个 `servers`。
-  - 为规则绑定一个或多个 `proxies` 代理池。
-- **📊 动态调试与监控**：
-  - **按需 HAR 日志**：可在 `server`、`mapping`、`user` 或 `group` 级别上启用 HAR 日志记录。
-  - **配置热重载**：修改配置文件后自动应用新规则，无需重启。
-  - **Carbon Copy (`cc`)**：将请求实时复制到其他端点。
+- **多代理服务器**: 同时运行多个具有不同配置的 HTTP 和 HTTPS 代理服务器。
+- **高级请求/响应映射**:
+  - 根据 URL、方法、标头和查询参数将请求重定向到不同的目标。
+  - 将请求映射到本地文件系统以进行 API 模拟。
+  - 动态修改请求/响应的标头和查询参数。
+  - 支持从数组中随机选择标头值（例如 `Authorization` 令牌）。
+- **HTTPS 拦截**: 支持自动生成证书以拦截和解密 HTTPS 流量。
+- **上游代理链**: 将传出流量通过一个或多个上游代理进行路由，并可为代理本身配置策略。
+- **认证与授权**:
+  - 基于用户和组的精细访问控制。
+  - 可在服务器、映射规则、隧道等多个级别应用认证策略。
+- **安全隧道**: 创建加密的 WebSocket 隧道，用于安全地传输流量。
+- **请求/响应脚本**: 使用 Python 或 Node.js 脚本在请求处理的生命周期中动态修改请求和响应。
+- **连接与流量策略**:
+  - **连接策略**: 配置超时、空闲超时、最大并发连接数。
+  - **网络模拟**: 模拟不同的网络质量（丢包率）。
+  - **流量策略**: 对服务器、用户、组、代理、隧道或特定规则应用速率限制、流量配额和**请求次数配额**。
+- **配额持久化**: 自动将流量和请求次数的配额用量持久化到配置文件中。
+- **HAR 日志记录**: 将所有通过代理的流量捕获为 HAR (HTTP Archive) 文件，以便进行后续分析。
+- **实时配置重载**: 修改配置文件后，代理服务器可以自动重新加载配置，无需重启。
+- **内置管理端点**:
+  - `/.ssl`: 下载用于 HTTPS 拦截的根 CA 证书。
+  - `/.stats`: 查看实时的流量统计信息。
+  - `/.replay`: 重放捕获的请求。
 
 ## 🚀 快速开始
 
 ### 1. 安装
 
+确保您已经安装了 Go 语言环境。
+
 ```bash
-# 编译
-go build -o proxy_tool.exe .
+# 克隆仓库 (如果需要)
+# git clone ...
+
+# 构建可执行文件
+go build .
 ```
 
-### 2. 创建配置文件 `config.json`
+### 2. 配置
 
-这是新架构下的一个基本示例，它定义了一个监听 `8080` 端口的服务器和一个简单的 URL 映射规则。
+创建一个名为 `config.json` 的文件。您可以从 `config.example.json` 开始。这是一个基本的配置示例：
 
 ```json
 {
   "servers": {
-    "main": {
-      "port": 8080,
+    "http-proxy": {
+      "port": 8080
+    },
+    "https-proxy": {
+      "port": 8443,
       "cert": "auto"
     }
   },
   "mappings": [
     {
-      "from": "https://api.example.com/*",
-      "to": "https://backend.example.com/*",
-      "servers": ["main"]
+      "from": "http://example.com",
+      "to": "http://httpbin.org",
+      "servers": ["http-proxy", "https-proxy"]
+    },
+    {
+      "from": "http://api.example.com/v1/users",
+      "local": "/path/to/mock/users.json",
+      "servers": ["http-proxy", "https-proxy"]
     }
   ]
 }
 ```
 
-### 3. 启动代理
+这个配置启动了两个代理：
+- 一个在 `8080` 端口的 HTTP 代理。
+- 一个在 `8443` 端口的支持 HTTPS 拦截的 HTTPS 代理。
+
+它还定义了两条规则：
+1.  所有到 `http://example.com` 的请求都会被重定向到 `http://httpbin.org`。
+2.  所有到 `http://api.example.com/v1/users` 的请求将返回本地文件 `/path/to/mock/users.json` 的内容。
+
+### 3. 运行
 
 ```bash
-./proxy_tool.exe -config=config.json
+./cato-proxy-service -config=config.json
 ```
 
-### 4. 配置系统/浏览器代理
+### 4. 设置 HTTPS 拦截
 
-将你的操作系统或浏览器的 HTTP 和 HTTPS 代理设置为 `127.0.0.1:8080`。
+1.  将您的系统或浏览器的代理设置为 `127.0.0.1:8443`。
+2.  在浏览器中访问任意 HTTP 网站，然后导航到 `http://<any-domain>/.ssl` (例如 `http://example.com/.ssl`)。
+3.  下载 `cato_root_ca.crt` 证书文件。
+4.  将此证书导入到您的系统或浏览器的“受信任的根证书颁发机构”中。
 
-### 5. 下载并信任根证书
+完成这些步骤后，您就可以拦截和查看 HTTPS 流量了。
 
-为了让 HTTPS 代理正常工作，你需要信任本工具的根证书。启动工具后，通过**任意已配置的代理端口**访问 `/.ssl/cert.der` 即可下载。
+## 📚 配置指南
 
-例如，访问 `http://127.0.0.1:8080/.ssl/cert.der`，然后将下载的 `cert.der` 文件导入系统的“受信任的根证书颁发机构”中。
+### `servers`
 
-## 📖 配置详解
+定义代理服务器监听的端口和行为。
 
-### 顶层结构
+- `port`: (必需) 监听端口。
+- `cert`: (可选) 用于 HTTPS。可以是 `"auto"` 来自动生成证书，也可以是一个包含 `cert` 和 `key` 文件路径的对象。
+- `auth`: (可选) 为此服务器配置认证。
 
-新的配置结构是完全模块化的，由四个核心的顶层部分组成：`servers`、`proxies`、`auth` 和 `mappings`。
-
+**示例:**
 ```json
-{
-  "servers": {
-    "server_name_1": { ... },
-    "server_name_2": { ... }
+"servers": {
+  "main-proxy": {
+    "port": 8080
   },
-  "proxies": {
-    "proxy_group_1": [ ... ],
-    "proxy_group_2": [ ... ]
+  "secure-proxy": {
+    "port": 8443,
+    "cert": {
+      "cert": "./certs/server.crt",
+      "key": "./certs/server.key"
+    }
   },
-  "auth": {
-    "users": { ... },
-    "groups": { ... }
-  },
-  "p12s": {
-    "cert_name_1": { ... }
-  },
-  "mappings": [
-    { ... },
-    { ... }
-  ]
+  "intercept-proxy": {
+    "port": 9000,
+    "cert": "auto"
+  }
 }
 ```
 
----
+### `mappings`
 
-### 1. `servers` - 定义监听服务
+映射规则是 Cato Proxy 的核心。每个规则定义了如何处理匹配的请求。
 
-`servers` 是一个 `map`，用于定义一个或多个命名的监听服务器。**每个定义的 server 都是一个功能完整的代理**，可以处理所有类型的流量（普通代理、URL 映射、证书下载）。
+- `from`: (必需) 匹配传入请求的源。可以是 URL 字符串或一个详细的 `EndpointConfig` 对象。
+- `to`: (可选) 将请求转发到的目标。可以是 URL 字符串或 `EndpointConfig` 对象。
+- `local`: (可选) 将请求映射到本地文件或目录。`to` 和 `local` 必须至少有一个。
+- `servers`: (可选) 此规则适用的服务器名称列表。如果省略，则适用于所有服务器。
+- `proxy`: (可选) 为此规则指定一个或多个上游代理。
+- `script`: (可选) 为此规则配置请求/响应处理脚本。
+- `auth`: (可选) 为此规则配置认证。
 
+#### `EndpointConfig` 对象
+
+`from` 和 `to` 字段都可以使用 `EndpointConfig` 对象来进行更复杂的匹配和修改。
+
+- `url`: (必需) URL 字符串。
+- `method`: (可选) 匹配一个或多个 HTTP 方法，例如 `"GET"` 或 `["GET", "POST"]`。
+- `headers`: (可选) 匹配或修改请求/响应头。
+  - `{"Header-Name": "value"}`: 添加或覆盖标头。
+  - `{"Header-Name": null}`: 移除标头。
+  - `{"Header-Name": ["val1", "val2"]}`: 从列表中随机选择一个值。
+- `querystring`: (可选) 匹配或修改查询参数。
+  - `{"param": "value"}`: 添加或覆盖参数。
+  - `{"param": null}`: 移除参数。
+
+**示例:**
 ```json
 {
-  "servers": {
-    "main_proxy": {
-      "port": 8080,
-      "cert": "auto",
-      "auth": { "required": true },
-      "dump": "./logs/main_proxy.har"
-    },
-    "dev_server": {
-      "port": 3000,
-      "cert": {
-        "cert": "./.cert/dev.crt",
-        "key": "./.cert/dev.key"
-      }
+  "from": {
+    "url": "https://api.service.com/data",
+    "method": "POST",
+    "headers": {
+      "X-Client-ID": "required-client-id"
+    }
+  },
+  "to": {
+    "url": "https://internal-api.service.com/v2/data",
+    "headers": {
+      "Authorization": ["token1", "token2", "token3"], // 随机选择一个 token
+      "X-Client-ID": null // 移除原始的 X-Client-ID
     }
   }
 }
 ```
 
-**字段说明**：
+### `proxies`
 
-- `port` (必需): 监听的端口。
-- `cert` (可选): 证书配置。
-  - `"auto"`: 自动生成和管理证书。
-  - `object`: 指定自定义证书文件的路径。
-- `auth` (可选): 为此服务器启用全局认证。详情见 `auth` 部分。
-- `dump` (可选): 为所有通过此服务器的流量启用 HAR 日志记录（除非被更具体的规则覆盖）。
-- **连接策略**: `timeout`, `idleTimeout`, `maxThread`, `quality` (详情见下文)。
+定义可供 `mappings` 使用的上游代理。代理可以是一个简单的 URL 字符串、一个 URL 数组，或者一个包含策略的完整对象。
 
----
-
-### 2. `proxies` - 定义上游代理池
-
-`proxies` 是一个 `map`，用于定义可复用的上游代理服务器组。当一个 `mapping` 规则需要通过上游代理访问时，可以引用这里的配置。
-
+**示例:**
 ```json
-{
-  "proxies": {
-    "us_proxies": [
-      "http://user:pass@us-proxy1.com:8080",
-      "http://user:pass@us-proxy2.com:8080"
-    ],
-    "jp_proxies": [
-      "socks5://jp-proxy1.com:1080"
-    ],
-    "dynamic_proxies": "https://proxy-provider.com/list.txt"
+"proxies": {
+  "datacenter-proxy": "http://user:pass@proxy.example.com:8080",
+  "rotating-proxies": [
+    "http://proxy1.example.com:8000",
+    "http://proxy2.example.com:8000"
+  ],
+  "limited-proxy": {
+    "urls": ["http://proxy3.example.com:8000"],
+    "rateLimit": "500kbps",
+    "trafficQuota": "10gb"
   }
-}
+},
+"mappings": [
+  {
+    "from": "https://example.com",
+    "to": "https://example.com",
+    "proxy": "limited-proxy" // 使用带策略的代理
+  }
+]
 ```
 
-**功能说明**：
+### `auth`
 
-- **命名与复用**：方便地在多个 `mapping` 规则中共享和管理代理配置。
-- **负载均衡**：如果一个组内有多个代理地址，每次请求会**随机选择一个**使用。
-- **多种源格式**：
-  - **数组**：直接在 JSON 中定义代理列表。
-  - **本地文件**：提供一个文件路径，如 `"./proxies.txt"`。
-  - **远程 URL**：提供一个 URL，代理工具会定期（每5分钟）拉取更新。
+定义用户、组和访问策略。
 
----
-
-### 3. `auth` - 定义用户和组
-
-`auth` 块用于定义用户、密码和用户组，是实现认证功能的基础。
-
+**示例:**
 ```json
-{
-  "auth": {
-    "users": {
-      "admin": {
-        "password": "a_strong_password",
-        "groups": ["admins", "developers"],
-        "dump": "./logs/users/admin.har"
-      },
-      "guest": {
-        "password": "guest_password"
-      }
+"auth": {
+  "users": {
+    "alice": {
+      "password": "password123",
+      "groups": ["developers"]
     },
-    "groups": {
-      "developers": {
-        "comment": "Can access staging APIs",
-        "dump": "./logs/groups/dev.har"
-      },
-      "admins": {
-        "comment": "Full access"
-      }
+    "bob": {
+      "password": "password456"
+    }
+  },
+  "groups": {
+    "developers": {
+      "users": ["alice"]
     }
   }
-}
-```
-
-**字段说明**：
-
-- `users`: 定义用户名和对应的 `password`、`groups`、`dump` 以及连接策略。
-- `groups`: 定义用户组，可以关联 `dump` 配置和连接策略。
-
-认证通过 `Proxy-Authorization` HTTP Header 实现，采用 `Basic` 认证方案。
-
----
-
-### 4. `p12s` - 定义客户端证书
-
-`p12s` 是一个 `map`，用于注册和命名客户端证书（.p12 或 .pfx 文件），以便在 `mapping` 规则中引用以实现双向认证 (mTLS)。
-
-```json
-{
-  "p12s": {
-    "my_client_cert": {
-      "path": "./certs/client.p12",
-      "password": "p12_password"
+},
+"mappings": [
+  {
+    "from": "https://internal.dev",
+    "to": "http://localhost:3000",
+    "auth": {
+      "groups": ["developers"] // 只允许 'developers' 组的成员访问
     }
   }
-}
+]
 ```
 
-**字段说明**:
-- `path` (必需): `.p12` 或 `.pfx` 证书文件的路径。
-- `password` (必需): 证书文件的密码。
+### `scripting`
 
----
+使用外部脚本动态处理流量。脚本通过 stdin 接收一个 JSON 对象（包含请求/响应的详细信息），并通过 stdout 返回一个修改后的 JSON 对象。
 
-### 5. `mappings` - 定义路由和处理规则
+- `pythonPath`: (可选) Python 解释器的路径。
+- `nodePath`: (可选) Node.js 解释器的路径。
 
-`mappings` 是一个规则数组，是工具的核心。每条规则定义了如何匹配请求，并如何处理它。
-
+**示例:**
 ```json
-{
-  "from": "string | object",
-  "to": "string | object",
-  "local": "string (optional)",
-  "servers": ["string array (optional)"],
-  "proxy": ["string array (optional)"],
-  "p12": "string (optional)",
-  "endpoint": "string | string array (optional)",
-  "tunnel": "string | string array (optional)",
-  "auth": { ... },
-  "dump": "string (optional)",
-  "cc": ["string array (optional)"]
-}
+"scripting": {
+  "pythonPath": "/usr/bin/python3"
+},
+"mappings": [
+  {
+    "from": "https://api.example.com/user",
+    "to": "https://api.example.com/user",
+    "script": {
+      "onResponse": "./scripts/add_header.py"
+    }
+  }
+]
 ```
 
-**核心关联字段**：
+`add_header.py` 示例:
+```python
+import sys
+import json
 
-- `servers` (可选): 一个字符串数组，指定这条规则在哪些 `servers` 上生效。
-  - 如果 `from` 是**绝对 URL** (e.g., `https://...`)，规则在通过指定 `server` 代理时生效。
-  - 如果 `from` 是**相对 URL** (e.g., `/api/*`)，规则在直接访问指定 `server` 时生效。
-  - **如果不提供 `servers`**，规则默认在**所有**定义的 `servers` 上生效。
-- `proxy` (可选): 一个字符串数组，指定请求匹配后，使用哪些在 `proxies` 中定义的代理池。每次请求会从所有指定的代理池中随机选择一个代理地址。
-- `p12` (可选): 一个字符串，引用在 `p12s` 中定义的客户端证书名称。如果提供，代理在转发此请求时会带上该证书，用于 mTLS 认证。
-- `auth` (可选): 为单条规则定义认证要求。
-  - `{"users": ["admin"], "groups": ["developers"]}`: 允许 `admin` 用户或 `developers` 组的成员访问。
-  - `{"required": true}`: 允许任何已定义的用户访问。
-- `dump` (可选): 为匹配此规则的流量启用 HAR 日志。
-- `endpoint` (可选): 一个字符串或字符串数组，引用 `endpoint` 客户端的名称。用于将请求通过隧道转发到内网机器。如果提供了多个名称，将从在线的客户端中随机选择一个。**`endpoint` 优先于 `tunnel`**。
-- `tunnel` (可选): 一个字符串或字符串数组，引用 `tunnels` 中定义的隧道名称。用于将请求随机转发到属于该隧道的**任何一个在线 `endpoint`**。
-- **连接策略**: `timeout`, `idleTimeout`, `maxThread`, `quality` (详情见下文)。
+def main():
+    data = json.load(sys.stdin)
+    
+    # 在响应中添加一个新标头
+    if 'headers' not in data['response']:
+        data['response']['headers'] = {}
+    data['response']['headers']['X-Processed-By'] = ['Cato-Proxy-Script']
+    
+    # 将修改后的数据写回 stdout
+    json.dump(data, sys.stdout)
 
-### `from` 和 `to` 的详细配置
-
-`from` 和 `to` 对象内部的配置保持不变，支持 `url`, `headers`, `querystring`, `match`, `replace` 等。
-
----
-
-## 🎓 使用示例
-
-### 示例 1: 基础设置 - 多服务器与规则绑定
-
-定义一个公共代理和一个内部开发服务器，并将不同的规则绑定到它们上面。
-
-```json
-{
-  "servers": {
-    "public_proxy": { "port": 8080, "cert": "auto" },
-    "dev_server": { "port": 3000 }
-  },
-  "mappings": [
-    {
-      "comment": "规则1: 仅在公共代理上生效",
-      "from": "https://api.openai.com/*",
-      "to": "https://api.openai.com/*",
-      "servers": ["public_proxy"]
-    },
-    {
-      "comment": "规则2: 托管本地文件，仅在开发服务器上生效",
-      "from": "/static/*",
-      "local": "./static/*",
-      "servers": ["dev_server"]
-    },
-    {
-      "comment": "规则3: 在两个服务器上都生效",
-      "from": "https://api.google.com/*",
-      "to": "https://api.google.com/*",
-      "servers": ["public_proxy", "dev_server"]
-    }
-  ]
-}
+if __name__ == "__main__":
+    main()
 ```
 
-**访问方式**：
+### 策略
 
-- 浏览器代理设为 `127.0.0.1:8080`，访问 `https://api.openai.com` 会触发规则1。
-- 直接访问 `http://localhost:3000/static/app.js` 会触发规则2。
-- 无论使用哪个代理，访问 `https://api.google.com` 都会触发规则3。
+策略可以在 `servers`、`mappings`、`tunnels`、`proxies`、`users` 和 `groups` 等多个级别上定义。生效的策略将是所有适用策略中最严格的一个（例如，最低的超时时间，最低的速率限制）。
 
-### 示例 2: 使用命名代理池
+- **`ConnectionPolicies`**:
+  - `timeout`: 连接超时（秒）。
+  - `idleTimeout`: 空闲超时（秒）。
+  - `maxThread`: 最大并发连接数。
+  - `quality`: 网络质量模拟（0.0 到 1.0，1.0 表示无丢包）。
+- **`TrafficPolicies`**:
+  - `rateLimit`: 速率限制，例如 `"500kbps"` 或 `"1mbps"`。
+  - `trafficQuota`: 流量配额，例如 `"500mb"` 或 `"10gb"`。
+  - `requestQuota`: 请求次数配额，例如 `1000`。
 
-定义可复用的代理池，并在规则中按需使用。
-
+**示例:**
 ```json
-{
-  "servers": { "main": { "port": 8080, "cert": "auto" } },
-  "proxies": {
-    "us_pool": [
-      "http://proxy1.us.com:8080",
-      "http://proxy2.us.com:8080"
-    ],
-    "eu_pool": [
-      "http://proxy1.eu.com:8080"
-    ]
-  },
-  "mappings": [
-    {
-      "comment": "访问 Anthropic API 时，使用美国代理池",
-      "from": "https://api.anthropic.com/*",
-      "to": "https://api.anthropic.com/*",
-      "proxy": ["us_pool"]
-    },
-    {
-      "comment": "访问 Google API 时，从美国或欧洲代理池中随机选择",
-      "from": "https://api.google.com/*",
-      "to": "https://api.google.com/*",
-      "proxy": ["us_pool", "eu_pool"]
-    }
-  ]
-}
-```
-
-### 示例 3: 认证系统
-
-实现一个需要认证的服务器，并为特定规则设置更精细的访问控制。
-
-```json
-{
-  "servers": {
-    "secure_proxy": {
-      "port": 8443,
-      "cert": "auto",
-      "auth": { "required": true }
-    }
-  },
-  "auth": {
-    "users": {
-      "admin": { "password": "admin_pass", "groups": ["admins"] },
-      "dev": { "password": "dev_pass", "groups": ["developers"] }
-    },
-    "groups": {
-      "admins": {},
-      "developers": {}
-    }
-  },
-  "mappings": [
-    {
-      "comment": "只有 admin 用户可以访问这个 API",
-      "from": "https://admin.example.com/*",
-      "to": "https://backend.example.com/admin/*",
-      "auth": { "users": ["admin"] }
-    },
-    {
-      "comment": "所有用户都可以访问这个",
-      "from": "https://general.example.com/*",
-      "to": "https://backend.example.com/general/*"
-    }
-  ]
-}
-```
-
-**效果**：
-
-- 所有通过 `8443` 端口的请求都必须提供有效的用户名和密码。
-- 即使 `dev` 用户通过了服务器认证，他也无法访问 `https://admin.example.com`，因为规则级别有更严格的限制。
-
-### 示例 4: 动态 HAR 日志记录
-
-根据不同的维度（服务器、用户、规则）记录 HAR 日志。
-
-```json
-{
-  "servers": {
-    "main": {
-      "port": 8080,
-      "cert": "auto",
-      "dump": "./logs/default.har"
-    }
-  },
-  "auth": {
-    "users": {
-      "inspector": {
-        "password": "a_password",
-        "dump": "./logs/inspector_user.har"
-      }
-    }
-  },
-  "mappings": [
-    {
-      "comment": "这是一个需要重点监控的 API，单独记录",
-      "from": "https://critical.api.com/*",
-      "to": "https://backend.critical.com/*",
-      "dump": "./logs/critical_api.har"
-    }
-  ]
-}
-```
-
-**HAR 文件记录行为**:
-
-如果一个请求同时命中了多个层级（`server`, `group`, `user`, `mapping`）的 `dump` 配置，该请求的流量将被**同时记录到所有**指定的 HAR 文件中。
-
-**场景分析**：
-
-假设 `inspector` 用户属于 `developers` 组，且 `developers` 组的配置为 `"dump": "./logs/dev_group.har"`。
-
-- `inspector` 用户访问 `https://critical.api.com`:
-  - 日志将被写入 **3** 个文件:
-    1. `./logs/critical_api.har` (来自 mapping)
-    2. `./logs/inspector_user.har` (来自 user)
-    3. `./logs/dev_group.har` (来自 group)
-- `inspector` 用户访问其他网站:
-  - 日志将被写入 **3** 个文件:
-    1. `./logs/default.har` (来自 server)
-    2. `./logs/inspector_user.har` (来自 user)
-    3. `./logs/dev_group.har` (来自 group)
-- 其他匿名用户访问 `https://critical.api.com`:
-  - 日志将被写入 **1** 个文件:
-    1. `./logs/critical_api.har` (来自 mapping)
-- 其他匿名用户访问其他网站:
-  - 日志将被写入 **1** 个文件:
-    1. `./logs/default.har` (来自 server)
-
----
-
-### 示例 5: 连接控制与弱网模拟
-
-你可以通过在 `server`, `mapping`, `group`, 或 `user` 级别上设置连接策略来精细化控制请求行为。
-
-**策略字段**:
-- `timeout` (整数, 秒): 整个请求的超时时间，从发送请求到接收完响应。默认 `600` (10分钟)。
-- `idleTimeout` (整数, 秒): 连接空闲超时时间。默认 `100`。
-- `maxThread` (整数): 并发请求数限制。超过限制的请求将收到 `429 Too Many Requests` 错误。默认无限制。
-- `quality` (浮点数, 0.0-1.0): 模拟网络质量。`1.0` 为正常速度，`0.5` 为 50% 的速度。这会通过限制响应体的读取速率来实现。
-
-**优先级**:
-策略应用的优先级为 `user` > `group` > `mapping` > `server`。例如，如果一个 `user` 和一个 `mapping` 都定义了 `timeout`，将使用 `user` 中定义的值。
-
-```json
-{
-  "servers": {
-    "main": {
-      "port": 8080,
-      "cert": "auto",
-      "maxThread": 100
-    }
-  },
-  "auth": {
-    "users": {
-      "vip_user": {
-        "password": "vip_password",
-        "timeout": 120
-      }
-    }
-  },
-  "mappings": [
-    {
-      "comment": "对大文件下载进行限速并设置更长的超时",
-      "from": "https://files.example.com/*",
-      "to": "https://backend.files.com/*",
-      "timeout": 1800,
-      "quality": 0.2
-    },
-    {
-      "comment": "普通 API 请求",
-      "from": "https://api.example.com/*",
-      "to": "https://backend.api.com/*",
-      "timeout": 30
-    }
-  ]
-}
-```
-
-**效果分析**:
-- **普通用户** 访问 `https://files.example.com` 时:
-  - `timeout` 为 `1800` 秒 (来自 mapping)。
-  - `quality` 为 `0.2` (下载速度被限制)。
-  - `maxThread` 为 `100` (来自 server)。
-- **`vip_user`** 访问 `https://api.example.com` 时:
-  - `timeout` 为 `120` 秒 (来自 user，优先级最高)。
-  - `quality` 为 `1.0` (默认值)。
-  - `maxThread` 为 `100` (来自 server)。
-
----
-
-### 示例 6: 双向认证 (mTLS)
-
-此示例展示了如何配置一个需要客户端证书的 API。
-
-```json
-{
-  "servers": {
-    "main": { "port": 8080, "cert": "auto" }
-  },
-  "p12s": {
-    "api_cert": {
-      "path": "./certs/my_api_client_cert.p12",
-      "password": "cert_password"
-    }
-  },
-  "mappings": [
-    {
-      "comment": "访问需要 mTLS 的内部 API",
-      "from": "https://secure.internal.api/*",
-      "to": "https://backend.internal.api/*",
-      "p12": "api_cert"
-    }
-  ]
-}
-```
-
-**效果**:
-当通过代理访问 `https://secure.internal.api/some/path` 时，代理会在 TLS 握手期间向 `backend.internal.api` 服务器出示 `my_api_client_cert.p12` 证书。如果后端服务器验证此证书，连接将成功建立。
-
----
-
-### 示例 7: NAT 穿透 (Tunnels & Endpoints)
-
-此功能允许你在 NAT 或防火墙后的机器上运行一个 `endpoint` 客户端，并让主代理服务器通过一个安全的 `tunnel` 将请求转发给它。
-
-**工作流程**:
-
-1. 在主配置文件中定义一个 `tunnel`，并指定哪些 `servers` 作为入口。
-2. 在远程机器上启动 `endpoint` 客户端，并连接到指定的 `server` 入口。
-3. 在 `mapping` 规则中，使用 `endpoint` 字段指定将请求路由到哪个 `endpoint`。
-
-#### 1. 新的顶层配置: `tunnels`
-
-`tunnels` 是一个新的顶层 `map`，用于定义命名的隧道。
-
-```json
-{
-  "tunnels": {
-    "home_lab": {
-      "servers": ["public_proxy"],
-      "password": "secure_tunnel_password"
+"auth": {
+  "users": {
+    "free_user": {
+      "password": "password",
+      "rateLimit": "100kbps",
+      "trafficQuota": "1gb",
+      "requestQuota": 10000
     }
   }
 }
 ```
 
-- `servers` (必需): 一个字符串数组，引用 `servers` 配置中定义的服务器名称。这些服务器将监听来自 `endpoint` 客户端的 WebSocket 连接。
-- `password` (可选): 为隧道流量提供端到端加密的密码。如果提供，所有通过此隧道的数据都将使用 AES-GCM 加密。
+### 配额用量持久化
 
-#### 2. 在规则中使用 `endpoint`
-
-你可以在 `mapping`, `user`, `group`, 或 `server` 级别上添加 `endpoint` 字段，以指定请求应通过哪个 `endpoint` 客户端执行。
-
-- `endpoint` (可选): 一个字符串数组，指定 `endpoint` 客户端的名称。如果提供了多个名称，代理将从当前在线的 `endpoint` 中随机选择一个。
-
-#### 3. 启动 `endpoint` 客户端
-
-`endpoint` 是一个独立的程序。你需要在远程机器上编译并运行它。
-
-```bash
-# 编译 endpoint
-go build -o endpoint.exe ./endpoint
-
-# 运行 endpoint
-./endpoint.exe \
-  -server="ws://your_proxy_domain:8080/.tunnel" \
-  -name="home_lab_endpoint_1" \
-  -tunnel="home_lab" \
-  -password="secure_tunnel_password"
-```
-
-**命令行参数**:
-
-- `-server`: 主代理服务器的 WebSocket 入口地址。路径固定为 `/.tunnel`。
-- `-name`: 此 `endpoint` 客户端的唯一名称。
-- `-tunnel`: 此 `endpoint` 想要加入的 `tunnel` 名称（必须在 `config.json` 中已定义）。
-- `-password`: 与 `tunnel` 配置中匹配的密码。
-
-#### 4. 完整配置示例
+为了防止因服务重启导致配额用量重置，Cato Proxy 会自动将当前的流量和请求次数用量每 10 秒钟同步回您的 `config.json` 文件中。这些数据会保存在顶级的 `quotaUsage` 字段下。
 
 ```json
 {
-  "servers": {
-    "public_proxy": { "port": 8080, "cert": "auto" }
-  },
-  "tunnels": {
-    "home_lab": {
-      "servers": ["public_proxy"],
-      "password": "a_secure_password"
+  "...": "...",
+  "quotaUsage": {
+    "user:free_user": {
+      "trafficUsed": 12345678,
+      "requestsUsed": 890
     }
-  },
-  "mappings": [
-    {
-      "comment": "将对内网服务的请求转发到家庭实验室的 endpoint",
-      "from": "https://internal.service.com/*",
-      "to": "http://192.168.1.100:80/*",
-      "endpoint": ["home_lab_endpoint_1", "home_lab_endpoint_2"]
-    }
-  ]
+  }
 }
 ```
+服务在启动时会自动加载这些用量数据，确保配额的持续性。
 
-**效果**:
+## 💡 用例
 
-1. `endpoint` 客户端 `home_lab_endpoint_1` 和 `home_lab_endpoint_2` 启动并连接到 `public_proxy` 服务器的 `ws://...:8080/.tunnel`。
-2. 当一个外部请求通过 `public_proxy` 访问 `https://internal.service.com/some/path` 时，代理会匹配到该规则。
----
-
-### 高级路由功能
-
-#### 示例 8: 按 Tunnel 名称路由 (负载均衡)
-
-此功能允许你将请求路由到一个 `tunnel`，而不是一个具体的 `endpoint`。代理会自动从该 `tunnel` 中所有在线的 `endpoint` 客户端中随机选择一个来处理请求，从而实现负载均衡和高可用。
-
-```json
-{
-  "servers": {
-    "public_proxy": { "port": 8080, "cert": "auto" }
-  },
-  "tunnels": {
-    "prod_cluster": {
-      "servers": ["public_proxy"],
-      "password": "a_secure_password"
-    }
-  },
-  "mappings": [
-    {
-      "comment": "将请求随机分发到 'prod_cluster' 隧道中的任一在线 endpoint",
-      "from": "https://api.cluster.service/*",
-      "to": "http://localhost:9000/*",
-      "tunnel": "prod_cluster"
-    }
-  ]
-}
-```
-
-**工作流程**:
-
-1.  多个 `endpoint` 客户端（例如 `endpoint-1`, `endpoint-2`, `endpoint-3`）都使用 `-tunnel="prod_cluster"` 参数启动，并连接到 `public_proxy`。
-2.  当外部请求访问 `https://api.cluster.service/data` 时，代理会匹配到该规则。
-3.  代理会查看 `prod_cluster` 隧道中当前所有在线的 `endpoint` 列表。
-4.  它会从列表中随机选择一个（例如 `endpoint-2`），并将请求通过隧道转发给它。
-5.  `endpoint-2` 在其本地网络中请求 `http://localhost:9000/data` 并返回响应。
-
-**路由优先级**:
-
-如果一个规则同时定义了 `endpoint` 和 `tunnel`，**`endpoint` 的优先级更高**。代理会首先尝试查找并使用 `endpoint` 字段中指定的客户端。
-
-#### 示例 9: 最精确路由匹配
-
-当多个 `mapping` 规则的 `from` URL 模式可以同时匹配一个请求时，代理会选择**最具体**的那条规则。
-
-**匹配评分规则**:
-
-1.  URL 模式匹配 (基础分)。
-2.  **HTTP 方法 (`method`) 匹配**: +10 分。
-3.  每个匹配的 **Header**: +1 分。
-4.  每个匹配的 **Query String**: +1 分。
-
-**配置示例**:
-
-假设有以下两条规则：
-
-```json
-{
-  "mappings": [
-    {
-      "comment": "规则 A: 通用规则，匹配所有 GET 请求",
-      "from": {
-        "url": "/api/users/*",
-        "method": "GET"
-      },
-      "to": "http://service-a.com/users/*"
-    },
-    {
-      "comment": "规则 B: 特殊规则，仅当特定 Header 存在时匹配",
-      "from": {
-        "url": "/api/users/*",
-        "method": "GET",
-        "headers": {
-          "X-User-Role": "admin"
-        }
-      },
-      "to": "http://service-b.com/admin/users/*"
-    }
-  ]
-}
-```
-
-**场景分析**:
-
-1.  一个普通的 `GET /api/users/123` 请求到达:
-    -   规则 A: 匹配 URL 和 `method` (得分: 1 + 10 = 11)。
-    -   规则 B: 匹配 URL 和 `method`，但不匹配 `header` (得分: 1 + 10 = 11)。
-    -   在这种情况下，由于分数相同，可能会选择先定义的规则 A。
-
-2.  一个带有 `X-User-Role: admin` Header 的 `GET /api/users/456` 请求到达:
-    -   规则 A: 匹配 URL 和 `method` (得分: 1 + 10 = 11)。
-    -   规则 B: 匹配 URL、`method` 和 `header` (得分: 1 + 10 + 1 = 12)。
-    -   **结果**: 由于规则 B 的分数更高，代理将选择规则 B，并将请求转发到 `http://service-b.com/admin/users/456`。
-
-3. 代理发现规则需要 `endpoint`，它会选择一个当前在线的 `endpoint` (例如 `home_lab_endpoint_1`)。
-4. 请求被安全地转发到 `home_lab_endpoint_1`。
-5. `endpoint` 客户端在本地网络中执行对 `http://192.168.1.100:80/some/path` 的请求，并将响应通过隧道安全地传回。
-
-## 📄 许可证
-
-MIT License
+- **API 开发与模拟**: 使用 `local` 规则返回静态 JSON 文件，模拟后端 API。
+- **安全测试**: 使用随机的 `Authorization` 标头来测试端点的认证和授权逻辑。
+- **性能测试**: 使用 `quality` 和 `rateLimit` 模拟慢速或不稳定的网络环境。
+- **A/B 测试**: 将部分用户流量重定向到新版本的服务。
+- **流量调试**: 拦截和检查移动应用或第三方服务的 HTTPS 流量。
+- **API 网关**: 作为简单的 API 网关，为用户或用户组提供速率限制和配额管理。

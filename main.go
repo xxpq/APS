@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/tls"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -10,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 )
 
 func main() {
@@ -33,6 +35,10 @@ func main() {
 	defer harManager.Shutdown()
 
 	tunnelManager := NewTunnelManager(config)
+	scriptRunner := NewScriptRunner(config.Scripting)
+	trafficShaper := NewTrafficShaper()
+	statsCollector := NewStatsCollector()
+	replayManager := NewReplayManager(config)
 
 	// The main proxy logic is now handled by each server's handler
 	// proxy := NewMapRemoteProxy(config, harLogger)
@@ -44,7 +50,9 @@ func main() {
 	watcher.Start()
 	defer watcher.Stop()
 
-	startServers(config, harManager, tunnelManager)
+	startServers(config, harManager, tunnelManager, scriptRunner, trafficShaper, statsCollector, replayManager)
+
+	startQuotaPersistence(config, trafficShaper, *configFile)
 
 	log.Println("===========================================")
 	log.Printf("Loaded %d mapping rules:", len(config.Mappings))
@@ -65,7 +73,7 @@ func main() {
 	log.Println("\nShutting down servers...")
 }
 
-func startServers(config *Config, harManager *HarLoggerManager, tunnelManager *TunnelManager) {
+func startServers(config *Config, harManager *HarLoggerManager, tunnelManager *TunnelManager, scriptRunner *ScriptRunner, trafficShaper *TrafficShaper, stats *StatsCollector, replayManager *ReplayManager) {
 	// 将 mappings 按 server name 分组
 	serverMappings := make(map[string][]*Mapping)
 	for i := range config.Mappings {
@@ -81,14 +89,14 @@ func startServers(config *Config, harManager *HarLoggerManager, tunnelManager *T
 		if serverConfig == nil {
 			continue
 		}
-		handler := createServerHandler(name, mappings, serverConfig, config, harManager, tunnelManager)
+		handler := createServerHandler(name, mappings, serverConfig, config, harManager, tunnelManager, scriptRunner, trafficShaper, stats, replayManager)
 		go startServer(name, serverConfig, handler)
 	}
 }
 
-func createServerHandler(serverName string, mappings []*Mapping, serverConfig *ListenConfig, config *Config, harManager *HarLoggerManager, tunnelManager *TunnelManager) http.Handler {
+func createServerHandler(serverName string, mappings []*Mapping, serverConfig *ListenConfig, config *Config, harManager *HarLoggerManager, tunnelManager *TunnelManager, scriptRunner *ScriptRunner, trafficShaper *TrafficShaper, stats *StatsCollector, replayManager *ReplayManager) http.Handler {
 	mux := http.NewServeMux()
-	proxy := NewMapRemoteProxy(config, harManager, tunnelManager, serverName)
+	proxy := NewMapRemoteProxy(config, harManager, tunnelManager, scriptRunner, trafficShaper, stats, serverName)
 
 	// 检查此 server 是否为 tunnel 接入点
 	if tunnel := tunnelManager.GetTunnelForServer(serverName); tunnel != nil {
@@ -103,6 +111,12 @@ func createServerHandler(serverName string, mappings []*Mapping, serverConfig *L
 		certHandlers := &CertHandlers{}
 		certHandlers.RegisterHandlers(mux)
 	}
+
+	// 添加统计数据端点
+	mux.HandleFunc("/.stats", stats.ServeHTTP)
+
+	// 添加重放端点
+	mux.HandleFunc("/.replay", replayManager.ServeHTTP)
 
 	// 创建一个统一的处理器来处理所有请求
 	mainHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -170,4 +184,50 @@ func startServer(name string, config *ListenConfig, handler http.Handler) {
 			}
 		}()
 	}
+}
+func startQuotaPersistence(config *Config, trafficShaper *TrafficShaper, configFile string) {
+	ticker := time.NewTicker(10 * time.Second)
+	go func() {
+		for range ticker.C {
+			trafficShaper.quotas.Range(func(key, value interface{}) bool {
+				sourceKey := key.(string)
+				if tq, ok := value.(*TrafficQuota); ok {
+					if config.QuotaUsage == nil {
+						config.QuotaUsage = make(map[string]*QuotaUsageData)
+					}
+					if _, ok := config.QuotaUsage[sourceKey]; !ok {
+						config.QuotaUsage[sourceKey] = &QuotaUsageData{}
+					}
+					config.QuotaUsage[sourceKey].TrafficUsed = tq.Used
+				} else if rq, ok := value.(*RequestQuota); ok {
+					if config.QuotaUsage == nil {
+						config.QuotaUsage = make(map[string]*QuotaUsageData)
+					}
+					if _, ok := config.QuotaUsage[sourceKey]; !ok {
+						config.QuotaUsage[sourceKey] = &QuotaUsageData{}
+					}
+					config.QuotaUsage[sourceKey].RequestsUsed = rq.Used
+				}
+				return true
+			})
+			if err := saveConfig(config, configFile); err != nil {
+				log.Printf("[QUOTA] Error saving quota usage: %v", err)
+			}
+		}
+	}()
+}
+
+func saveConfig(config *Config, filename string) error {
+	config.mu.Lock()
+	defer config.mu.Unlock()
+
+	file, err := os.OpenFile(filename, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	encoder := json.NewEncoder(file)
+	encoder.SetIndent("", "  ")
+	return encoder.Encode(config)
 }
