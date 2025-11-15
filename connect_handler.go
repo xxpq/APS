@@ -2,7 +2,6 @@ package main
 
 import (
 	"bufio"
-	"bytes"
 	"crypto/tls"
 	"fmt"
 	"io"
@@ -102,17 +101,25 @@ func (p *MapRemoteProxy) handleConnectWithMITM(w http.ResponseWriter, r *http.Re
 }
 
 func (p *MapRemoteProxy) handleConnectTunnel(w http.ResponseWriter, r *http.Request, destHost string) {
+	startTime := time.Now()
 	p.stats.IncTotalRequests()
 	p.stats.IncActiveConnections()
 	defer p.stats.DecActiveConnections()
 
+	var isError bool
+	var userKey string
+
 	// Auth and policy resolution for CONNECT should happen before tunneling
 	_, user, username := p.checkAuth(r, nil) // No specific mapping for pure CONNECT
+	if user != nil {
+		userKey = username
+	}
 
 	serverConfig := p.config.Servers[p.serverName]
 	// For a simple tunnel, we don't have a mapping or tunnel context
 	rateLimit, quotas, requestQuotas, err := p.config.ResolveTrafficPolicies(serverConfig, nil, nil, nil, user, username)
 	if err != nil {
+		isError = true
 		log.Printf("[TRAFFIC] Error resolving traffic policies for CONNECT: %v", err)
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
@@ -132,6 +139,7 @@ func (p *MapRemoteProxy) handleConnectTunnel(w http.ResponseWriter, r *http.Requ
 			continue
 		}
 		if quota.Exceeded {
+			isError = true
 			errMsg := fmt.Sprintf("Traffic quota exceeded for %s", source)
 			http.Error(w, errMsg, http.StatusTooManyRequests)
 			return
@@ -152,6 +160,7 @@ func (p *MapRemoteProxy) handleConnectTunnel(w http.ResponseWriter, r *http.Requ
 			continue
 		}
 		if !quota.AddRequest() {
+			isError = true
 			errMsg := fmt.Sprintf("Request quota exceeded for %s", source)
 			http.Error(w, errMsg, http.StatusTooManyRequests)
 			return
@@ -175,6 +184,7 @@ func (p *MapRemoteProxy) handleConnectTunnel(w http.ResponseWriter, r *http.Requ
 
 	destConn, err := net.DialTimeout("tcp", destHost, 10*time.Second)
 	if err != nil {
+		isError = true
 		http.Error(w, "Failed to connect to destination", http.StatusServiceUnavailable)
 		log.Printf("Error connecting to %s: %v", destHost, err)
 		return
@@ -183,12 +193,14 @@ func (p *MapRemoteProxy) handleConnectTunnel(w http.ResponseWriter, r *http.Requ
 
 	hijacker, ok := w.(http.Hijacker)
 	if !ok {
+		isError = true
 		http.Error(w, "Hijacking not supported", http.StatusInternalServerError)
 		return
 	}
 
 	clientConn, _, err := hijacker.Hijack()
 	if err != nil {
+		isError = true
 		http.Error(w, "Failed to hijack connection", http.StatusServiceUnavailable)
 		log.Printf("Error hijacking connection: %v", err)
 		return
@@ -197,96 +209,60 @@ func (p *MapRemoteProxy) handleConnectTunnel(w http.ResponseWriter, r *http.Requ
 
 	_, err = clientConn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n"))
 	if err != nil {
+		isError = true
 		log.Printf("Error writing 200 OK to client: %v", err)
 		return
 	}
 
-	// Wrap connections if limiter or quota is active
+	var clientWriter io.Writer = clientConn
+	var destWriter io.Writer = destConn
 	var clientReader io.Reader = clientConn
 	var destReader io.Reader = destConn
 
 	if limiter != nil || len(quotas) > 0 {
 		limitedClient := newLimitedReadWriteCloser(clientConn, limiter, trackingQuota)
+		clientWriter = limitedClient
 		clientReader = limitedClient
 
 		limitedDest := newLimitedReadWriteCloser(destConn, limiter, trackingQuota)
+		destWriter = limitedDest
 		destReader = limitedDest
 	}
 
-	// Wrap for stats collection
-	statsClient := NewStatsReadWriteCloser(clientConn, p.stats)
-	statsDest := NewStatsReadWriteCloser(destConn, p.stats)
-
+	var bytesSent, bytesRecv int64
 	done := make(chan struct{}, 2)
 
 	go func() {
-		// client -> destination
-		// bytes written to statsDest are bytes received from client
-		io.Copy(statsDest, clientReader)
+		// client -> destination (upload)
+		n, _ := io.Copy(destWriter, clientReader)
+		bytesRecv = n
 		done <- struct{}{}
 	}()
 
 	go func() {
-		// destination -> client
-		// bytes written to statsClient are bytes sent to client
-		io.Copy(statsClient, destReader)
+		// destination -> client (download)
+		n, _ := io.Copy(clientWriter, destReader)
+		bytesSent = n
 		done <- struct{}{}
 	}()
 
 	<-done
-	log.Printf("[CONNECT] %s - Connection closed", r.Host)
+	<-done // Wait for both goroutines to finish
+
+	responseTime := time.Since(startTime)
+	p.stats.AddBytesSent(uint64(bytesSent))
+	p.stats.AddBytesRecv(uint64(bytesRecv))
+	p.stats.Record(RecordData{
+		// No rule for pure CONNECT tunnel
+		UserKey:      userKey,
+		ServerKey:    p.serverName,
+		BytesSent:    uint64(bytesSent),
+		BytesRecv:    uint64(bytesRecv),
+		ResponseTime: responseTime,
+		IsError:      isError,
+	})
+
+	log.Printf("[CONNECT] %s - Connection closed. Sent: %d, Recv: %d", r.Host, bytesSent, bytesRecv)
 }
 
-// modifyResponseBody 移动到 http_handler.go
-func (p *MapRemoteProxy) modifyResponseBody(resp *http.Response, mapping *Mapping) ([]byte, error) {
-	if resp.Body == nil {
-		return nil, nil
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-	resp.Body = io.NopCloser(bytes.NewBuffer(body))
-
-	if mapping == nil {
-		return body, nil
-	}
-
-	toConfig := mapping.GetToConfig()
-	if toConfig == nil {
-		return body, nil
-	}
-
-	if toConfig.Match != "" {
-		re, err := compileRegex(toConfig.Match)
-		if err != nil {
-			log.Printf("Invalid match regex in 'to' config: %v", err)
-			return body, nil
-		}
-		matches := re.FindSubmatch(body)
-		if len(matches) > 1 {
-			body = matches[1]
-			log.Printf("[RESPONSE MATCH] Extracted %d bytes from response body", len(body))
-		} else {
-			body = []byte{}
-			log.Printf("[RESPONSE MATCH] No match found, returning empty body")
-		}
-	}
-
-	if len(toConfig.Replace) > 0 {
-		tempBody := string(body)
-		for key, value := range toConfig.Replace {
-			re, err := compileRegex(key)
-			if err != nil {
-				log.Printf("Invalid replace regex in 'to' config: %v", err)
-				continue
-			}
-			tempBody = re.ReplaceAllString(tempBody, value)
-			log.Printf("[RESPONSE REPLACE] Applied replacement: %s -> %s", key, value)
-		}
-		body = []byte(tempBody)
-	}
-
-	return body, nil
-}
+// modifyResponseBody is now only in http_handler.go

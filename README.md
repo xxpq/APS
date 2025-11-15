@@ -118,7 +118,10 @@ go build .
     -   **远程目标**: `http://...`, `https://://...`, `ws://...`
     -   **本地文件/目录**: `file:///path/to/your/file` 或 `file://./relative/path`
 -   `servers`: (可选) `array` of `string`。此规则适用的服务器名称列表。如果省略，则适用于所有服务器。
+-   `tunnel`: (可选) `string`。指定请求通过哪个隧道 (`tunnels` 中定义) 发送到远程端点。
+-   `endpoint`: (可选) `string`。指定请求通过哪个端点 (`endpoints` 中定义) 发送。端点是隧道的具体入口。
 -   `proxy`: (可选) `string` 或 `array` of `string`。为这条规则指定一个或多个上游代理 (在 `proxies` 中定义)。
+-   `cc`: (可选) `array` of `string`。将请求“抄送”(Carbon Copy) 到一个或多个额外的目标 URL。这些请求是异步发送的，不会影响主请求的响应。
 -   `auth`: (可选) `object`。为此规则覆盖服务器级别的认证，或为无认证的服务器添加认证。
 -   `dump`: (可选) `string`。HAR 文件路径，仅记录匹配此规则的流量。
 -   `p12`: (可选) `string`。指定一个在 `p12s` 中定义的 P12 客户端证书，用于与目标服务器进行 mTLS 通信。
@@ -151,20 +154,16 @@ go build .
 ```json
 "mappings": [
   {
-    "from": {
-      "url": "http://api.service.com/users/*",
-      "method": "POST",
-      "headers": { "X-Client-ID": "app-v1" }
-    },
-    "to": {
-      "url": "http://internal.service.com/users/*",
-      "headers": {
-        "X-Forwarded-For": null, // 移除 X-Forwarded-For
-        "Authorization": ["token1", "token2"] // 随机使用一个 token
-      }
-    },
+    "from": "http://api.service.com/users/*",
+    "to": "http://internal.service.com/users/*",
     "servers": ["http-proxy"],
-    "requestQuota": 1000 // 此规则每小时最多 1000 次请求
+    "cc": ["http://log-service/ingress", "http://audit-service/new-request"]
+  },
+  {
+    "from": "http://remote-app.com/*",
+    "to": "http://remote-app.com/*",
+    "tunnel": "my-secure-tunnel",
+    "endpoint": "app-instance-1"
   }
 ]
 ```

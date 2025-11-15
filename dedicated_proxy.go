@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"bytes"
 	"crypto/tls"
 	"io"
@@ -220,7 +221,7 @@ func (p *DedicatedProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Length", string(len(body)))
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(body)))
 	w.WriteHeader(resp.StatusCode)
 	w.Write(body)
 }
