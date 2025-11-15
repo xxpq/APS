@@ -3,7 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
-	"io/ioutil"
+	"io"
 	"log"
 	"math/rand"
 	"net/http"
@@ -163,7 +163,7 @@ func (pm *ProxyManager) loadRemoteProxies(remoteURL string) {
 		return
 	}
 
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		log.Printf("[PROXY MANAGER] Error reading remote proxy config from %s: %v", remoteURL, err)
 		return

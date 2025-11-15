@@ -1,10 +1,10 @@
 package main
 
 import (
-	"io/ioutil"
 	"log"
 	"net/http"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 )
@@ -24,7 +24,7 @@ func (p *MapRemoteProxy) serveFile(w http.ResponseWriter, r *http.Request, mappi
 
 	localPath = findIndexFile(localPath)
 
-	content, err := ioutil.ReadFile(localPath)
+	content, err := os.ReadFile(localPath)
 	if err != nil {
 		http.Error(w, "File not found", http.StatusNotFound)
 		log.Printf("Error reading file %s: %v", localPath, err)

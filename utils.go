@@ -7,11 +7,22 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+
+	"github.com/gorilla/websocket"
 )
 
 var (
 	regexCache = make(map[string]*regexp.Regexp)
 	regexMutex = &sync.RWMutex{}
+	// Global WebSocket upgrader, shared between tunnel and proxy logic
+	upgrader = websocket.Upgrader{
+		ReadBufferSize:  1024,
+		WriteBufferSize: 1024,
+		// Allow any origin
+		CheckOrigin: func(r *http.Request) bool {
+			return true
+		},
+	}
 )
 
 // compileRegex 使用缓存来编译正则表达式，提高性能
@@ -38,9 +49,12 @@ func compileRegex(pattern string) (*regexp.Regexp, error) {
 
 func copyHeaders(dst, src http.Header) {
 	for key, values := range src {
+		// These headers are connection-specific and should not be copied.
+		// gorilla/websocket handles the Sec-WebSocket-* headers.
 		if key == "Host" || key == "Connection" || key == "Proxy-Connection" ||
 			key == "Keep-Alive" || key == "Proxy-Authenticate" || key == "Proxy-Authorization" ||
-			key == "Te" || key == "Trailer" || key == "Transfer-Encoding" || key == "Upgrade" {
+			key == "Te" || key == "Trailer" || key == "Transfer-Encoding" || key == "Upgrade" ||
+			strings.HasPrefix(key, "Sec-Websocket-") {
 			continue
 		}
 		for _, value := range values {

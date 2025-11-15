@@ -16,18 +16,18 @@ import (
 
 func init() {
 	// 初始化随机数生成器
-	rand.Seed(time.Now().UnixNano())
+	// rand.Seed(time.Now().UnixNano())
 }
 
 type Config struct {
-	Servers    map[string]*ListenConfig    `json:"servers"`
-	Proxies    map[string]*ProxyConfig     `json:"proxies"`
-	Tunnels    map[string]*TunnelConfig    `json:"tunnels,omitempty"`
-	Auth       *AuthConfig                 `json:"auth,omitempty"`
-	P12s       map[string]*P12Config       `json:"p12s,omitempty"`
-	Scripting  *ScriptingConfig            `json:"scripting,omitempty"`
-	Mappings   []Mapping                   `json:"mappings"`
-	QuotaUsage map[string]*QuotaUsageData  `json:"quotaUsage,omitempty"`
+	Servers    map[string]*ListenConfig   `json:"servers"`
+	Proxies    map[string]*ProxyConfig    `json:"proxies"`
+	Tunnels    map[string]*TunnelConfig   `json:"tunnels,omitempty"`
+	Auth       *AuthConfig                `json:"auth,omitempty"`
+	P12s       map[string]*P12Config      `json:"p12s,omitempty"`
+	Scripting  *ScriptingConfig           `json:"scripting,omitempty"`
+	Mappings   []Mapping                  `json:"mappings"`
+	QuotaUsage map[string]*QuotaUsageData `json:"quotaUsage,omitempty"`
 	mu         sync.RWMutex
 }
 
@@ -68,8 +68,8 @@ func (pc *ProxyConfig) UnmarshalJSON(data []byte) error {
 }
 
 type TunnelConfig struct {
-	Servers  []string `json:"servers"`
-	Password string   `json:"password,omitempty"` // AES key for encryption
+	Servers  []string  `json:"servers"`
+	Password string    `json:"password,omitempty"` // AES key for encryption
 	Auth     *RuleAuth `json:"auth,omitempty"`
 	TrafficPolicies
 }
@@ -99,9 +99,9 @@ type ConnectionPolicies struct {
 
 // TrafficPolicies defines policies for rate limiting and traffic quotas.
 type TrafficPolicies struct {
-	RateLimit     *string `json:"rateLimit,omitempty"`    // e.g., "1mbps", "500kbps"
-	TrafficQuota  *string `json:"trafficQuota,omitempty"` // e.g., "10gb", "500mb"
-	RequestQuota  *int64  `json:"requestQuota,omitempty"`
+	RateLimit    *string `json:"rateLimit,omitempty"`    // e.g., "1mbps", "500kbps"
+	TrafficQuota *string `json:"trafficQuota,omitempty"` // e.g., "10gb", "500mb"
+	RequestQuota *int64  `json:"requestQuota,omitempty"`
 }
 
 type User struct {
@@ -123,6 +123,36 @@ type Group struct {
 	TrafficPolicies
 }
 
+// GRPCConfig 定义了用于匹配和修改 gRPC 请求的规则
+type GRPCConfig struct {
+	Service    string                 `json:"service,omitempty"`
+	Method     string                 `json:"method,omitempty"`
+	Metadata   map[string]interface{} `json:"metadata,omitempty"` // 支持 string 或 []string，null 表示移除
+	RestToGrpc *RestToGrpcConfig      `json:"rest_to_grpc,omitempty"`
+}
+
+// RestToGrpcConfig 定义了将 RESTful 请求转换为 gRPC 调用的规则
+type RestToGrpcConfig struct {
+	// RequestBodyMapping 定义了如何从 HTTP 请求构建 gRPC 请求消息。
+	// key 是 gRPC 消息中的字段名 (e.g., "user.name")。
+	// value 是从 HTTP 请求中提取数据的位置 (e.g., "json:name", "query:id", "path:user_id")。
+	RequestBodyMapping map[string]string `json:"request_body_mapping,omitempty"`
+}
+
+// WebSocketMessageConfig 定义了用于匹配和修改单个 WebSocket 消息的规则
+type WebSocketMessageConfig struct {
+	Match   string            `json:"match,omitempty"`   // 用于匹配消息内容的正则表达式
+	Replace map[string]string `json:"replace,omitempty"` // 对匹配内容进行替换
+	Log     bool              `json:"log,omitempty"`     // 如果匹配，是否记录消息
+	Drop    bool              `json:"drop,omitempty"`    // 如果匹配，是否丢弃消息
+}
+
+// WebSocketConfig 定义了拦截 WebSocket 流量的规则
+type WebSocketConfig struct {
+	InterceptClientMessages []WebSocketMessageConfig `json:"intercept_client_messages,omitempty"`
+	InterceptServerMessages []WebSocketMessageConfig `json:"intercept_server_messages,omitempty"`
+}
+
 // EndpointConfig 用于配置请求或响应的详细信息
 type EndpointConfig struct {
 	URL         string                 `json:"url"`
@@ -132,6 +162,9 @@ type EndpointConfig struct {
 	Proxy       interface{}            `json:"proxy,omitempty"`       // 支持 string、[]string、本地文件路径或远程 URL
 	Match       string                 `json:"match,omitempty"`
 	Replace     map[string]string      `json:"replace,omitempty"`
+	GRPC        *GRPCConfig            `json:"grpc,omitempty"`
+	WebSocket   *WebSocketConfig       `json:"websocket,omitempty"`
+	Script      *ScriptConfig          `json:"script,omitempty"`
 }
 
 // GetHeader 获取 header 值，如果是数组则随机选择一个
@@ -281,16 +314,15 @@ func min(a, b int) int {
 }
 
 type Mapping struct {
-	From   interface{} `json:"from"`         // 可以是字符串或 EndpointConfig 对象
-	To     interface{} `json:"to,omitempty"` // 可以是字符串或 EndpointConfig 对象
-	Local  string      `json:"local,omitempty"`
-	Servers interface{} `json:"servers,omitempty"` // string or []string
-	Cc     []string    `json:"cc,omitempty"`
+	From     interface{} `json:"from"`         // 可以是字符串或 EndpointConfig 对象
+	To       interface{} `json:"to,omitempty"` // 可以是字符串或 EndpointConfig 对象
+	Local    string      `json:"local,omitempty"`
+	Servers  interface{} `json:"servers,omitempty"` // string or []string
+	Cc       []string    `json:"cc,omitempty"`
 	Proxy    interface{} `json:"proxy,omitempty"` // string or []string, 引用 proxies 的 key
 	Endpoint interface{} `json:"endpoint,omitempty"`
 	Tunnel   interface{} `json:"tunnel,omitempty"`
 	P12      string      `json:"p12,omitempty"` // 引用 p12s 的 key
-	Script   *ScriptConfig `json:"script,omitempty"`
 	Auth     *RuleAuth   `json:"auth,omitempty"`
 	Dump     string      `json:"dump,omitempty"`
 	ConnectionPolicies
@@ -425,38 +457,17 @@ func parseEndpointConfig(data interface{}) (*EndpointConfig, error) {
 
 	// 如果是 map，解析为完整配置
 	if mapData, ok := data.(map[string]interface{}); ok {
-		config := &EndpointConfig{}
-
-		if url, ok := mapData["url"].(string); ok {
-			config.URL = strings.TrimSpace(strings.Trim(url, "`"))
+		// To handle this properly, we marshal it back to JSON and then unmarshal into the struct.
+		// This correctly handles all fields and their types, including nested ones like ScriptConfig.
+		jsonBytes, err := json.Marshal(mapData)
+		if err != nil {
+			return nil, err
 		}
-
-		if headers, ok := mapData["headers"].(map[string]interface{}); ok {
-			config.Headers = headers
+		var config EndpointConfig
+		if err := json.Unmarshal(jsonBytes, &config); err != nil {
+			return nil, err
 		}
-
-		if querystring, ok := mapData["querystring"].(map[string]interface{}); ok {
-			config.QueryString = querystring
-		}
-
-		if proxy, ok := mapData["proxy"]; ok {
-			config.Proxy = proxy
-		}
-
-		if match, ok := mapData["match"].(string); ok {
-			config.Match = match
-		}
-
-		if replace, ok := mapData["replace"].(map[string]interface{}); ok {
-			config.Replace = make(map[string]string)
-			for k, v := range replace {
-				if vStr, ok := v.(string); ok {
-					config.Replace[k] = vStr
-				}
-			}
-		}
-
-		return config, nil
+		return &config, nil
 	}
 
 	return nil, errors.New("invalid endpoint config format")
@@ -673,7 +684,9 @@ func (c *Config) ResolvePolicies(server *ListenConfig, mapping *Mapping, user *U
 	// Create a list of all applicable policies
 	policies := []*ConnectionPolicies{
 		&server.ConnectionPolicies,
-		&mapping.ConnectionPolicies,
+	}
+	if mapping != nil {
+		policies = append(policies, &mapping.ConnectionPolicies)
 	}
 
 	if user != nil {

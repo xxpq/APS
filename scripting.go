@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"io"
 	"io/ioutil"
 	"log"
 	"net/http"
@@ -19,13 +20,13 @@ type ScriptRunner struct {
 
 // ScriptData is the structure sent to and received from the script.
 type ScriptData struct {
-	Method      string              `json:"method,omitempty"`
-	URL         string              `json:"url,omitempty"`
-	Proto       string              `json:"proto,omitempty"`
-	Headers     http.Header         `json:"headers,omitempty"`
-	Body        string              `json:"body,omitempty"`
-	StatusCode  int                 `json:"statusCode,omitempty"`
-	Status      string              `json:"status,omitempty"`
+	Method     string      `json:"method,omitempty"`
+	URL        string      `json:"url,omitempty"`
+	Proto      string      `json:"proto,omitempty"`
+	Headers    http.Header `json:"headers,omitempty"`
+	Body       string      `json:"body,omitempty"`
+	StatusCode int         `json:"statusCode,omitempty"`
+	Status     string      `json:"status,omitempty"`
 }
 
 func NewScriptRunner(config *ScriptingConfig) *ScriptRunner {
@@ -133,11 +134,11 @@ func (s *ScriptRunner) runScript(scriptPath string, data ScriptData) (ScriptData
 }
 
 func (s *ScriptRunner) requestToScriptData(r *http.Request) (ScriptData, error) {
-	bodyBytes, err := ioutil.ReadAll(r.Body)
+	bodyBytes, err := io.ReadAll(r.Body)
 	if err != nil {
 		return ScriptData{}, err
 	}
-	r.Body = ioutil.NopCloser(bytes.NewBuffer(bodyBytes)) // Restore body
+	r.Body = io.NopCloser(bytes.NewBuffer(bodyBytes)) // Restore body
 
 	return ScriptData{
 		Method:  r.Method,
@@ -190,10 +191,10 @@ func (s *ScriptRunner) scriptDataToResponse(data ScriptData, origResp *http.Resp
 		Body:       ioutil.NopCloser(strings.NewReader(data.Body)),
 	}
 	newResp.ContentLength = int64(len(data.Body))
-	
+
 	// Copy over unmodifiable fields
 	newResp.Request = origResp.Request
 	newResp.TLS = origResp.TLS
-	
+
 	return newResp, nil
 }

@@ -2,7 +2,7 @@ package main
 
 import (
 	"bytes"
-	"io/ioutil"
+	"io"
 	"log"
 	"net/http"
 )
@@ -12,9 +12,9 @@ func (p *MapRemoteProxy) carbonCopyRequest(req *http.Request, ccTargets []string
 		go func(targetURL string) {
 			var bodyBytes []byte
 			if req.Body != nil {
-				bodyBytes, _ = ioutil.ReadAll(req.Body)
+				bodyBytes, _ = io.ReadAll(req.Body)
 				// Restore the body so the original request can read it
-				req.Body = ioutil.NopCloser(bytes.NewBuffer(bodyBytes))
+				req.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
 			}
 
 			ccReq, err := http.NewRequest(req.Method, targetURL, bytes.NewBuffer(bodyBytes))

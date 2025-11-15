@@ -15,9 +15,9 @@ type HarLog struct {
 }
 
 type HarContent struct {
-	Version string      `json:"version"`
-	Creator HarCreator  `json:"creator"`
-	Entries []HarEntry  `json:"entries"`
+	Version string     `json:"version"`
+	Creator HarCreator `json:"creator"`
+	Entries []HarEntry `json:"entries"`
 }
 
 type HarCreator struct {
@@ -26,12 +26,12 @@ type HarCreator struct {
 }
 
 type HarEntry struct {
-	StartedDateTime string        `json:"startedDateTime"`
-	Time            float64       `json:"time"`
-	Request         HarRequest    `json:"request"`
-	Response        HarResponse   `json:"response"`
-	Cache           HarCache      `json:"cache"`
-	Timings         HarTimings    `json:"timings"`
+	StartedDateTime string      `json:"startedDateTime"`
+	Time            float64     `json:"time"`
+	Request         HarRequest  `json:"request"`
+	Response        HarResponse `json:"response"`
+	Cache           HarCache    `json:"cache"`
+	Timings         HarTimings  `json:"timings"`
 }
 
 type HarRequest struct {
@@ -47,15 +47,15 @@ type HarRequest struct {
 }
 
 type HarResponse struct {
-	Status      int         `json:"status"`
-	StatusText  string      `json:"statusText"`
-	HTTPVersion string      `json:"httpVersion"`
-	Cookies     []HarCookie `json:"cookies"`
-	Headers     []HarHeader `json:"headers"`
+	Status      int               `json:"status"`
+	StatusText  string            `json:"statusText"`
+	HTTPVersion string            `json:"httpVersion"`
+	Cookies     []HarCookie       `json:"cookies"`
+	Headers     []HarHeader       `json:"headers"`
 	Content     HarContentDetails `json:"content"`
-	RedirectURL string      `json:"redirectURL"`
-	HeadersSize int64       `json:"headersSize"`
-	BodySize    int64       `json:"bodySize"`
+	RedirectURL string            `json:"redirectURL"`
+	HeadersSize int64             `json:"headersSize"`
+	BodySize    int64             `json:"bodySize"`
 }
 
 type HarHeader struct {
@@ -151,7 +151,7 @@ func (m *HarLoggerManager) Shutdown() {
 // newHarLogger creates a new HarLogger instance.
 func newHarLogger(filePath string) *HarLogger {
 	// Attempt to read existing file
-	existingData, err := ioutil.ReadFile(filePath)
+	existingData, err := os.ReadFile(filePath)
 	if err == nil {
 		var harLog HarLog
 		if json.Unmarshal(existingData, &harLog) == nil {

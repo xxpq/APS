@@ -85,6 +85,49 @@ func (p *MapRemoteProxy) calculateMatchScore(mapping *Mapping, r *http.Request, 
 				}
 			}
 		}
+
+		// gRPC match
+		if fromConfig.GRPC != nil {
+			service, method, ok := parseGRPCPath(r.URL.Path)
+			if !ok {
+				// This rule requires a gRPC match, but the path is not a valid gRPC path.
+				return -1, ""
+			}
+
+			grpcMatch := true
+			// Service match
+			if fromConfig.GRPC.Service != "" {
+				if fromConfig.GRPC.Service == service {
+					score += 20 // High score for service match
+				} else {
+					grpcMatch = false
+				}
+			}
+
+			// Method match
+			if fromConfig.GRPC.Method != "" {
+				if fromConfig.GRPC.Method == method {
+					score += 10 // Additional score for method match
+				} else {
+					grpcMatch = false
+				}
+			}
+
+			if !grpcMatch {
+				return -1, "" // gRPC service/method specified but does not match
+			}
+
+			// Metadata (Header) match for gRPC
+			if len(fromConfig.GRPC.Metadata) > 0 {
+				for key, value := range fromConfig.GRPC.Metadata {
+					// gRPC metadata keys are case-insensitive, like HTTP headers.
+					// The http.Request.Header handles this for us.
+					if r.Header.Get(key) != "" && (value == nil || r.Header.Get(key) == value) {
+						score++
+					}
+				}
+			}
+		}
 	}
 
 	return score, newURL
@@ -117,8 +160,21 @@ func (p *MapRemoteProxy) matchAndReplace(originalURL string, mapping Mapping) (b
 	log.Printf("[DEBUG] Pattern  - Scheme: %s, Host: %s, Path: %s",
 		parsedFrom.Scheme, parsedFrom.Host, parsedFrom.Path)
 
-	if parsedOriginal.Scheme != parsedFrom.Scheme {
-		log.Printf("[DEBUG] Scheme mismatch: %s != %s", parsedOriginal.Scheme, parsedFrom.Scheme)
+	// Scheme match
+	schemeMatch := false
+	switch parsedFrom.Scheme {
+	case "*":
+		schemeMatch = true
+	case "ws":
+		schemeMatch = (parsedOriginal.Scheme == "http")
+	case "wss":
+		schemeMatch = (parsedOriginal.Scheme == "https")
+	default:
+		schemeMatch = (parsedOriginal.Scheme == parsedFrom.Scheme)
+	}
+
+	if !schemeMatch {
+		log.Printf("[DEBUG] Scheme mismatch: original=%s, pattern=%s", parsedOriginal.Scheme, parsedFrom.Scheme)
 		return false, originalURL
 	}
 
@@ -224,4 +280,14 @@ func (p *MapRemoteProxy) tryRegexMatch(originalURL, fromPattern, toPattern strin
 	newURL := re.ReplaceAllString(originalURL, toPattern)
 	log.Printf("[DEBUG] ✓ Regex matched! %s -> %s", originalURL, newURL)
 	return true, newURL
+}
+// parseGRPCPath extracts the service and method from a gRPC URL path.
+// The format is expected to be /package.Service/Method.
+// It returns (service, method, ok).
+func parseGRPCPath(path string) (string, string, bool) {
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	if len(parts) != 2 {
+		return "", "", false
+	}
+	return parts[0], parts[1], true
 }

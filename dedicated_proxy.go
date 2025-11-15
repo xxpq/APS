@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -67,7 +68,7 @@ func (p *DedicatedProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// 处理 OPTIONS 请求
 	if r.Method == http.MethodOptions {
 		setCorsHeaders(w.Header())
-		
+
 		// 如果有 to 配置的自定义 headers，也应用到 OPTIONS 响应
 		toConfig := p.mapping.GetToConfig()
 		if toConfig != nil && len(toConfig.Headers) > 0 {
@@ -76,7 +77,7 @@ func (p *DedicatedProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set(key, value)
 			}
 		}
-		
+
 		w.WriteHeader(http.StatusOK)
 		log.Printf("[DEDICATED:%d OPTIONS] %s - Handled with CORS headers", p.port, r.URL.String())
 		return
@@ -139,11 +140,11 @@ func (p *DedicatedProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	
+
 	// 应用来自 from 配置的查询参数
 	if fromConfig != nil && len(fromConfig.QueryString) > 0 {
 		query := proxyReq.URL.Query()
-		
+
 		params, paramsToRemove := fromConfig.GetQueryString()
 		if len(paramsToRemove) > 0 {
 			log.Printf("[DEDICATED:%d REQUEST QUERY] Removing %d query parameters", p.port, len(paramsToRemove))
@@ -157,7 +158,7 @@ func (p *DedicatedProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				query.Set(key, value)
 			}
 		}
-		
+
 		proxyReq.URL.RawQuery = query.Encode()
 	}
 
@@ -165,7 +166,7 @@ func (p *DedicatedProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if fromConfig != nil && fromConfig.Proxy != nil {
 		proxyManager = NewProxyManager(fromConfig.Proxy)
 		defer proxyManager.Close()
-		
+
 		proxyURL := proxyManager.GetRandomProxy()
 		if proxyURL != "" {
 			proxyClient, err := p.createProxyClient(proxyURL)
@@ -190,10 +191,10 @@ func (p *DedicatedProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer resp.Body.Close()
 
 	copyHeaders(w.Header(), resp.Header)
-	
+
 	// 先设置默认跨域头
 	setCorsHeaders(w.Header())
-	
+
 	// 然后应用来自 to 配置的响应头（覆盖默认跨域头）
 	toConfig := p.mapping.GetToConfig()
 	if toConfig != nil && len(toConfig.Headers) > 0 {
@@ -237,12 +238,12 @@ func (p *DedicatedProxy) buildTargetURL(r *http.Request) (string, error) {
 		if strings.HasPrefix(originalPath, fromPathPrefix) {
 			remainingPath := strings.TrimPrefix(originalPath, fromPathPrefix)
 			newPath := toPathPrefix + remainingPath
-			
+
 			parsedURL, err := url.Parse(newPath)
 			if err != nil {
 				return "", err
 			}
-			
+
 			parsedURL.RawQuery = r.URL.RawQuery
 			return parsedURL.String(), nil
 		}
@@ -294,7 +295,7 @@ func (p *DedicatedProxy) serveFile(w http.ResponseWriter, r *http.Request) {
 		localPath = filepath.Join(basePath, requestedPath)
 	}
 
-	content, err := ioutil.ReadFile(localPath)
+	content, err := os.ReadFile(localPath)
 	if err != nil {
 		http.Error(w, "File not found", http.StatusNotFound)
 		log.Printf("Error reading file %s: %v", localPath, err)

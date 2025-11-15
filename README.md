@@ -1,85 +1,52 @@
-# Cato Proxy Service
+# Cato Proxy Service (重构后)
 
-Cato Proxy Service 是一个功能强大、高度可配置、可编写脚本的 HTTP/HTTPS 代理服务器，专为开发、测试和网络调试而设计。它提供了对网络流量的精细控制，允许您检查、修改、重定向和模拟各种网络条件。
+## 简介
 
-## ✨ 功能特性
+Cato Proxy Service 是一个功能强大、高度可配置、可编写脚本的多协议 API 网关和代理服务器。它专为现代开发、测试和网络调试而设计，为您提供对网络流量无与伦比的精细化控制能力，允许您检查、修改、重定向、转换和模拟各种网络条件。
 
-- **多代理服务器**: 同时运行多个具有不同配置的 HTTP 和 HTTPS 代理服务器。
-- **高级请求/响应映射**:
-  - 根据 URL、方法、标头和查询参数将请求重定向到不同的目标。
-  - 将请求映射到本地文件系统以进行 API 模拟。
-  - 动态修改请求/响应的标头和查询参数。
-  - 支持从数组中随机选择标头值（例如 `Authorization` 令牌）。
-- **HTTPS 拦截**: 支持自动生成证书以拦截和解密 HTTPS 流量。
-- **上游代理链**: 将传出流量通过一个或多个上游代理进行路由，并可为代理本身配置策略。
-- **认证与授权**:
-  - 基于用户和组的精细访问控制。
-  - 可在服务器、映射规则、隧道等多个级别应用认证策略。
-- **安全隧道**: 创建加密的 WebSocket 隧道，用于安全地传输流量。
-- **请求/响应脚本**: 使用 Python 或 Node.js 脚本在请求处理的生命周期中动态修改请求和响应。
-- **连接与流量策略**:
-  - **连接策略**: 配置超时、空闲超时、最大并发连接数。
-  - **网络模拟**: 模拟不同的网络质量（丢包率）。
-  - **流量策略**: 对服务器、用户、组、代理、隧道或特定规则应用速率限制、流量配额和**请求次数配额**。
-- **配额持久化**: 自动将流量和请求次数的配额用量持久化到配置文件中。
-- **HAR 日志记录**: 将所有通过代理的流量捕获为 HAR (HTTP Archive) 文件，以便进行后续分析。
-- **实时配置重载**: 修改配置文件后，代理服务器可以自动重新加载配置，无需重启。
-- **内置管理端点**:
-  - `/.ssl`: 下载用于 HTTPS 拦截的根 CA 证书。
-  - `/.stats`: 查看实时的流量统计信息。
-  - `/.replay`: 重放捕获的请求。
+## ✨ 功能矩阵
 
-## 🚀 快速开始
+| 类别 | 功能点 |
+| :--- | :--- |
+| **核心代理** | 同时运行多个 HTTP/HTTPS 代理、自动化的 HTTPS 流量拦截、上游代理链 |
+| **高级路由** | 基于 URL (支持通配符 `*`、正则表达式和 `*://` 协议通配)、方法、标头、查询参数的灵活映射规则 |
+| **协议网关** | gRPC 代理、WebSocket 代理与双向消息拦截、动态 REST-to-gRPC 转换 (无需代码生成) |
+| **流量策略** | 速率限制 (e.g., `500kbps`)、流量配额 (e.g., `10gb`)、请求次数配额、网络质量模拟 (丢包率) |
+| **安全与认证** | 基于用户/组的访问控制，可在服务器、规则、隧道等多个级别应用 |
+| **自动化** | 使用 Python/Node.js 脚本在请求和响应阶段进行动态修改、HAR 日志记录、配置热重载 |
+| **持久化** | 流量和请求次数的配额用量会自动保存到配置文件，防止因服务重启而重置 |
+
+## 🚀 快速上手
 
 ### 1. 安装
 
 确保您已经安装了 Go 语言环境。
 
 ```bash
-# 克隆仓库 (如果需要)
-# git clone ...
-
 # 构建可执行文件
 go build .
 ```
 
 ### 2. 配置
 
-创建一个名为 `config.json` 的文件。您可以从 `config.example.json` 开始。这是一个基本的配置示例：
+创建一个名为 `config.json` 的文件。这是一个最简化的配置，它启动一个在 `8080` 端口的 HTTP 代理，并将所有对 `http://example.com` 的请求重定向到 `http://httpbin.org`。
 
 ```json
 {
   "servers": {
     "http-proxy": {
       "port": 8080
-    },
-    "https-proxy": {
-      "port": 8443,
-      "cert": "auto"
     }
   },
   "mappings": [
     {
-      "from": "http://example.com",
-      "to": "http://httpbin.org",
-      "servers": ["http-proxy", "https-proxy"]
-    },
-    {
-      "from": "http://api.example.com/v1/users",
-      "local": "/path/to/mock/users.json",
-      "servers": ["http-proxy", "https-proxy"]
+      "from": "http://example.com/*",
+      "to": "http://httpbin.org/*",
+      "servers": ["http-proxy"]
     }
   ]
 }
 ```
-
-这个配置启动了两个代理：
-- 一个在 `8080` 端口的 HTTP 代理。
-- 一个在 `8443` 端口的支持 HTTPS 拦截的 HTTPS 代理。
-
-它还定义了两条规则：
-1.  所有到 `http://example.com` 的请求都会被重定向到 `http://httpbin.org`。
-2.  所有到 `http://api.example.com/v1/users` 的请求将返回本地文件 `/path/to/mock/users.json` 的内容。
 
 ### 3. 运行
 
@@ -87,244 +54,155 @@ go build .
 ./cato-proxy-service -config=config.json
 ```
 
-### 4. 设置 HTTPS 拦截
+### 4. 配置 HTTPS 拦截
 
-1.  将您的系统或浏览器的代理设置为 `127.0.0.1:8443`。
-2.  在浏览器中访问任意 HTTP 网站，然后导航到 `http://<any-domain>/.ssl` (例如 `http://example.com/.ssl`)。
-3.  下载 `cato_root_ca.crt` 证书文件。
-4.  将此证书导入到您的系统或浏览器的“受信任的根证书颁发机构”中。
+1.  在 `config.json` 中添加一个支持 HTTPS 拦截的服务器：
+    ```json
+    "https-proxy": {
+      "port": 8443,
+      "cert": "auto"
+    }
+    ```
+2.  将您的系统或浏览器的代理设置为 `127.0.0.1:8443`。
+3.  在浏览器中访问任意 HTTP 网站，然后导航到 `http://<any-domain>/.ssl` (例如 `http://example.com/.ssl`)。
+4.  下载 `cato_root_ca.crt` 证书文件。
+5.  将此证书导入到您的系统或浏览器的“受信任的根证书颁发机构”中。
 
-完成这些步骤后，您就可以拦截和查看 HTTPS 流量了。
+## 核心概念
 
-## 📚 配置指南
+-   **服务器 (`servers`)**: 代理的入口点，定义了监听的端口和基础行为。
+-   **映射规则 (`mappings`)**: 代理的核心。每一条规则都定义了“当一个请求满足 `from` 的条件时，应该如何通过 `to` 或 `local` 来处理它”。
+-   **端点配置 (`EndpointConfig`)**: `from` 和 `to` 字段都可以是一个详细的配置对象，而不仅仅是 URL 字符串。这个对象是进行高级匹配、修改和协议转换的关键。
+-   **策略 (`policies`)**: 用于定义连接和流量的限制。策略可以应用在服务器、规则、用户、组等多个层级，最终生效的将是所有适用策略中最严格的一个 (例如，最低的速率限制)。
+
+## 配置详解
 
 ### `servers`
 
-定义代理服务器监听的端口和行为。
+定义代理服务器。
 
-- `port`: (必需) 监听端口。
-- `cert`: (可选) 用于 HTTPS。可以是 `"auto"` 来自动生成证书，也可以是一个包含 `cert` 和 `key` 文件路径的对象。
-- `auth`: (可选) 为此服务器配置认证。
-
-**示例:**
-```json
-"servers": {
-  "main-proxy": {
-    "port": 8080
-  },
-  "secure-proxy": {
-    "port": 8443,
-    "cert": {
-      "cert": "./certs/server.crt",
-      "key": "./certs/server.key"
-    }
-  },
-  "intercept-proxy": {
-    "port": 9000,
-    "cert": "auto"
-  }
-}
-```
+-   `port`: (必需) 监听端口。
+-   `cert`: (可选) 用于 HTTPS。可以是 `"auto"` 来自动生成证书，也可以是一个包含 `cert` 和 `key` 文件路径的对象。
 
 ### `mappings`
 
-映射规则是 Cato Proxy 的核心。每个规则定义了如何处理匹配的请求。
+定义请求处理规则。
 
-- `from`: (必需) 匹配传入请求的源。可以是 URL 字符串或一个详细的 `EndpointConfig` 对象。
-- `to`: (可选) 将请求转发到的目标。可以是 URL 字符串或 `EndpointConfig` 对象。
-- `local`: (可选) 将请求映射到本地文件或目录。`to` 和 `local` 必须至少有一个。
-- `servers`: (可选) 此规则适用的服务器名称列表。如果省略，则适用于所有服务器。
-- `proxy`: (可选) 为此规则指定一个或多个上游代理。
-- `script`: (可选) 为此规则配置请求/响应处理脚本。
-- `auth`: (可选) 为此规则配置认证。
+-   `from`: (必需) 匹配传入请求的源。可以是 URL 字符串或 `EndpointConfig` 对象。
+-   `to`: (可选) 将请求转发到的目标。可以是 URL 字符串或 `EndpointConfig` 对象。
+-   `local`: (可选) 将请求映射到本地文件或目录。`to` 和 `local` 必须至少有一个。
+-   `servers`: (可选) 此规则适用的服务器名称列表。如果省略，则适用于所有服务器。
 
-#### `EndpointConfig` 对象
+#### 深入 `EndpointConfig` 对象
 
-`from` 和 `to` 字段都可以使用 `EndpointConfig` 对象来进行更复杂的匹配和修改。
+`from` 和 `to` 字段都可以使用此对象进行高级配置。
 
-- `url`: (必需) URL 字符串。
-- `method`: (可选) 匹配一个或多个 HTTP 方法，例如 `"GET"` 或 `["GET", "POST"]`。
-- `headers`: (可选) 匹配或修改请求/响应头。
-  - `{"Header-Name": "value"}`: 添加或覆盖标头。
-  - `{"Header-Name": null}`: 移除标头。
-  - `{"Header-Name": ["val1", "val2"]}`: 从列表中随机选择一个值。
-- `querystring`: (可选) 匹配或修改查询参数。
-  - `{"param": "value"}`: 添加或覆盖参数。
-  - `{"param": null}`: 移除参数。
+-   **`url`**: URL 字符串。
+    -   **通配符**: `*` 可用于匹配路径的其余部分，例如 `http://api.example.com/v1/*`。
+    -   **协议匹配**: `from.url` 的协议头会精确匹配请求协议。
+        -   `http://`: 只匹配 HTTP 请求。
+        -   `https://`: 只匹配 HTTPS 请求。
+        -   `ws://`: 只匹配 WebSocket (基于 HTTP) 的升级请求。
+        -   `wss://`: 只匹配 Secure WebSocket (基于 HTTPS) 的升级请求。
+        -   `*://`: 匹配任何协议。
+-   **`method`**: 匹配一个或多个 HTTP 方法，例如 `"POST"` 或 `["GET", "POST"]`。
+-   **`headers`**: 匹配或修改标头。
+    -   `{"Header-Name": "value"}`: 添加或覆盖标头。
+    -   `{"Header-Name": null}`: 移除标头。
+    -   `{"Header-Name": ["val1", "val2"]}`: 从列表中随机选择一个值。
+-   **`querystring`**: 匹配或修改查询参数。
+-   **`script` (重要更新)**: 指定用于处理请求或响应的脚本。
+    -   `from.script`: 在 **请求** 发送到目标之前执行。
+    -   `to.script`: 在从目标收到 **响应** 之后执行。
 
-**示例:**
+**示例: 使用请求脚本添加认证头**
 ```json
-{
-  "from": {
-    "url": "https://api.service.com/data",
-    "method": "POST",
-    "headers": {
-      "X-Client-ID": "required-client-id"
-    }
-  },
-  "to": {
-    "url": "https://internal-api.service.com/v2/data",
-    "headers": {
-      "Authorization": ["token1", "token2", "token3"], // 随机选择一个 token
-      "X-Client-ID": null // 移除原始的 X-Client-ID
-    }
+"mappings": [
+  {
+    "from": {
+      "url": "http://api.service.com/*",
+      "script": {
+        "onRequest": "./scripts/add_auth.py"
+      }
+    },
+    "to": "http://internal.service.com/*"
   }
-}
+]
 ```
 
 ### `proxies`
 
-定义可供 `mappings` 使用的上游代理。代理可以是一个简单的 URL 字符串、一个 URL 数组，或者一个包含策略的完整对象。
-
-**示例:**
-```json
-"proxies": {
-  "datacenter-proxy": "http://user:pass@proxy.example.com:8080",
-  "rotating-proxies": [
-    "http://proxy1.example.com:8000",
-    "http://proxy2.example.com:8000"
-  ],
-  "limited-proxy": {
-    "urls": ["http://proxy3.example.com:8000"],
-    "rateLimit": "500kbps",
-    "trafficQuota": "10gb"
-  }
-},
-"mappings": [
-  {
-    "from": "https://example.com",
-    "to": "https://example.com",
-    "proxy": "limited-proxy" // 使用带策略的代理
-  }
-]
-```
+定义可供 `mappings` 使用的上游代理。
 
 ### `auth`
 
 定义用户、组和访问策略。
 
-**示例:**
-```json
-"auth": {
-  "users": {
-    "alice": {
-      "password": "password123",
-      "groups": ["developers"]
-    },
-    "bob": {
-      "password": "password456"
-    }
-  },
-  "groups": {
-    "developers": {
-      "users": ["alice"]
-    }
-  }
-},
-"mappings": [
-  {
-    "from": "https://internal.dev",
-    "to": "http://localhost:3000",
-    "auth": {
-      "groups": ["developers"] // 只允许 'developers' 组的成员访问
-    }
-  }
-]
-```
-
 ### `scripting`
 
-使用外部脚本动态处理流量。脚本通过 stdin 接收一个 JSON 对象（包含请求/响应的详细信息），并通过 stdout 返回一个修改后的 JSON 对象。
+配置脚本解释器的路径。
 
-- `pythonPath`: (可选) Python 解释器的路径。
-- `nodePath`: (可选) Node.js 解释器的路径。
+-   `pythonPath`: Python 解释器的路径 (例如 `/usr/bin/python3`)。
+-   `nodePath`: Node.js 解释器的路径。
 
-**示例:**
-```json
-"scripting": {
-  "pythonPath": "/usr/bin/python3"
-},
-"mappings": [
-  {
-    "from": "https://api.example.com/user",
-    "to": "https://api.example.com/user",
-    "script": {
-      "onResponse": "./scripts/add_header.py"
-    }
-  }
-]
-```
+### `quotaUsage`
 
-`add_header.py` 示例:
-```python
-import sys
-import json
+此字段由 Cato Proxy 自动管理，用于持久化流量和请求次数的配额用量。请勿手动修改。
 
-def main():
-    data = json.load(sys.stdin)
-    
-    # 在响应中添加一个新标头
-    if 'headers' not in data['response']:
-        data['response']['headers'] = {}
-    data['response']['headers']['X-Processed-By'] = ['Cato-Proxy-Script']
-    
-    # 将修改后的数据写回 stdout
-    json.dump(data, sys.stdout)
+## 高级功能：协议网关
 
-if __name__ == "__main__":
-    main()
-```
+### gRPC 代理
 
-### 策略
+通过在 `EndpointConfig` 中使用 `grpc` 字段，您可以根据 gRPC 的服务、方法和元数据来路由和修改流量。
 
-策略可以在 `servers`、`mappings`、`tunnels`、`proxies`、`users` 和 `groups` 等多个级别上定义。生效的策略将是所有适用策略中最严格的一个（例如，最低的超时时间，最低的速率限制）。
+### WebSocket 消息拦截
 
-- **`ConnectionPolicies`**:
-  - `timeout`: 连接超时（秒）。
-  - `idleTimeout`: 空闲超时（秒）。
-  - `maxThread`: 最大并发连接数。
-  - `quality`: 网络质量模拟（0.0 到 1.0，1.0 表示无丢包）。
-- **`TrafficPolicies`**:
-  - `rateLimit`: 速率限制，例如 `"500kbps"` 或 `"1mbps"`。
-  - `trafficQuota`: 流量配额，例如 `"500mb"` 或 `"10gb"`。
-  - `requestQuota`: 请求次数配额，例如 `1000`。
+通过 `websocket` 字段，您可以拦截、检查和修改客户端与服务器之间的双向 WebSocket 消息。
 
-**示例:**
-```json
-"auth": {
-  "users": {
-    "free_user": {
-      "password": "password",
-      "rateLimit": "100kbps",
-      "trafficQuota": "1gb",
-      "requestQuota": 10000
-    }
-  }
-}
-```
+-   `intercept_client_messages`: 处理从客户端发往服务器的消息。
+-   `intercept_server_messages`: 处理从服务器发往客户端的消息。
 
-### 配额用量持久化
+每个规则支持 `match` (正则)、`replace`、`log` 和 `drop` 操作。
 
-为了防止因服务重启导致配额用量重置，Cato Proxy 会自动将当前的流量和请求次数用量每 10 秒钟同步回您的 `config.json` 文件中。这些数据会保存在顶级的 `quotaUsage` 字段下。
+### 动态 REST-to-gRPC 转换
 
+这是 Cato Proxy 最强大的功能之一。您可以通过 `rest_to_grpc` 配置，将一个标准的 RESTful API 请求动态地转换为对后端 gRPC 服务的调用，**无需预先生成任何代码**。
+
+-   `rest_to_grpc`:
+    -   `request_body_mapping`: 定义如何从 HTTP 请求的各个部分 (JSON body, URL 查询参数, URL 路径变量) 构建 gRPC 请求消息。
+
+**示例: 将 RESTful 用户创建请求转换为 gRPC 调用**
 ```json
 {
-  "...": "...",
-  "quotaUsage": {
-    "user:free_user": {
-      "trafficUsed": 12345678,
-      "requestsUsed": 890
+  "from": {
+    "url": "http://api.example.com/v1/users/{role_id}",
+    "method": "POST",
+    "grpc": {
+      "service": "myapp.UserService",
+      "method": "CreateUser",
+      "rest_to_grpc": {
+        "request_body_mapping": {
+          "name": "json:user_name",
+      "email": "json:user_email",
+      "role_id": "path:role_id"
+        }
+      }
     }
-  }
+  },
+  "to": "http://localhost:50051"
 }
 ```
-服务在启动时会自动加载这些用量数据，确保配额的持续性。
 
-## 💡 用例
+## 用例与示例
 
-- **API 开发与模拟**: 使用 `local` 规则返回静态 JSON 文件，模拟后端 API。
-- **安全测试**: 使用随机的 `Authorization` 标头来测试端点的认证和授权逻辑。
-- **性能测试**: 使用 `quality` 和 `rateLimit` 模拟慢速或不稳定的网络环境。
-- **A/B 测试**: 将部分用户流量重定向到新版本的服务。
-- **流量调试**: 拦截和检查移动应用或第三方服务的 HTTPS 流量。
-- **API 网关**: 作为简单的 API 网关，为用户或用户组提供速率限制和配额管理。
+-   **API 模拟**: 使用 `local` 规则返回静态 JSON 文件，模拟后端 API。
+-   **流量调试**: 使用 HTTPS 拦截和 HAR 日志记录来检查和分析流量。
+-   **安全测试**: 使用随机的 `Authorization` 标头来测试端点的认证和授权逻辑。
+-   **性能模拟**: 使用 `quality` 和 `rateLimit` 模拟慢速或不稳定的网络环境。
+-   **API 网关**: 结合认证、速率限制和协议转换，构建一个轻量级的 API 网关。
+
+## 管理端点
+
+-   `/.ssl`: 下载用于 HTTPS 拦截的根 CA 证书。
+-   `/.stats`: 查看实时的流量统计信息。
+-   `/.replay`: 重放捕获的请求。

@@ -10,12 +10,25 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"golang.org/x/crypto/pkcs12"
 )
 
 func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
+	// Check if it's a gRPC request
+	if r.Method == http.MethodPost && strings.Contains(r.Header.Get("Content-Type"), "application/grpc") {
+		p.handleGRPC(w, r)
+		return
+	}
+
+	// Check if it's a WebSocket upgrade request
+	if strings.ToLower(r.Header.Get("Upgrade")) == "websocket" && strings.Contains(strings.ToLower(r.Header.Get("Connection")), "upgrade") {
+		p.handleWebSocket(w, r)
+		return
+	}
+
 	p.stats.IncTotalRequests()
 	p.stats.IncActiveConnections()
 	defer p.stats.DecActiveConnections()
@@ -145,6 +158,14 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if matched {
+		// Check for REST-to-gRPC conversion rule
+		fromConfig := mapping.GetFromConfig()
+		if fromConfig != nil && fromConfig.GRPC != nil && fromConfig.GRPC.RestToGrpc != nil {
+			log.Printf("[%s] %s -> [REST-to-gRPC] %s", r.Method, originalURL, targetURL)
+			p.handleRestToGrpc(w, r, mapping)
+			return
+		}
+
 		p.stats.IncRuleMatchCount(mapping.GetFromURL())
 		if mapping.Local != "" {
 			log.Printf("[%s] %s -> [LOCAL] %s", r.Method, originalURL, mapping.Local)
@@ -175,14 +196,17 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Run onRequest script if defined
-	if matched && mapping != nil && mapping.Script != nil && mapping.Script.OnRequest != "" {
-		var scriptErr error
-		proxyReq, scriptErr = p.scriptRunner.RunOnRequest(proxyReq, mapping.Script.OnRequest)
-		if scriptErr != nil {
-			log.Printf("[SCRIPT] Error running onRequest script %s: %v", mapping.Script.OnRequest, scriptErr)
-			// Decide if you want to stop the request or continue with the original
-			// http.Error(w, "Script execution failed", http.StatusInternalServerError)
-			// return
+	if matched && mapping != nil {
+		fromConfig := mapping.GetFromConfig()
+		if fromConfig != nil && fromConfig.Script != nil && fromConfig.Script.OnRequest != "" {
+			var scriptErr error
+			proxyReq, scriptErr = p.scriptRunner.RunOnRequest(proxyReq, fromConfig.Script.OnRequest)
+			if scriptErr != nil {
+				log.Printf("[SCRIPT] Error running onRequest script %s: %v", fromConfig.Script.OnRequest, scriptErr)
+				// Decide if you want to stop the request or continue with the original
+				// http.Error(w, "Script execution failed", http.StatusInternalServerError)
+				// return
+			}
 		}
 	}
 
@@ -300,12 +324,15 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	defer resp.Body.Close()
 
 	// Run onResponse script if defined
-	if matched && mapping != nil && mapping.Script != nil && mapping.Script.OnResponse != "" {
-		var scriptErr error
-		resp, scriptErr = p.scriptRunner.RunOnResponse(resp, mapping.Script.OnResponse)
-		if scriptErr != nil {
-			log.Printf("[SCRIPT] Error running onResponse script %s: %v", mapping.Script.OnResponse, scriptErr)
-			// Decide if you want to stop or continue with the original response
+	if matched && mapping != nil {
+		toConfig := mapping.GetToConfig()
+		if toConfig != nil && toConfig.Script != nil && toConfig.Script.OnResponse != "" {
+			var scriptErr error
+			resp, scriptErr = p.scriptRunner.RunOnResponse(resp, toConfig.Script.OnResponse)
+			if scriptErr != nil {
+				log.Printf("[SCRIPT] Error running onResponse script %s: %v", toConfig.Script.OnResponse, scriptErr)
+				// Decide if you want to stop or continue with the original response
+			}
 		}
 	}
 
@@ -373,7 +400,6 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		p.stats.AddRuleBytesRecv(mapping.GetFromURL(), uint64(len(body)))
 	}
 
-
 	if policies.Quality < 1.0 {
 		log.Printf("[%s] %s - %d (%d bytes, throttled)", r.Method, originalURL, resp.StatusCode, bytesWritten)
 	} else {
@@ -404,11 +430,11 @@ func (p *MapRemoteProxy) modifyRequestBody(r *http.Request, mapping *Mapping) ([
 		return nil, nil
 	}
 
-	body, err := ioutil.ReadAll(r.Body)
+	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		return nil, err
 	}
-	r.Body = ioutil.NopCloser(bytes.NewBuffer(body))
+	r.Body = io.NopCloser(bytes.NewBuffer(body))
 
 	if mapping == nil {
 		return body, nil

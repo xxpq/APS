@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"io"
 	"io/ioutil"
 	"log"
 	"net/http"
@@ -95,8 +96,8 @@ func (p *MapRemoteProxy) createHarEntry(req *http.Request, resp *http.Response, 
 func (p *MapRemoteProxy) createHarRequest(req *http.Request) (*HarRequest, error) {
 	var bodyBytes []byte
 	if req.Body != nil {
-		bodyBytes, _ = ioutil.ReadAll(req.Body)
-		req.Body = ioutil.NopCloser(bytes.NewBuffer(bodyBytes))
+		bodyBytes, _ = io.ReadAll(req.Body)
+		req.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
 	}
 
 	headers := make([]HarHeader, 0)

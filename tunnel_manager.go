@@ -160,14 +160,6 @@ func (tm *TunnelManager) GetRandomEndpointFromTunnel(tunnelName string) (*Endpoi
 	return endpoint, tunnel
 }
 
-var upgrader = websocket.Upgrader{
-	ReadBufferSize:  1024,
-	WriteBufferSize: 1024,
-	CheckOrigin: func(r *http.Request) bool {
-		return true // Allow all connections
-	},
-}
-
 // ServeWs handles websocket requests from the peer.
 func (tm *TunnelManager) ServeWs(tunnel *Tunnel, w http.ResponseWriter, r *http.Request) {
 	endpointName := r.Header.Get("X-Endpoint-Name")
@@ -196,7 +188,6 @@ func (tm *TunnelManager) ServeWs(tunnel *Tunnel, w http.ResponseWriter, r *http.
 	go conn.readPump(tunnel)
 	go conn.monitorHeartbeat(tunnel)
 }
-
 
 func (c *EndpointConn) monitorHeartbeat(tunnel *Tunnel) {
 	ticker := time.NewTicker(heartbeatCheckInterval)
