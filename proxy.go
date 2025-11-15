@@ -10,29 +10,34 @@ import (
 )
 
 type MapRemoteProxy struct {
-	config        *Config
-	harManager    *HarLoggerManager
-	tunnelManager *TunnelManager
-	serverName    string
-	client        *http.Client
+	config             *Config
+	harManager         *HarLoggerManager
+	tunnelManager      *TunnelManager
+	serverName         string
+	client             *http.Client
+	concurrencyLimiter chan struct{}
 }
 
 func NewMapRemoteProxy(config *Config, harManager *HarLoggerManager, tunnelManager *TunnelManager, serverName string) *MapRemoteProxy {
+	// Default policies from the server config, if they exist
+	serverConfig := config.Servers[serverName]
+	policies := config.ResolvePolicies(serverConfig, &Mapping{}, nil) // Get server-level or default policies
+
 	transport := &http.Transport{
 		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 		DialContext: (&net.Dialer{
-			Timeout:   30 * time.Second,
+			Timeout:   30 * time.Second, // This is connection timeout, should be kept reasonable
 			KeepAlive: 30 * time.Second,
 		}).DialContext,
 		MaxIdleConns:          100,
-		IdleConnTimeout:       90 * time.Second,
+		IdleConnTimeout:       policies.IdleTimeout, // Apply IdleTimeout from policies
 		TLSHandshakeTimeout:   10 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
 	}
 
 	tunnelTransport := NewTunnelRoundTripper(tunnelManager, transport)
 
-	return &MapRemoteProxy{
+	p := &MapRemoteProxy{
 		config:        config,
 		harManager:    harManager,
 		tunnelManager: tunnelManager,
@@ -42,9 +47,16 @@ func NewMapRemoteProxy(config *Config, harManager *HarLoggerManager, tunnelManag
 			CheckRedirect: func(req *http.Request, via []*http.Request) error {
 				return http.ErrUseLastResponse
 			},
-			Timeout: 60 * time.Second,
+			// Timeout is now set per-request in handleHTTP
 		},
 	}
+
+	// Initialize concurrency limiter if MaxThread is set at the server level
+	if policies.MaxThread > 0 {
+		p.concurrencyLimiter = make(chan struct{}, policies.MaxThread)
+	}
+
+	return p
 }
 
 // createProxyClient 为指定的代理 URL 创建 HTTP 客户端
@@ -58,6 +70,8 @@ func (p *MapRemoteProxy) createProxyClient(proxyURL string) (*http.Client, error
 		return nil, err
 	}
 
+	// Note: We don't resolve policies here because this client is for a specific upstream proxy,
+	// not for a specific rule. The main request client's transport will handle idle timeouts.
 	transport := &http.Transport{
 		Proxy:           http.ProxyURL(parsedProxy),
 		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
@@ -66,7 +80,7 @@ func (p *MapRemoteProxy) createProxyClient(proxyURL string) (*http.Client, error
 			KeepAlive: 30 * time.Second,
 		}).DialContext,
 		MaxIdleConns:          100,
-		IdleConnTimeout:       90 * time.Second,
+		IdleConnTimeout:       90 * time.Second, // Keep a default for upstream proxy connections
 		TLSHandshakeTimeout:   10 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
 	}

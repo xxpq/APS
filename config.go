@@ -35,17 +35,27 @@ type AuthConfig struct {
 	Groups map[string]*Group `json:"groups"`
 }
 
+// ConnectionPolicies defines policies for timeouts, concurrency, and network simulation.
+type ConnectionPolicies struct {
+	Timeout     *int     `json:"timeout,omitempty"`     // in seconds, default 10 minutes
+	IdleTimeout *int     `json:"idleTimeout,omitempty"` // in seconds, default 100 seconds
+	MaxThread   *int     `json:"maxThread,omitempty"`   // concurrency limit
+	Quality     *float64 `json:"quality,omitempty"`     // 0.0 to 1.0, network quality simulation
+}
+
 type User struct {
 	Password string      `json:"password"`
 	Groups   []string    `json:"groups,omitempty"`
 	Dump     string      `json:"dump,omitempty"`
 	Endpoint interface{} `json:"endpoint,omitempty"` // string or []string
+	ConnectionPolicies
 }
 
 type Group struct {
 	Users    []string    `json:"users"`
 	Dump     string      `json:"dump,omitempty"`
 	Endpoint interface{} `json:"endpoint,omitempty"` // string or []string
+	ConnectionPolicies
 }
 
 // EndpointConfig 用于配置请求或响应的详细信息
@@ -215,6 +225,7 @@ type Mapping struct {
 	Endpoint interface{} `json:"endpoint,omitempty"`
 	Auth     *RuleAuth   `json:"auth,omitempty"`
 	Dump     string      `json:"dump,omitempty"`
+	ConnectionPolicies
 
 	// 解析后的内部字段
 	fromConfig    *EndpointConfig
@@ -237,6 +248,7 @@ type ListenConfig struct {
 	Auth     *ServerAuth `json:"auth,omitempty"`
 	Dump     string      `json:"dump,omitempty"`
 	Endpoint interface{} `json:"endpoint,omitempty"` // string or []string
+	ConnectionPolicies
 }
 
 type ServerAuth struct {
@@ -556,4 +568,62 @@ func (c *Config) GetMappings() []Mapping {
 	mappings := make([]Mapping, len(c.Mappings))
 	copy(mappings, c.Mappings)
 	return mappings
+}
+
+// FinalPolicies represents the resolved, non-pointer values for connection policies.
+type FinalPolicies struct {
+	Timeout     time.Duration
+	IdleTimeout time.Duration
+	MaxThread   int
+	Quality     float64
+}
+
+// ResolvePolicies determines the final connection policies based on the hierarchy:
+// user > group > mapping > server.
+func (c *Config) ResolvePolicies(server *ListenConfig, mapping *Mapping, user *User) FinalPolicies {
+	// Set default values
+	final := FinalPolicies{
+		Timeout:     10 * time.Minute,
+		IdleTimeout: 100 * time.Second,
+		MaxThread:   0, // 0 means no limit
+		Quality:     1.0,
+	}
+
+	// Layer 1: Server policies
+	applyPolicy(&final, &server.ConnectionPolicies)
+
+	// Layer 2: Mapping policies
+	applyPolicy(&final, &mapping.ConnectionPolicies)
+
+	// Layer 3: Group policies (if user is present)
+	if user != nil && c.Auth != nil && c.Auth.Groups != nil {
+		for _, groupName := range user.Groups {
+			if group, ok := c.Auth.Groups[groupName]; ok {
+				applyPolicy(&final, &group.ConnectionPolicies)
+			}
+		}
+	}
+
+	// Layer 4: User policies (highest priority)
+	if user != nil {
+		applyPolicy(&final, &user.ConnectionPolicies)
+	}
+
+	return final
+}
+
+// applyPolicy updates the final policies from a specific policy level.
+func applyPolicy(final *FinalPolicies, specific *ConnectionPolicies) {
+	if specific.Timeout != nil {
+		final.Timeout = time.Duration(*specific.Timeout) * time.Second
+	}
+	if specific.IdleTimeout != nil {
+		final.IdleTimeout = time.Duration(*specific.IdleTimeout) * time.Second
+	}
+	if specific.MaxThread != nil {
+		final.MaxThread = *specific.MaxThread
+	}
+	if specific.Quality != nil {
+		final.Quality = *specific.Quality
+	}
 }

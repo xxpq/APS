@@ -29,6 +29,24 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Resolve connection policies
+	serverConfig := p.config.Servers[p.serverName]
+	policies := p.config.ResolvePolicies(serverConfig, mapping, user)
+
+	// Apply MaxThread concurrency limit
+	if policies.MaxThread > 0 {
+		// Non-blocking acquire
+		select {
+		case p.concurrencyLimiter <- struct{}{}:
+			// Acquired, defer release
+			defer func() { <-p.concurrencyLimiter }()
+		default:
+			// Failed to acquire
+			http.Error(w, "Too many requests", http.StatusTooManyRequests)
+			return
+		}
+	}
+
 	if matched {
 		if mapping.Local != "" {
 			log.Printf("[%s] %s -> [LOCAL] %s", r.Method, originalURL, mapping.Local)
@@ -74,7 +92,11 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	proxyReq.Header.Set("X-Forwarded-Host", r.Host)
 	proxyReq.Header.Set("X-Forwarded-Proto", getScheme(r))
 
-	client := p.client
+	// Create a client for this specific request to apply timeouts
+	client := &http.Client{
+		Transport: p.client.Transport,
+		Timeout:   policies.Timeout, // Apply overall request timeout
+	}
 	var proxyManager *ProxyManager
 
 	if matched && mapping != nil {
@@ -181,9 +203,20 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Length", string(len(body)))
 	w.WriteHeader(resp.StatusCode)
-	w.Write(body)
 
-	log.Printf("[%s] %s - %d (%d bytes)", r.Method, originalURL, resp.StatusCode, len(body))
+	// Apply Quality (throttling) to the response body
+	if policies.Quality < 1.0 && policies.Quality > 0 {
+		throttledReader := NewThrottledReader(bytes.NewReader(body), policies.Quality)
+		bytesWritten, err := io.Copy(w, throttledReader)
+		if err != nil {
+			log.Printf("Error writing throttled response body: %v", err)
+			// Client connection might be closed, nothing much we can do
+		}
+		log.Printf("[%s] %s - %d (%d bytes, throttled)", r.Method, originalURL, resp.StatusCode, bytesWritten)
+	} else {
+		w.Write(body)
+		log.Printf("[%s] %s - %d (%d bytes)", r.Method, originalURL, resp.StatusCode, len(body))
+	}
 }
 
 func (p *MapRemoteProxy) modifyRequestBody(r *http.Request, mapping *Mapping) ([]byte, error) {
@@ -237,4 +270,32 @@ func (p *MapRemoteProxy) modifyRequestBody(r *http.Request, mapping *Mapping) ([
 	}
 
 	return body, nil
+}
+
+// ThrottledReader simulates a slow network by limiting the read speed.
+type ThrottledReader struct {
+	r       io.Reader
+	quality float64 // 0.0 to 1.0
+}
+
+func NewThrottledReader(r io.Reader, quality float64) *ThrottledReader {
+	return &ThrottledReader{r: r, quality: quality}
+}
+
+func (tr *ThrottledReader) Read(p []byte) (n int, err error) {
+	// This is a very simplistic implementation. A real-world scenario would use a token bucket.
+	// For now, we just sleep a bit on each read to simulate slowness.
+	// The delay is inversely proportional to the quality.
+	if tr.quality < 1.0 {
+		// Calculate delay based on a hypothetical max speed of 10 MB/s
+		// and the size of the buffer 'p'.
+		maxSpeed := 10 * 1024 * 1024 // 10 MB/s
+		effectiveSpeed := float64(maxSpeed) * tr.quality
+		if effectiveSpeed < 1 {
+			effectiveSpeed = 1
+		}
+		delay := time.Duration(float64(len(p)) / effectiveSpeed * float64(time.Second))
+		time.Sleep(delay)
+	}
+	return tr.r.Read(p)
 }

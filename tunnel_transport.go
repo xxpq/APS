@@ -65,9 +65,9 @@ func (t *TunnelRoundTripper) roundTripViaTunnel(req *http.Request, endpoint *End
 		return nil, fmt.Errorf("failed to dump request: %w", err)
 	}
 
-	// 2. Send the request and wait for the response
+	// 2. Send the request and wait for the response, passing the request's context
 	log.Printf("[TUNNEL] Sending request for %s via endpoint '%s' in tunnel '%s'", req.URL.String(), endpoint.name, tunnel.name)
-	respData, err := endpoint.SendRequest(reqBytes, tunnel)
+	respData, err := endpoint.SendRequest(req.Context(), reqBytes, tunnel)
 	if err != nil {
 		return nil, fmt.Errorf("tunnel request failed: %w", err)
 	}
