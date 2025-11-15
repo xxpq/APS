@@ -611,24 +611,25 @@ func processConfig(config *Config) error {
 	return nil
 }
 
-func (c *Config) Reload(filename string) error {
+func (c *Config) Reload(filename string) (map[string]*ListenConfig, error) {
 	file, err := os.Open(filename)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer file.Close()
 
 	var newConfig Config
 	decoder := json.NewDecoder(file)
 	if err := decoder.Decode(&newConfig); err != nil {
-		return err
+		return nil, err
 	}
 
 	if err := processConfig(&newConfig); err != nil {
-		return err
+		return nil, err
 	}
 
 	c.mu.Lock()
+	oldServers := c.Servers
 	c.Servers = newConfig.Servers
 	c.Proxies = newConfig.Proxies
 	c.Mappings = newConfig.Mappings
@@ -640,7 +641,7 @@ func (c *Config) Reload(filename string) error {
 		log.Printf("  Rule: %s -> %s on servers: %v", mapping.GetFromURL(), mapping.GetToURL(), mapping.serverNames)
 	}
 
-	return nil
+	return oldServers, nil
 }
 
 func (c *Config) GetMappings() []Mapping {

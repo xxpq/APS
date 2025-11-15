@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"encoding/json"
 	"flag"
@@ -10,9 +11,99 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 )
+
+// ServerManager manages the lifecycle of multiple HTTP servers.
+type ServerManager struct {
+	servers       map[string]*http.Server
+	mu            sync.Mutex
+	wg            sync.WaitGroup
+	config        *Config
+	harManager    *HarLoggerManager
+	tunnelManager *TunnelManager
+	scriptRunner  *ScriptRunner
+	trafficShaper *TrafficShaper
+	stats         *StatsCollector
+	replayManager *ReplayManager
+}
+
+func NewServerManager(config *Config, harManager *HarLoggerManager, tunnelManager *TunnelManager, scriptRunner *ScriptRunner, trafficShaper *TrafficShaper, stats *StatsCollector, replayManager *ReplayManager) *ServerManager {
+	return &ServerManager{
+		servers:       make(map[string]*http.Server),
+		config:        config,
+		harManager:    harManager,
+		tunnelManager: tunnelManager,
+		scriptRunner:  scriptRunner,
+		trafficShaper: trafficShaper,
+		stats:         stats,
+		replayManager: replayManager,
+	}
+}
+
+func (sm *ServerManager) Start(name string, serverConfig *ListenConfig) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	if _, exists := sm.servers[name]; exists {
+		log.Printf("Server '%s' is already running.", name)
+		return
+	}
+
+	// Re-calculate mappings for this specific server
+	serverMappings := make(map[string][]*Mapping)
+	for i := range sm.config.Mappings {
+		mapping := &sm.config.Mappings[i]
+		for _, serverName := range mapping.serverNames {
+			serverMappings[serverName] = append(serverMappings[serverName], mapping)
+		}
+	}
+
+	handler := createServerHandler(name, serverMappings[name], serverConfig, sm.config, sm.harManager, sm.tunnelManager, sm.scriptRunner, sm.trafficShaper, sm.stats, sm.replayManager)
+	server := startServer(name, serverConfig, handler)
+	if server != nil {
+		sm.servers[name] = server
+		sm.wg.Add(1)
+		go func() {
+			defer sm.wg.Done()
+			// The server's ListenAndServe/Serve method will block here.
+			// When it returns (e.g., after Shutdown), the goroutine will exit.
+		}()
+	}
+}
+
+func (sm *ServerManager) Stop(name string) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	if server, exists := sm.servers[name]; exists {
+		log.Printf("Stopping server '%s'...", name)
+		// Use a context to allow for a graceful shutdown.
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := server.Shutdown(ctx); err != nil {
+			log.Printf("Error shutting down server '%s': %v", name, err)
+		}
+		delete(sm.servers, name)
+		log.Printf("Server '%s' stopped.", name)
+	}
+}
+
+func (sm *ServerManager) StopAll() {
+	sm.mu.Lock()
+	names := make([]string, 0, len(sm.servers))
+	for name := range sm.servers {
+		names = append(names, name)
+	}
+	sm.mu.Unlock()
+
+	for _, name := range names {
+		sm.Stop(name)
+	}
+	sm.wg.Wait()
+}
 
 func main() {
 	configFile := flag.String("config", "config.json", "Path to configuration file")
@@ -40,17 +131,16 @@ func main() {
 	statsCollector := NewStatsCollector()
 	replayManager := NewReplayManager(config)
 
-	// The main proxy logic is now handled by each server's handler
-	// proxy := NewMapRemoteProxy(config, harLogger)
+	serverManager := NewServerManager(config, harManager, tunnelManager, scriptRunner, trafficShaper, statsCollector, replayManager)
 
-	watcher, err := NewConfigWatcher(*configFile, config)
+	watcher, err := NewConfigWatcher(*configFile, config, serverManager)
 	if err != nil {
 		log.Fatalf("Failed to create config watcher: %v", err)
 	}
 	watcher.Start()
 	defer watcher.Stop()
 
-	startServers(config, harManager, tunnelManager, scriptRunner, trafficShaper, statsCollector, replayManager)
+	serverManager.StartAll()
 
 	startQuotaPersistence(config, trafficShaper, *configFile)
 
@@ -71,26 +161,28 @@ func main() {
 
 	<-sigChan
 	log.Println("\nShutting down servers...")
+	serverManager.StopAll()
 }
 
-func startServers(config *Config, harManager *HarLoggerManager, tunnelManager *TunnelManager, scriptRunner *ScriptRunner, trafficShaper *TrafficShaper, stats *StatsCollector, replayManager *ReplayManager) {
+func (sm *ServerManager) StartAll() {
 	// 将 mappings 按 server name 分组
 	serverMappings := make(map[string][]*Mapping)
-	for i := range config.Mappings {
-		mapping := &config.Mappings[i]
+	sm.config.mu.RLock()
+	for i := range sm.config.Mappings {
+		mapping := &sm.config.Mappings[i]
 		for _, serverName := range mapping.serverNames {
 			serverMappings[serverName] = append(serverMappings[serverName], mapping)
 		}
 	}
+	sm.config.mu.RUnlock()
 
 	// 为每个 server 创建并启动一个处理器
-	for name, mappings := range serverMappings {
-		serverConfig := config.Servers[name]
+	for name := range sm.config.Servers {
+		serverConfig := sm.config.Servers[name]
 		if serverConfig == nil {
 			continue
 		}
-		handler := createServerHandler(name, mappings, serverConfig, config, harManager, tunnelManager, scriptRunner, trafficShaper, stats, replayManager)
-		go startServer(name, serverConfig, handler)
+		sm.Start(name, serverConfig)
 	}
 }
 
@@ -140,7 +232,7 @@ func createServerHandler(serverName string, mappings []*Mapping, serverConfig *L
 	return mainHandler
 }
 
-func startServer(name string, config *ListenConfig, handler http.Handler) {
+func startServer(name string, config *ListenConfig, handler http.Handler) *http.Server {
 	addr := fmt.Sprintf(":%d", config.Port)
 	server := &http.Server{Addr: addr, Handler: handler}
 
@@ -172,18 +264,19 @@ func startServer(name string, config *ListenConfig, handler http.Handler) {
 			}
 
 			tlsListener := NewTlsListener(listener, tlsConfig)
-			if err := server.Serve(tlsListener); err != nil {
+			if err := server.Serve(tlsListener); err != nil && err != http.ErrServerClosed {
 				log.Printf("Server '%s' (HTTPS) failed: %v", name, err)
 			}
 		}()
 	} else {
 		// HTTP server
 		go func() {
-			if err := server.ListenAndServe(); err != nil {
+			if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 				log.Printf("Server '%s' (HTTP) failed: %v", name, err)
 			}
 		}()
 	}
+	return server
 }
 func startQuotaPersistence(config *Config, trafficShaper *TrafficShaper, configFile string) {
 	ticker := time.NewTicker(10 * time.Second)
