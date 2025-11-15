@@ -237,6 +237,8 @@ go build -o proxy_tool.exe .
   "listen": ["string array (optional)"],
   "proxy": ["string array (optional)"],
   "p12": "string (optional)",
+  "endpoint": "string | string array (optional)",
+  "tunnel": "string | string array (optional)",
   "auth": { ... },
   "dump": "string (optional)",
   "cc": ["string array (optional)"]
@@ -255,6 +257,8 @@ go build -o proxy_tool.exe .
   - `{"users": ["admin"], "groups": ["developers"]}`: 允许 `admin` 用户或 `developers` 组的成员访问。
   - `{"required": true}`: 允许任何已定义的用户访问。
 - `dump` (可选): 为匹配此规则的流量启用 HAR 日志，**优先级最高**。
+- `endpoint` (可选): 一个字符串或字符串数组，引用 `endpoint` 客户端的名称。用于将请求通过隧道转发到内网机器。如果提供了多个名称，将从在线的客户端中随机选择一个。**`endpoint` 优先于 `tunnel`**。
+- `tunnel` (可选): 一个字符串或字符串数组，引用 `tunnels` 中定义的隧道名称。用于将请求随机转发到属于该隧道的**任何一个在线 `endpoint`**。
 - **连接策略**: `timeout`, `idleTimeout`, `maxThread`, `quality` (详情见下文)。
 
 ### `from` 和 `to` 的详细配置
@@ -604,6 +608,101 @@ go build -o endpoint.exe ./endpoint
 
 1. `endpoint` 客户端 `home_lab_endpoint_1` 和 `home_lab_endpoint_2` 启动并连接到 `public_proxy` 服务器的 `ws://...:8080/.tunnel`。
 2. 当一个外部请求通过 `public_proxy` 访问 `https://internal.service.com/some/path` 时，代理会匹配到该规则。
+---
+
+### 高级路由功能
+
+#### 示例 8: 按 Tunnel 名称路由 (负载均衡)
+
+此功能允许你将请求路由到一个 `tunnel`，而不是一个具体的 `endpoint`。代理会自动从该 `tunnel` 中所有在线的 `endpoint` 客户端中随机选择一个来处理请求，从而实现负载均衡和高可用。
+
+```json
+{
+  "servers": {
+    "public_proxy": { "port": 8080, "cert": "auto" }
+  },
+  "tunnels": {
+    "prod_cluster": {
+      "servers": ["public_proxy"],
+      "password": "a_secure_password"
+    }
+  },
+  "mappings": [
+    {
+      "comment": "将请求随机分发到 'prod_cluster' 隧道中的任一在线 endpoint",
+      "from": "https://api.cluster.service/*",
+      "to": "http://localhost:9000/*",
+      "tunnel": "prod_cluster"
+    }
+  ]
+}
+```
+
+**工作流程**:
+
+1.  多个 `endpoint` 客户端（例如 `endpoint-1`, `endpoint-2`, `endpoint-3`）都使用 `-tunnel="prod_cluster"` 参数启动，并连接到 `public_proxy`。
+2.  当外部请求访问 `https://api.cluster.service/data` 时，代理会匹配到该规则。
+3.  代理会查看 `prod_cluster` 隧道中当前所有在线的 `endpoint` 列表。
+4.  它会从列表中随机选择一个（例如 `endpoint-2`），并将请求通过隧道转发给它。
+5.  `endpoint-2` 在其本地网络中请求 `http://localhost:9000/data` 并返回响应。
+
+**路由优先级**:
+
+如果一个规则同时定义了 `endpoint` 和 `tunnel`，**`endpoint` 的优先级更高**。代理会首先尝试查找并使用 `endpoint` 字段中指定的客户端。
+
+#### 示例 9: 最精确路由匹配
+
+当多个 `mapping` 规则的 `from` URL 模式可以同时匹配一个请求时，代理会选择**最具体**的那条规则。
+
+**匹配评分规则**:
+
+1.  URL 模式匹配 (基础分)。
+2.  **HTTP 方法 (`method`) 匹配**: +10 分。
+3.  每个匹配的 **Header**: +1 分。
+4.  每个匹配的 **Query String**: +1 分。
+
+**配置示例**:
+
+假设有以下两条规则：
+
+```json
+{
+  "mappings": [
+    {
+      "comment": "规则 A: 通用规则，匹配所有 GET 请求",
+      "from": {
+        "url": "/api/users/*",
+        "method": "GET"
+      },
+      "to": "http://service-a.com/users/*"
+    },
+    {
+      "comment": "规则 B: 特殊规则，仅当特定 Header 存在时匹配",
+      "from": {
+        "url": "/api/users/*",
+        "method": "GET",
+        "headers": {
+          "X-User-Role": "admin"
+        }
+      },
+      "to": "http://service-b.com/admin/users/*"
+    }
+  ]
+}
+```
+
+**场景分析**:
+
+1.  一个普通的 `GET /api/users/123` 请求到达:
+    -   规则 A: 匹配 URL 和 `method` (得分: 1 + 10 = 11)。
+    -   规则 B: 匹配 URL 和 `method`，但不匹配 `header` (得分: 1 + 10 = 11)。
+    -   在这种情况下，由于分数相同，可能会选择先定义的规则 A。
+
+2.  一个带有 `X-User-Role: admin` Header 的 `GET /api/users/456` 请求到达:
+    -   规则 A: 匹配 URL 和 `method` (得分: 1 + 10 = 11)。
+    -   规则 B: 匹配 URL、`method` 和 `header` (得分: 1 + 10 + 1 = 12)。
+    -   **结果**: 由于规则 B 的分数更高，代理将选择规则 B，并将请求转发到 `http://service-b.com/admin/users/456`。
+
 3. 代理发现规则需要 `endpoint`，它会选择一个当前在线的 `endpoint` (例如 `home_lab_endpoint_1`)。
 4. 请求被安全地转发到 `home_lab_endpoint_1`。
 5. `endpoint` 客户端在本地网络中执行对 `http://192.168.1.100:80/some/path` 的请求，并将响应通过隧道安全地传回。

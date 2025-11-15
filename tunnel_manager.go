@@ -4,13 +4,14 @@ import (
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
-	"crypto/rand"
+	crand "crypto/rand"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log"
+	mrand "math/rand"
 	"net/http"
 	"sync"
 	"sync/atomic"
@@ -118,11 +119,45 @@ func (t *Tunnel) GetRandomEndpoint() *EndpointConn {
 		return nil
 	}
 
-	// This is not truly random but good enough for now
+	// Convert map to slice for random selection
+	endpoints := make([]*EndpointConn, 0, len(t.endpoints))
 	for _, ep := range t.endpoints {
-		return ep
+		endpoints = append(endpoints, ep)
 	}
-	return nil
+	return endpoints[mrand.Intn(len(endpoints))]
+}
+
+// FindEndpoint searches for a specific endpoint by name across all tunnels.
+func (tm *TunnelManager) FindEndpoint(endpointName string) (*EndpointConn, *Tunnel) {
+	tm.mu.RLock()
+	defer tm.mu.RUnlock()
+
+	for _, tunnel := range tm.tunnels {
+		tunnel.mu.RLock()
+		if ep, exists := tunnel.endpoints[endpointName]; exists {
+			tunnel.mu.RUnlock()
+			return ep, tunnel
+		}
+		tunnel.mu.RUnlock()
+	}
+	return nil, nil
+}
+
+// GetRandomEndpointFromTunnel finds a tunnel by name and returns a random endpoint from it.
+func (tm *TunnelManager) GetRandomEndpointFromTunnel(tunnelName string) (*EndpointConn, *Tunnel) {
+	tm.mu.RLock()
+	defer tm.mu.RUnlock()
+
+	tunnel, exists := tm.tunnels[tunnelName]
+	if !exists {
+		return nil, nil
+	}
+
+	endpoint := tunnel.GetRandomEndpoint()
+	if endpoint == nil {
+		return nil, nil
+	}
+	return endpoint, tunnel
 }
 
 var upgrader = websocket.Upgrader{
@@ -338,7 +373,7 @@ func (c *EndpointConn) SendRequest(ctx context.Context, reqData []byte, tunnel *
 
 func generateRequestID() string {
 	b := make([]byte, 16)
-	rand.Read(b)
+	crand.Read(b)
 	return fmt.Sprintf("%x", b)
 }
 
@@ -363,7 +398,7 @@ func encrypt(data []byte, password string) ([]byte, error) {
 		return nil, err
 	}
 	nonce := make([]byte, gcm.NonceSize())
-	if _, err = io.ReadFull(rand.Reader, nonce); err != nil {
+	if _, err = io.ReadFull(crand.Reader, nonce); err != nil {
 		return nil, err
 	}
 	return gcm.Seal(nonce, nonce, data, nil), nil

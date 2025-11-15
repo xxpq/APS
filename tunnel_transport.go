@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"fmt"
 	"log"
+	"math/rand"
 	"net/http"
 	"net/http/httputil"
 )
@@ -26,36 +27,34 @@ func NewTunnelRoundTripper(tm *TunnelManager, defaultTransport http.RoundTripper
 // RoundTrip executes a single HTTP transaction
 func (t *TunnelRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	mapping, ok := req.Context().Value("mapping").(*Mapping)
-	if !ok || len(mapping.endpointNames) == 0 {
-		// No mapping or no endpoint configured, proceed with normal transport
+	if !ok {
 		return t.next.RoundTrip(req)
 	}
 
-	// TODO: Select endpoint based on user, group, server config as well
-	endpointName := mapping.endpointNames[0] // Simple selection for now
-
-	var selectedEndpoint *EndpointConn
-	var selectedTunnel *Tunnel
-
-	// Find the endpoint and its tunnel
-	for _, tunnel := range t.tunnelManager.tunnels {
-		tunnel.mu.RLock()
-		if ep, exists := tunnel.endpoints[endpointName]; exists {
-			selectedEndpoint = ep
-			selectedTunnel = tunnel
+	// Priority 1: Specific endpoint name is provided
+	if len(mapping.endpointNames) > 0 {
+		endpointName := mapping.endpointNames[rand.Intn(len(mapping.endpointNames))] // Select one randomly
+		endpoint, tunnel := t.tunnelManager.FindEndpoint(endpointName)
+		if endpoint != nil {
+			return t.roundTripViaTunnel(req, endpoint, tunnel)
 		}
-		tunnel.mu.RUnlock()
-		if selectedEndpoint != nil {
-			break
-		}
-	}
-
-	if selectedEndpoint == nil {
-		log.Printf("[TUNNEL] Endpoint '%s' not found or not online, falling back to direct connection", endpointName)
+		log.Printf("[TUNNEL] Specified endpoint '%s' not found or not online, falling back to direct connection", endpointName)
 		return t.next.RoundTrip(req)
 	}
 
-	return t.roundTripViaTunnel(req, selectedEndpoint, selectedTunnel)
+	// Priority 2: Tunnel name is provided
+	if len(mapping.tunnelNames) > 0 {
+		tunnelName := mapping.tunnelNames[rand.Intn(len(mapping.tunnelNames))] // Select one randomly
+		endpoint, tunnel := t.tunnelManager.GetRandomEndpointFromTunnel(tunnelName)
+		if endpoint != nil {
+			return t.roundTripViaTunnel(req, endpoint, tunnel)
+		}
+		log.Printf("[TUNNEL] No online endpoints found in specified tunnel '%s', falling back to direct connection", tunnelName)
+		return t.next.RoundTrip(req)
+	}
+
+	// No endpoint or tunnel configured for this mapping, proceed with normal transport
+	return t.next.RoundTrip(req)
 }
 
 func (t *TunnelRoundTripper) roundTripViaTunnel(req *http.Request, endpoint *EndpointConn, tunnel *Tunnel) (*http.Response, error) {

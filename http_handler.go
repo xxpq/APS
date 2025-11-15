@@ -15,8 +15,8 @@ import (
 )
 
 func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
+	targetURL, matched, mapping := p.mapRequest(r)
 	originalURL := p.buildOriginalURL(r)
-	targetURL, matched, mapping := p.mapRequestWithMappingAndMethod(originalURL, r.Method)
 
 	// 如果匹配到了规则，需要再次检查该规则的权限
 	authorized, user := p.checkAuth(r, mapping)

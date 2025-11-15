@@ -54,6 +54,7 @@ type User struct {
 	Groups   []string    `json:"groups,omitempty"`
 	Dump     string      `json:"dump,omitempty"`
 	Endpoint interface{} `json:"endpoint,omitempty"` // string or []string
+	Tunnel   interface{} `json:"tunnel,omitempty"`   // string or []string
 	ConnectionPolicies
 }
 
@@ -61,6 +62,7 @@ type Group struct {
 	Users    []string    `json:"users"`
 	Dump     string      `json:"dump,omitempty"`
 	Endpoint interface{} `json:"endpoint,omitempty"` // string or []string
+	Tunnel   interface{} `json:"tunnel,omitempty"`   // string or []string
 	ConnectionPolicies
 }
 
@@ -229,6 +231,7 @@ type Mapping struct {
 	Cc     []string    `json:"cc,omitempty"`
 	Proxy    interface{} `json:"proxy,omitempty"` // string or []string, 引用 proxies 的 key
 	Endpoint interface{} `json:"endpoint,omitempty"`
+	Tunnel   interface{} `json:"tunnel,omitempty"`
 	P12      string      `json:"p12,omitempty"` // 引用 p12s 的 key
 	Auth     *RuleAuth   `json:"auth,omitempty"`
 	Dump     string      `json:"dump,omitempty"`
@@ -240,6 +243,7 @@ type Mapping struct {
 	listenNames   []string
 	proxyNames    []string
 	endpointNames []string
+	tunnelNames   []string
 	resolvedProxy *ProxyManager
 }
 
@@ -255,6 +259,7 @@ type ListenConfig struct {
 	Auth     *ServerAuth `json:"auth,omitempty"`
 	Dump     string      `json:"dump,omitempty"`
 	Endpoint interface{} `json:"endpoint,omitempty"` // string or []string
+	Tunnel   interface{} `json:"tunnel,omitempty"`   // string or []string
 	ConnectionPolicies
 }
 
@@ -526,6 +531,9 @@ func processConfig(config *Config) error {
 
 		// 解析 endpoint names
 		mapping.endpointNames = parseStringOrArray(mapping.Endpoint)
+
+		// 解析 tunnel names
+		mapping.tunnelNames = parseStringOrArray(mapping.Tunnel)
 
 		// 验证通过，添加到有效列表
 		validMappings = append(validMappings, *mapping)
