@@ -10,7 +10,13 @@ import (
 )
 
 func (p *MapRemoteProxy) serveFile(w http.ResponseWriter, r *http.Request, mapping *Mapping) {
-	localPath := mapping.Local
+	toURL := mapping.GetToURL()
+	// file://path/to/file or file:///C:/path/to/file
+	localPath := strings.TrimPrefix(toURL, "file://")
+	if strings.HasPrefix(localPath, "/") && len(localPath) > 2 && localPath[2] == ':' { // Windows path like /C:/...
+		localPath = localPath[1:]
+	}
+
 	if strings.HasSuffix(localPath, "*") {
 		basePath := strings.TrimSuffix(localPath, "*")
 		fromURL := mapping.GetFromURL()

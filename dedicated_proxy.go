@@ -83,16 +83,17 @@ func (p *DedicatedProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if p.mapping.Local != "" {
-		log.Printf("[DEDICATED:%d] %s -> [LOCAL] %s", p.port, r.URL.String(), p.mapping.Local)
-		p.serveFile(w, r)
-		return
-	}
-
 	targetURL, err := p.buildTargetURL(r)
 	if err != nil {
 		http.Error(w, "Failed to build target URL", http.StatusInternalServerError)
 		log.Printf("Error building target URL: %v", err)
+		return
+	}
+
+	// Handle local file serving
+	if strings.HasPrefix(targetURL, "file://") {
+		log.Printf("[DEDICATED:%d] %s -> [LOCAL] %s", p.port, r.URL.String(), targetURL)
+		p.serveFile(w, r)
 		return
 	}
 
@@ -286,7 +287,13 @@ func (p *DedicatedProxy) carbonCopyRequest(req *http.Request, ccTargets []string
 }
 
 func (p *DedicatedProxy) serveFile(w http.ResponseWriter, r *http.Request) {
-	localPath := p.mapping.Local
+	toURL := p.mapping.GetToURL()
+	// file://path/to/file or file:///C:/path/to/file
+	localPath := strings.TrimPrefix(toURL, "file://")
+	if strings.HasPrefix(localPath, "/") && len(localPath) > 2 && localPath[2] == ':' { // Windows path like /C:/...
+		localPath = localPath[1:]
+	}
+
 	if strings.HasSuffix(localPath, "*") {
 		basePath := strings.TrimSuffix(localPath, "*")
 		fromURL := p.mapping.GetFromURL()

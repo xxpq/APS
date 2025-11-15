@@ -314,9 +314,8 @@ func min(a, b int) int {
 }
 
 type Mapping struct {
-	From     interface{} `json:"from"`         // 可以是字符串或 EndpointConfig 对象
-	To       interface{} `json:"to,omitempty"` // 可以是字符串或 EndpointConfig 对象
-	Local    string      `json:"local,omitempty"`
+	From     interface{} `json:"from"` // 可以是字符串或 EndpointConfig 对象
+	To       interface{} `json:"to"`   // 可以是字符串或 EndpointConfig 对象
 	Servers  interface{} `json:"servers,omitempty"` // string or []string
 	Cc       []string    `json:"cc,omitempty"`
 	Proxy    interface{} `json:"proxy,omitempty"` // string or []string, 引用 proxies 的 key
@@ -538,28 +537,23 @@ func processConfig(config *Config) error {
 		}
 		mapping.fromConfig = fromConfig
 
-		// 验证 to 和 local 至少存在一个
-		hasTo := mapping.To != nil
-		hasLocal := mapping.Local != ""
-
-		if !hasTo && !hasLocal {
-			log.Printf("Warning: mapping %d skipped - either 'to' or 'local' field is required", i+1)
+		// 验证 to 字段（必须存在）
+		if mapping.To == nil {
+			log.Printf("Warning: mapping %d skipped - 'to' field is required", i+1)
 			continue
 		}
 
-		// 解析 to 配置（如果存在）
-		if hasTo {
-			toConfig, err := parseEndpointConfig(mapping.To)
-			if err != nil {
-				log.Printf("Warning: mapping %d skipped - failed to parse 'to': %v", i+1, err)
-				continue
-			}
-			if toConfig == nil || toConfig.URL == "" {
-				log.Printf("Warning: mapping %d skipped - 'to' URL is empty", i+1)
-				continue
-			}
-			mapping.toConfig = toConfig
+		// 解析 to 配置
+		toConfig, err := parseEndpointConfig(mapping.To)
+		if err != nil {
+			log.Printf("Warning: mapping %d skipped - failed to parse 'to': %v", i+1, err)
+			continue
 		}
+		if toConfig == nil || toConfig.URL == "" {
+			log.Printf("Warning: mapping %d skipped - 'to' URL is empty", i+1)
+			continue
+		}
+		mapping.toConfig = toConfig
 
 		// 解析 server names
 		mapping.serverNames = parseStringOrArray(mapping.Servers)

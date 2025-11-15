@@ -19,7 +19,7 @@ func main() {
 	flag.Parse()
 
 	log.Println("===========================================")
-	log.Println("  Cato Proxy Service")
+	log.Println("  Any Proxy Service (APS) v1.0.0")
 	log.Println("===========================================")
 
 	if err := InitCertificates(); err != nil {

@@ -167,11 +167,14 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 
 		p.stats.IncRuleMatchCount(mapping.GetFromURL())
-		if mapping.Local != "" {
-			log.Printf("[%s] %s -> [LOCAL] %s", r.Method, originalURL, mapping.Local)
+
+		// Handle local file serving
+		if strings.HasPrefix(targetURL, "file://") {
+			log.Printf("[%s] %s -> [LOCAL] %s", r.Method, originalURL, targetURL)
 			p.serveFile(w, r, mapping)
 			return
 		}
+
 		log.Printf("[%s] %s -> %s (MAPPED)", r.Method, originalURL, targetURL)
 	} else {
 		log.Printf("[%s] %s (NO MAPPING)", r.Method, originalURL)

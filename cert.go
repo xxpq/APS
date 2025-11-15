@@ -25,10 +25,10 @@ var (
 
 const (
 	certDir      = ".cert"
-	caCertFile   = "Cato_Proxy_Service.crt"
-	caKeyFile    = "Cato_Proxy_Service.key"
-	caCommonName = "Cato Proxy Service Root CA"
-	caOrg        = "Cato Proxy Service"
+	caCertFile   = "WSP.crt"
+	caKeyFile    = "Any_Proxy_Service.key"
+	caCommonName = "Any Proxy Service Root CA"
+	caOrg        = "Any Proxy Service"
 )
 
 func InitCertificates() error {
