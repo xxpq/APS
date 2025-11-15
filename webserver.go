@@ -1,8 +1,15 @@
 package main
 
 import (
+	"crypto/rand"
+	"encoding/json"
+	"encoding/hex"
 	"log"
 	"net/http"
+	"os"
+	"sync"
+	"time"
+	"strings"
 )
 
 // CertHandlers contains the HTTP handlers for the certificate download page.
@@ -15,6 +22,236 @@ func (h *CertHandlers) RegisterHandlers(mux *http.ServeMux) {
 	mux.HandleFunc("/.ssl/cert.crt", h.handleCertDownload)
 	mux.HandleFunc("/.ssl/cert.pem", h.handleCertDownload)
 	log.Println("Certificate download page available at '/.ssl'")
+}
+
+// Session management
+type Session struct {
+	Username string
+	Admin    bool
+	Expires  time.Time
+}
+type SessionStore struct {
+	mu       sync.RWMutex
+	sessions map[string]Session
+}
+func (s *SessionStore) Set(token string, sess Session) {
+	s.mu.Lock()
+	s.sessions[token] = sess
+	s.mu.Unlock()
+}
+func (s *SessionStore) Get(token string) (Session, bool) {
+	s.mu.RLock()
+	v, ok := s.sessions[token]
+	s.mu.RUnlock()
+	return v, ok
+}
+func (s *SessionStore) Delete(token string) {
+	s.mu.Lock()
+	delete(s.sessions, token)
+	s.mu.Unlock()
+}
+var AdminSessions = &SessionStore{sessions: make(map[string]Session)}
+
+// AdminHandlers contains the HTTP handlers for the admin panel.
+type AdminHandlers struct {
+	config     *Config
+	configPath string
+	configMux  sync.RWMutex
+	sessions   *SessionStore
+}
+
+// NewAdminHandlers creates a new AdminHandlers instance.
+func NewAdminHandlers(config *Config, configPath string) *AdminHandlers {
+	return &AdminHandlers{
+		config:     config,
+		configPath: configPath,
+		sessions:   AdminSessions,
+	}
+}
+
+// RegisterHandlers registers the admin panel handlers to the given ServeMux.
+func (h *AdminHandlers) RegisterHandlers(mux *http.ServeMux) {
+	mux.HandleFunc("/.api/login", h.handleLogin)
+	mux.HandleFunc("/.api/logout", h.handleLogout)
+	mux.HandleFunc("/.api/config", h.handleConfig)
+	// Serve static files for the admin panel
+	mux.Handle("/.admin/", http.StripPrefix("/.admin/", http.FileServer(http.Dir("./admin-ui/dist"))))
+	log.Println("Admin panel API available at '/.api' and UI at '/.admin/'")
+}
+
+func (h *AdminHandlers) handleLogin(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var creds struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&creds); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	h.configMux.RLock()
+	defer h.configMux.RUnlock()
+
+	if h.config.Auth == nil || h.config.Auth.Users == nil {
+		http.Error(w, "Authentication not configured", http.StatusInternalServerError)
+		return
+	}
+
+	user, ok := h.config.Auth.Users[creds.Username]
+	if !ok || user.Password != creds.Password {
+		http.Error(w, "Invalid username or password", http.StatusUnauthorized)
+		return
+	}
+	if !user.Admin {
+		http.Error(w, "User is not an administrator", http.StatusForbidden)
+		return
+	}
+
+	// Generate a random session token
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		http.Error(w, "Failed to generate token", http.StatusInternalServerError)
+		return
+	}
+	token := hex.EncodeToString(buf)
+
+	// Store session with expiration (24h)
+	h.sessions.Set(token, Session{
+		Username: creds.Username,
+		Admin:    true,
+		Expires:  time.Now().Add(24 * time.Hour),
+	})
+
+	// Set HttpOnly cookie
+	cookie := &http.Cookie{
+		Name:     "APS-Admin-Token",
+		Value:    token,
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+	}
+	if r.TLS != nil {
+		cookie.Secure = true
+	}
+	http.SetCookie(w, cookie)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "success", "token": token})
+}
+
+func (h *AdminHandlers) handleConfig(w http.ResponseWriter, r *http.Request) {
+	// TODO: Implement config get/set logic with authentication
+	switch r.Method {
+	case http.MethodGet:
+		h.getConfig(w, r)
+	case http.MethodPost:
+		h.setConfig(w, r)
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func extractToken(r *http.Request) string {
+	// Prefer Authorization: Bearer <token>
+	auth := r.Header.Get("Authorization")
+	if strings.HasPrefix(auth, "Bearer ") {
+		return strings.TrimSpace(auth[7:])
+	}
+	// Fallback to cookie
+	if c, err := r.Cookie("APS-Admin-Token"); err == nil {
+		return c.Value
+	}
+	return ""
+}
+
+func (h *AdminHandlers) isAdminToken(token string) bool {
+	if token == "" {
+		return false
+	}
+	// Session store (login-issued tokens)
+	if sess, ok := h.sessions.Get(token); ok {
+		if sess.Expires.After(time.Now()) && sess.Admin {
+			return true
+		}
+	}
+	// Config-defined API tokens (user.token) for admin users
+	if h.config != nil && h.config.Auth != nil && h.config.Auth.Users != nil {
+		for _, u := range h.config.Auth.Users {
+			if u != nil && u.Token == token && u.Admin {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (h *AdminHandlers) handleLogout(w http.ResponseWriter, r *http.Request) {
+	token := extractToken(r)
+	if token != "" {
+		h.sessions.Delete(token)
+		// Clear cookie
+		http.SetCookie(w, &http.Cookie{
+			Name:     "APS-Admin-Token",
+			Value:    "",
+			Path:     "/",
+			HttpOnly: true,
+			MaxAge:   -1,
+			SameSite: http.SameSiteLaxMode,
+		})
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "logged_out"})
+}
+
+func (h *AdminHandlers) getConfig(w http.ResponseWriter, r *http.Request) {
+	if !h.isAdminToken(extractToken(r)) {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	h.configMux.RLock()
+	defer h.configMux.RUnlock()
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(h.config)
+}
+
+func (h *AdminHandlers) setConfig(w http.ResponseWriter, r *http.Request) {
+	if !h.isAdminToken(extractToken(r)) {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	var newConfig Config
+	if err := json.NewDecoder(r.Body).Decode(&newConfig); err != nil {
+		http.Error(w, "Invalid config format", http.StatusBadRequest)
+		return
+	}
+
+	h.configMux.Lock()
+	defer h.configMux.Unlock()
+
+	file, err := os.OpenFile(h.configPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
+	if err != nil {
+		http.Error(w, "Failed to open config file for writing", http.StatusInternalServerError)
+		return
+	}
+	defer file.Close()
+
+	encoder := json.NewEncoder(file)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(&newConfig); err != nil {
+		http.Error(w, "Failed to write config file", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "success, reload triggered"})
 }
 
 func (h *CertHandlers) handleCertPage(w http.ResponseWriter, r *http.Request) {

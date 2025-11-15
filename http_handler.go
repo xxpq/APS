@@ -371,7 +371,9 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	bytesRecv = uint64(len(body))
 
-	w.Header().Set("Content-Length", fmt.Sprint(len(body)))
+	// Remove conflicting Transfer-Encoding and set a strict numeric Content-Length
+	w.Header().Del("Transfer-Encoding")
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(body)))
 	w.WriteHeader(resp.StatusCode)
 
 	var reader io.Reader = bytes.NewReader(body)

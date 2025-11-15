@@ -118,10 +118,11 @@ go build .
     -   **远程目标**: `http://...`, `https://://...`, `ws://...`
     -   **本地文件/目录**: `file:///path/to/your/file` 或 `file://./relative/path`
 -   `servers`: (可选) `array` of `string`。此规则适用的服务器名称列表。如果省略，则适用于所有服务器。
--   `tunnel`: (可选) `string`。指定请求通过哪个隧道 (`tunnels` 中定义) 发送到远程端点。
--   `endpoint`: (可选) `string`。指定请求通过哪个端点 (`endpoints` 中定义) 发送。端点是隧道的具体入口。
+-   `tunnel`: (可选) `string` 或 `array` of `string`。按名称选择一个或多个隧道 (`tunnels` 中定义)。如果指定多个，将在其中随机选择一个隧道内的在线端点；当隧道中没有在线端点时回退为直连传输。
+-   `endpoint`: (可选) `string` 或 `array` of `string`。按名称选择已连接的端点客户端（通过隧道注册的在线实例）。当提供多个端点名称时会随机选择一个；若目标端点离线则回退为直连传输。
 -   `proxy`: (可选) `string` 或 `array` of `string`。为这条规则指定一个或多个上游代理 (在 `proxies` 中定义)。
--   `cc`: (可选) `array` of `string`。将请求“抄送”(Carbon Copy) 到一个或多个额外的目标 URL。这些请求是异步发送的，不会影响主请求的响应。
+    -   优先级：`from.proxy`（在 `from` 的 EndpointConfig 中声明）优先于规则级 `proxy`，合并与选择逻辑见 [processConfig()](config.go:558)。
+-   `cc`: (可选) `array` of `string`。将请求“抄送”(Carbon Copy) 到一个或多个额外的目标 URL。抄送请求会复制原请求的 Method/URL/Headers/Body，异步发送，不影响主请求响应，且忽略抄送响应（仅记录日志）。
 -   `auth`: (可选) `object`。为此规则覆盖服务器级别的认证，或为无认证的服务器添加认证。
 -   `dump`: (可选) `string`。HAR 文件路径，仅记录匹配此规则的流量。
 -   `p12`: (可选) `string`。指定一个在 `p12s` 中定义的 P12 客户端证书，用于与目标服务器进行 mTLS 通信。
@@ -138,12 +139,18 @@ go build .
         -   `https://`: 只匹配 HTTPS 请求。
         -   `ws://` / `wss://`: 匹配 WebSocket 升级请求。
         -   `*://`: 匹配任何协议。
+    -   **正则匹配**: 支持在 `from.url` 使用正则表达式与捕获组替换，详见 [配置指南](CONFIGURATION_GUIDE.md:1) 的“正则表达式 URL 匹配”章节。
 -   `method`: (可选) `string` 或 `array` of `string`。匹配一个或多个 HTTP 方法，例如 `"POST"` 或 `["GET", "POST"]`。
 -   `headers`: (可选) `object`。匹配或修改标头。
     -   `{"Header-Name": "value"}`: 在 `from` 中用于匹配，在 `to` 中用于添加或覆盖。
     -   `{"Header-Name": null}`: 在 `to` 中用于移除标头。
     -   `{"Header-Name": ["val1", "val2"]}`: 在 `to` 中用于从列表中随机选择一个值。
+    -   特殊说明：当值为数组时会随机选择，其中 `Authorization` 键的值会在日志中进行脱敏展示，参见 [EndpointConfig.GetHeader()](config.go:175)。
 -   `querystring`: (可选) `object`。匹配或修改查询参数。用法同 `headers`。
+-   `proxy`: (可选) `string` 或 `array` of `string` 或本地/远程文件路径。为该端点单独指定上游代理：
+    - 直接填写代理 URL（支持 `http://`、`https://`、`socks5://`）。
+    - 指向本地文本文件路径，每行一个代理；或远程 `.txt`/`.json` 列表 URL，系统会定时（每 5 分钟）自动更新。
+    - 当与规则级 `proxy` 同时存在时，`from.proxy` 优先，参见 [processConfig()](config.go:558)。
 -   `script`: (可选) `string`。指定用于处理请求或响应的脚本路径。
     -   在 `from` 中使用: 脚本在 **请求** 发送到目标之前执行。
     -   在 `to` 中使用: 脚本在从目标收到 **响应** 之后执行。
@@ -168,6 +175,55 @@ go build .
 ]
 ```
 
+#### cc（Carbon Copy）抄送
+- 行为：对每个匹配的原请求，异步再发起一份相同的请求到 `cc` 列表中的目标 URL。
+- 细节：
+  - 复制 Method、URL、Headers 与 Body；抄送响应不参与主流程，仅做日志记录。
+  - 抄送失败不会影响主请求的成功与否。
+  - 大体积 Body 会被读取并复用一份用于主请求，注意内存占用。
+- 示例：
+```json
+{
+  "from": "https://api.example.com/v1/events",
+  "to": "https://collector.internal/v1/events",
+  "cc": [
+    "https://audit.service.local/ingest",
+    "https://ml.service.local/learn"
+  ]
+}
+```
+
+#### 隧道与端点路由（tunnel / endpoint）
+- `tunnel`: 选择一个或多个隧道名称，系统将从目标隧道中随机挑选在线端点转发请求；若隧道内无在线端点则回退为直连。
+- `endpoint`: 直接按名称选择一个或多个具体端点（跨隧道全局查找），随机挑选在线实例；若目标端点离线则回退为直连。
+- 使用步骤：
+  1) 在配置中定义 `tunnels` 并将其绑定到一个或多个监听 `servers`（详见本文下方 `tunnels` 小节）。
+  2) 在目标机器上运行端点客户端，使其以某个 `-name` 挂到指定 `-tunnel` 下。
+  3) 在映射规则中使用 `tunnel` 或 `endpoint` 字段进行路由。
+
+- 端点客户端启动示例：
+```bash
+go run ./endpoint/main.go -server 127.0.0.1:3000 -tunnel my-secure-tunnel -name app-instance-1 -password "your-aes-password"
+```
+
+- 按隧道路由示例（在隧道内挑任一在线端点）：
+```json
+{
+  "from": "https://remote-app.com/*",
+  "to": "https://remote-app.com/*",
+  "tunnel": ["my-secure-tunnel", "backup-tunnel"]
+}
+```
+
+- 按端点名路由示例（跨隧道查找指定端点名）：
+```json
+{
+  "from": "https://remote-app.com/*",
+  "to": "https://remote-app.com/*",
+  "endpoint": ["app-instance-1", "app-instance-2"]
+}
+```
+
 ### `proxies`
 
 定义可供 `mappings` 使用的上游代理池。`key` 是代理的唯一名称。
@@ -185,6 +241,35 @@ go build .
     "urls": ["socks5://proxy-b.com:1080"]
   }
 }
+```
+
+### `tunnels`
+
+定义可被端点客户端连接的隧道。端点通过 WebSocket 连接到服务器的 `/.tunnel` 路径，并以某个名称注册到指定隧道下。映射规则中的 `tunnel` 与 `endpoint` 依赖此处定义及端点在线状态。
+
+-   `servers`: (必需) `array` of `string`。允许此隧道在这些监听服务上接入端点（这些 server 会接受端点到 `/.tunnel` 的接入）。
+-   `password`: (可选) `string`。用于隧道内请求/响应数据的 AES-GCM 加密密钥；为空则不加密。
+-   `auth`: (可选) `object`。对通过该隧道路由的请求施加的访问控制（字段同 `mappings.auth` 的 `users`/`groups`）。
+-   `ConnectionPolicies` & `TrafficPolicies`: (可选) 应用于通过该隧道路由的连接/流量策略（如 `rateLimit`、`trafficQuota`、`requestQuota`）。
+
+**示例:**
+```json
+"tunnels": {
+  "my-secure-tunnel": {
+    "servers": ["main-gateway"],
+    "password": "shared-secret",
+    "rateLimit": "5mbps",
+    "trafficQuota": "10gb"
+  },
+  "edge-pop": {
+    "servers": ["http-proxy", "https-proxy-with-auth"]
+  }
+}
+```
+
+端点客户端运行示例：
+```bash
+go run ./endpoint/main.go -server 127.0.0.1:3000 -tunnel my-secure-tunnel -name app-instance-1 -password "shared-secret"
 ```
 
 ### `auth`
@@ -258,7 +343,7 @@ go build .
 -   `timeout`: `integer` (秒)。连接超时。
 -   `idleTimeout`: `integer` (秒)。空闲连接超时。
 -   `maxThread`: `integer`。并发连接数限制。
--   `quality`: `float` (0.0 到 1.0)。网络质量模拟，1.0 为最佳，0.5 代表 50% 的丢包率。
+-   `quality`: `float` (0.0 到 1.0)。传输质量系数（带宽倍率），1.0 表示满速，0.5 表示以 50% 带宽传输（不做丢包，仅限速）。
 -   `rateLimit`: `string` (e.g., "500kbps", "2mbps")。速率限制。
 -   `trafficQuota`: `string` (e.g., "10gb", "500mb")。总流量配额。
 -   `requestQuota`: `integer`。总请求次数配额。
@@ -269,7 +354,7 @@ go build .
   {
     "from": "http://*.mobile-api.com/*",
     "to": "http://backend.mobile-api.com/*",
-    "quality": 0.8, // 20% 丢包
+    "quality": 0.8, // 80% 带宽（限速），不做丢包
     "rateLimit": "256kbps" // 模拟 2G/3G 网络速度
   }
 ]
@@ -353,14 +438,12 @@ if __name__ == "__main__":
       "url": "*://grpc.example.com:443/*",
       "grpc": {
         "service": "myapp.UserService",
-        "method": "GetUser"
+        "method": "GetUser",
+        "metadata": { "source": "any-proxy" } // 添加/覆盖请求元数据
       }
     },
     "to": {
-      "url": "http://localhost:50051",
-      "grpc": {
-        "metadata": { "source": "any-proxy" } // 添加元数据
-      }
+      "url": "http://localhost:50051"
     }
   }
 ]
@@ -438,6 +521,52 @@ if __name__ == "__main__":
 -   `/.ssl`: 下载用于 HTTPS 拦截的根 CA 证书。
 -   `/.stats`: 查看实时的流量统计信息。
 -   `/.replay`: 重放捕获的请求。
+
+### 管理面板 API 与静态资源
+- 后端 API：
+  - `POST /api/login`: 管理员登录（读取配置中的 users，要求 `admin: true`）。
+  - `GET/POST /api/config`: 读取/写入配置文件（写入后由文件监视器触发热重载）。
+  - 认证占位：示例使用 `X-Admin-Auth: true` 作为简易校验。
+- 前端静态：
+  - `/admin/`: 从 `./admin-ui/dist` 目录提供管理界面静态文件。
+
+### HTTPS CONNECT 拦截策略
+- 自动判定是否进行 MITM：
+  - 若存在以 `https://{host}` 前缀匹配的映射规则，则对该主机的 CONNECT 进行拦截并生成伪造证书进行解密（MITM）。
+  - 否则以纯隧道方式直连目标主机，不解密内容。
+- 证书下载与信任：
+  - 将 server 的 `cert` 设为 `"auto"` 后，可在该服务访问 `/.ssl` 下载根 CA 并安装信任。
+- 参考实现：[handleConnectWithIntercept()](connect_handler.go:15)、[shouldInterceptHost()](connect_handler.go:35)、[TlsListener](tls_listener.go:9)。
+
+### WebSocket 路由与匹配说明
+- `from.url` 支持 `ws://` / `wss://` 作为协议匹配：
+  - `ws://` 匹配将要升级为 WebSocket 的 HTTP 请求；
+  - `wss://` 匹配将要升级为 WebSocket 的 HTTPS 请求；
+  - 实际转发时，后端目标会自动转换为 `ws`/`wss` 协议连接。
+- 可在 `from.websocket` 中配置消息拦截规则，对客户端/服务端方向分别进行 `match`、`replace`、`log`、`drop` 操作。
+- 参考实现：[handleWebSocket()](websocket_handler.go:14)。
+
+## 配置热重载与服务器同步
+
+- 支持配置文件热重载，后台监视文件变化并自动重新解析与应用规则。
+- 当检测到 `servers` 增删改时，自动启动、停止或重启对应监听服务。
+- 重载成功后输出当前生效的规则摘要，便于快速核验。
+- 参考实现：[ConfigWatcher](watcher.go:33)、[Config.Reload()](config.go:660)、[processConfig()](config.go:558)。
+
+## 附录：策略与单位说明
+
+- 连接策略决策（最小值生效）：
+  - 参考 [ResolvePolicies()](config.go:711)。
+- 流量策略聚合：
+  - 速率限制取最小值，配额按层级聚合；参考 [ResolveTrafficPolicies()](config.go:775)、[minRate()](config.go:886)。
+- 速率单位：
+  - 支持 `kbps`、`mbps`、`gbps`，示例 `500kbps`、`2mbps`；参考 [parseRateLimit()](config.go:858)。
+- 流量配额单位：
+  - 支持 `kb`、`mb`、`gb` 或字节数字；参考 [parseSize()](traffic_shaper.go:200)。
+- 请求次数配额：
+  - 设置为整数（总请求数）。
+- 配额用量持久化：
+  - 运行时配额用量会写入数据文件并在重启后恢复；参考 [LoadDataStore()](config.go:517)、[SaveDataStore()](config.go:543)。
 
 ## 完整配置示例
 

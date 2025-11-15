@@ -1,8 +1,11 @@
 package main
 
 import (
+	"crypto/md5"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -48,12 +51,16 @@ type StatsCollector struct {
 	ServerStats sync.Map // map[string]*Metrics
 	TunnelStats sync.Map // map[string]*Metrics
 	ProxyStats  sync.Map // map[string]*Metrics
+
+	// For auth-aware masking in stats
+	Config *Config
 }
 
 // NewStatsCollector creates and initializes a new StatsCollector.
-func NewStatsCollector() *StatsCollector {
+func NewStatsCollector(config *Config) *StatsCollector {
 	return &StatsCollector{
 		StartTime: time.Now(),
+		Config:    config,
 	}
 }
 
@@ -211,17 +218,24 @@ type PublicStats struct {
 
 // ServeHTTP provides an HTTP endpoint to expose stats as JSON.
 func (sc *StatsCollector) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// 未通过认证则进行键名脱敏（支持会话 Cookie 与 Bearer token）
+	mask := true
+	if isAdminRequest(r, sc.Config) {
+		mask = false
+	}
+	ts := time.Now()
+
 	stats := PublicStats{
 		TotalRequests:     atomic.LoadUint64(&sc.TotalRequests),
 		ActiveConnections: atomic.LoadInt64(&sc.ActiveConnections),
 		TotalBytesSent:    atomic.LoadUint64(&sc.TotalBytesSent),
 		TotalBytesRecv:    atomic.LoadUint64(&sc.TotalBytesRecv),
 		Uptime:            time.Since(sc.StartTime).String(),
-		Rules:             sc.buildPublicMetricsMap(&sc.RuleStats),
-		Users:             sc.buildPublicMetricsMap(&sc.UserStats),
-		Servers:           sc.buildPublicMetricsMap(&sc.ServerStats),
-		Tunnels:           sc.buildPublicMetricsMap(&sc.TunnelStats),
-		Proxies:           sc.buildPublicMetricsMap(&sc.ProxyStats),
+		Rules:             sc.buildPublicMetricsMap(&sc.RuleStats, mask, ts),
+		Users:             sc.buildPublicMetricsMap(&sc.UserStats, mask, ts),
+		Servers:           sc.buildPublicMetricsMap(&sc.ServerStats, mask, ts),
+		Tunnels:           sc.buildPublicMetricsMap(&sc.TunnelStats, mask, ts),
+		Proxies:           sc.buildPublicMetricsMap(&sc.ProxyStats, mask, ts),
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -229,10 +243,16 @@ func (sc *StatsCollector) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // buildPublicMetricsMap converts a sync.Map of internal Metrics to a map of PublicMetrics.
-func (sc *StatsCollector) buildPublicMetricsMap(m *sync.Map) map[string]*PublicMetrics {
+func (sc *StatsCollector) buildPublicMetricsMap(m *sync.Map, mask bool, ts time.Time) map[string]*PublicMetrics {
 	publicMap := make(map[string]*PublicMetrics)
 	m.Range(func(key, value interface{}) bool {
 		k := key.(string)
+		// 根据认证状态对键名进行脱敏（md5(key + timestamp)）
+		maskedKey := k
+		if mask {
+			maskedKey = fmt.Sprintf("%x", md5.Sum([]byte(fmt.Sprintf("%s:%d", k, ts.UnixNano()))))
+		}
+
 		metrics := value.(*Metrics)
 		metrics.mutex.Lock()
 		defer metrics.mutex.Unlock()
@@ -274,7 +294,7 @@ func (sc *StatsCollector) buildPublicMetricsMap(m *sync.Map) map[string]*PublicM
 			minResponseTimeMs /= 1e6
 		}
 
-		publicMap[k] = &PublicMetrics{
+		publicMap[maskedKey] = &PublicMetrics{
 			RequestCount: requestCount,
 			Errors:       atomic.LoadUint64(&metrics.Errors),
 			QPS:          qps,
@@ -300,4 +320,35 @@ func (sc *StatsCollector) buildPublicMetricsMap(m *sync.Map) map[string]*PublicM
 		return true
 	})
 	return publicMap
+}
+
+// isAdminRequest checks admin via session token (cookie) or user.token (Bearer) with admin=true
+func isAdminRequest(r *http.Request, config *Config) bool {
+	// Prefer Authorization: Bearer <token>
+	token := ""
+	auth := r.Header.Get("Authorization")
+	if strings.HasPrefix(auth, "Bearer ") {
+		token = strings.TrimSpace(auth[7:])
+	}
+	if token == "" {
+		if c, err := r.Cookie("APS-Admin-Token"); err == nil {
+			token = c.Value
+		}
+	}
+	if token == "" {
+		return false
+	}
+	// Session tokens from login
+	if sess, ok := AdminSessions.Get(token); ok {
+		return sess.Admin && sess.Expires.After(time.Now())
+	}
+	// Config-defined API tokens
+	if config != nil && config.Auth != nil && config.Auth.Users != nil {
+		for _, u := range config.Auth.Users {
+			if u != nil && u.Token == token && u.Admin {
+				return true
+			}
+		}
+	}
+	return false
 }

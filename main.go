@@ -21,6 +21,7 @@ type ServerManager struct {
 	mu            sync.Mutex
 	wg            sync.WaitGroup
 	config        *Config
+	configFile    string
 	dataStore     *DataStore
 	harManager    *HarLoggerManager
 	tunnelManager *TunnelManager
@@ -30,10 +31,11 @@ type ServerManager struct {
 	replayManager *ReplayManager
 }
 
-func NewServerManager(config *Config, dataStore *DataStore, harManager *HarLoggerManager, tunnelManager *TunnelManager, scriptRunner *ScriptRunner, trafficShaper *TrafficShaper, stats *StatsCollector, replayManager *ReplayManager) *ServerManager {
+func NewServerManager(config *Config, configFile string, dataStore *DataStore, harManager *HarLoggerManager, tunnelManager *TunnelManager, scriptRunner *ScriptRunner, trafficShaper *TrafficShaper, stats *StatsCollector, replayManager *ReplayManager) *ServerManager {
 	return &ServerManager{
 		servers:       make(map[string]*http.Server),
 		config:        config,
+		configFile:    configFile,
 		dataStore:     dataStore,
 		harManager:    harManager,
 		tunnelManager: tunnelManager,
@@ -62,7 +64,7 @@ func (sm *ServerManager) Start(name string, serverConfig *ListenConfig) {
 		}
 	}
 
-	handler := createServerHandler(name, serverMappings[name], serverConfig, sm.config, sm.dataStore, sm.harManager, sm.tunnelManager, sm.scriptRunner, sm.trafficShaper, sm.stats, sm.replayManager)
+	handler := createServerHandler(name, serverMappings[name], serverConfig, sm.config, sm.configFile, sm.dataStore, sm.harManager, sm.tunnelManager, sm.scriptRunner, sm.trafficShaper, sm.stats, sm.replayManager)
 	server := startServer(name, serverConfig, handler)
 	if server != nil {
 		sm.servers[name] = server
@@ -135,10 +137,10 @@ func main() {
 	tunnelManager := NewTunnelManager(config)
 	scriptRunner := NewScriptRunner(config.Scripting)
 	trafficShaper := NewTrafficShaper(dataStore.QuotaUsage)
-	statsCollector := NewStatsCollector()
+	statsCollector := NewStatsCollector(config)
 	replayManager := NewReplayManager(config)
 
-	serverManager := NewServerManager(config, dataStore, harManager, tunnelManager, scriptRunner, trafficShaper, statsCollector, replayManager)
+	serverManager := NewServerManager(config, *configFile, dataStore, harManager, tunnelManager, scriptRunner, trafficShaper, statsCollector, replayManager)
 
 	watcher, err := NewConfigWatcher(*configFile, config, serverManager)
 	if err != nil {
@@ -193,7 +195,7 @@ func (sm *ServerManager) StartAll() {
 	}
 }
 
-func createServerHandler(serverName string, mappings []*Mapping, serverConfig *ListenConfig, config *Config, dataStore *DataStore, harManager *HarLoggerManager, tunnelManager *TunnelManager, scriptRunner *ScriptRunner, trafficShaper *TrafficShaper, stats *StatsCollector, replayManager *ReplayManager) http.Handler {
+func createServerHandler(serverName string, mappings []*Mapping, serverConfig *ListenConfig, config *Config, configFile string, dataStore *DataStore, harManager *HarLoggerManager, tunnelManager *TunnelManager, scriptRunner *ScriptRunner, trafficShaper *TrafficShaper, stats *StatsCollector, replayManager *ReplayManager) http.Handler {
 	mux := http.NewServeMux()
 	proxy := NewMapRemoteProxy(config, dataStore, harManager, tunnelManager, scriptRunner, trafficShaper, stats, serverName)
 
@@ -212,10 +214,14 @@ func createServerHandler(serverName string, mappings []*Mapping, serverConfig *L
 	}
 
 	// 添加统计数据端点
-	mux.HandleFunc("/.stats", stats.ServeHTTP)
+	mux.HandleFunc("/.api/stats", stats.ServeHTTP)
 
 	// 添加重放端点
 	mux.HandleFunc("/.replay", replayManager.ServeHTTP)
+
+	// 注册管理面板处理器
+	adminHandlers := NewAdminHandlers(config, configFile)
+	adminHandlers.RegisterHandlers(mux)
 
 	// 创建一个统一的处理器来处理所有请求
 	mainHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -110,6 +110,8 @@ type TrafficPolicies struct {
 
 type User struct {
 	Password string      `json:"password"`
+	Admin    bool        `json:"admin,omitempty"`
+	Token    string      `json:"token,omitempty"`
 	Groups   []string    `json:"groups,omitempty"`
 	Dump     string      `json:"dump,omitempty"`
 	Endpoint interface{} `json:"endpoint,omitempty"` // string or []string
