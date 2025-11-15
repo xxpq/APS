@@ -1,35 +1,23 @@
 package main
 
 import (
-	"fmt"
 	"log"
 	"net/http"
-	"runtime"
 )
 
-func StartCertServer(port string) {
-	http.HandleFunc("/", handleCertPage)
-	http.HandleFunc("/cert", handleCertDownload)
-	http.HandleFunc("/cert.crt", handleCertDownload)
-	http.HandleFunc("/cert.pem", handleCertDownload)
+// CertHandlers contains the HTTP handlers for the certificate download page.
+type CertHandlers struct{}
 
-	certURL := fmt.Sprintf("http://localhost:%s", port)
-	log.Printf("Certificate download service started at %s", certURL)
-	log.Printf("Visit %s to download and install the root certificate", certURL)
-
-	go func() {
-		if err := http.ListenAndServe(":"+port, nil); err != nil {
-			log.Printf("Certificate server error: %v", err)
-		}
-	}()
+// RegisterHandlers registers the certificate download handlers to the given ServeMux.
+func (h *CertHandlers) RegisterHandlers(mux *http.ServeMux) {
+	mux.HandleFunc("/.ssl", h.handleCertPage)
+	mux.HandleFunc("/.ssl/cert", h.handleCertDownload)
+	mux.HandleFunc("/.ssl/cert.crt", h.handleCertDownload)
+	mux.HandleFunc("/.ssl/cert.pem", h.handleCertDownload)
+	log.Println("Certificate download page available at '/.ssl'")
 }
 
-func handleCertPage(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/" {
-		http.NotFound(w, r)
-		return
-	}
-
+func (h *CertHandlers) handleCertPage(w http.ResponseWriter, r *http.Request) {
 	html := `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -154,7 +142,7 @@ func handleCertPage(w http.ResponseWriter, r *http.Request) {
         
         <div class="download-section">
             <p style="margin-bottom: 20px; color: #666;">下载根证书以信任 HTTPS 代理连接</p>
-            <a href="/cert" class="download-btn" download="Cato_Proxy_Service.crt">
+            <a href="/.ssl/cert" class="download-btn" download="Cato_Proxy_Service.crt">
                 📥 下载根证书
             </a>
         </div>
@@ -227,18 +215,17 @@ func handleCertPage(w http.ResponseWriter, r *http.Request) {
 
             <div class="status">
                 <strong>✅ 安装完成后</strong><br>
-                请重启浏览器或应用程序，配置代理为 <code>localhost:8080</code>
+                请重启浏览器或应用程序，并配置系统代理。
             </div>
         </div>
     </div>
 </body>
 </html>`
-
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Write([]byte(html))
 }
 
-func handleCertDownload(w http.ResponseWriter, r *http.Request) {
+func (h *CertHandlers) handleCertDownload(w http.ResponseWriter, r *http.Request) {
 	certPEM := GetCACertPEM()
 	if certPEM == nil {
 		http.Error(w, "Certificate not available", http.StatusInternalServerError)
@@ -293,13 +280,4 @@ func indexOf(s, substr string) int {
 		}
 	}
 	return -1
-}
-
-func getLocalIP() string {
-	switch runtime.GOOS {
-	case "windows":
-		return "localhost"
-	default:
-		return "localhost"
-	}
 }

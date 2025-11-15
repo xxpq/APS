@@ -19,8 +19,25 @@ func init() {
 type Config struct {
 	Servers  map[string]*ListenConfig `json:"servers"`
 	Proxies  map[string]interface{}   `json:"proxies"`
+	Auth     *AuthConfig              `json:"auth,omitempty"`
 	Mappings []Mapping                `json:"mappings"`
 	mu       sync.RWMutex
+}
+
+type AuthConfig struct {
+	Users  map[string]*User  `json:"users"`
+	Groups map[string]*Group `json:"groups"`
+}
+
+type User struct {
+	Password string   `json:"password"`
+	Groups   []string `json:"groups,omitempty"`
+	Dump     string   `json:"dump,omitempty"`
+}
+
+type Group struct {
+	Users []string `json:"users"`
+	Dump  string   `json:"dump,omitempty"`
 }
 
 // EndpointConfig 用于配置请求或响应的详细信息
@@ -187,19 +204,33 @@ type Mapping struct {
 	Listen interface{} `json:"listen,omitempty"` // string or []string
 	Cc     []string    `json:"cc,omitempty"`
 	Proxy  interface{} `json:"proxy,omitempty"` // string or []string, 引用 proxies 的 key
+	Auth   *RuleAuth   `json:"auth,omitempty"`
+	Dump   string      `json:"dump,omitempty"`
 
 	// 解析后的内部字段
-	fromConfig   *EndpointConfig
-	toConfig     *EndpointConfig
-	listenNames  []string
-	proxyNames   []string
+	fromConfig    *EndpointConfig
+	toConfig      *EndpointConfig
+	listenNames   []string
+	proxyNames    []string
 	resolvedProxy *ProxyManager
 }
 
+type RuleAuth struct {
+	Users  []string `json:"users,omitempty"`
+	Groups []string `json:"groups,omitempty"`
+}
+
 type ListenConfig struct {
-	Port int
-	Cert interface{} // string ("auto") or CertFiles
-	Key  string
+	Port int         `json:"port"`
+	Cert interface{} `json:"cert,omitempty"` // string ("auto") or CertFiles
+	Key  string      `json:"key,omitempty"`
+	Auth *ServerAuth `json:"auth,omitempty"`
+	Dump string      `json:"dump,omitempty"`
+}
+
+type ServerAuth struct {
+	Users  []string `json:"users,omitempty"`
+	Groups []string `json:"groups,omitempty"`
 }
 
 type CertFiles struct {
@@ -216,17 +247,12 @@ func (lc *ListenConfig) UnmarshalJSON(data []byte) error {
 	}
 
 	// If that fails, try to unmarshal as an object
-	var obj struct {
-		Port int         `json:"port"`
-		Cert interface{} `json:"cert"`
-		Key  string      `json:"key"`
-	}
+	type Alias ListenConfig
+	var obj Alias
 	if err := json.Unmarshal(data, &obj); err != nil {
 		return err
 	}
-
-	lc.Port = obj.Port
-	lc.Key = obj.Key
+	*lc = ListenConfig(obj)
 
 	// Check the type of Cert
 	if certStr, ok := obj.Cert.(string); ok {
@@ -498,6 +524,7 @@ func (c *Config) Reload(filename string) error {
 	c.Servers = newConfig.Servers
 	c.Proxies = newConfig.Proxies
 	c.Mappings = newConfig.Mappings
+	c.Auth = newConfig.Auth
 	c.mu.Unlock()
 
 	log.Printf("Configuration reloaded: %d valid mapping rules", len(newConfig.Mappings))

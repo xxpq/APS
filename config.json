@@ -17,12 +17,12 @@
   },
   "proxies": {
     "us_proxies": [
-      "http://proxy1.example.com:8080",
-      "http://proxy2.example.com:8080",
-      "http://proxy3.example.com:8080"
+      "https://proxy1.example.com:8080",
+      "http://user:pass@proxy2.example.com:8080",
+      "socks5://proxy3.example.com:8080"
     ],
     "eu_proxies": [
-      "http://eu-proxy1.example.com:9090",
+      "socks5://user:pass@eu-proxy1.example.com:9090",
       "http://eu-proxy2.example.com:9090"
     ],
     "dedicated_openai": "http://user:pass@dedicated.proxy.com:8080"

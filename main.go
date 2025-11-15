@@ -9,16 +9,11 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 )
 
 func main() {
 	configFile := flag.String("config", "config.json", "Path to configuration file")
-	proxyPort := flag.String("port", "8080", "Proxy server port")
-	certPort := flag.String("cert-port", "9090", "Certificate download server port")
-	dumpFile := flag.String("dump", "", "Path to HAR file to dump traffic")
-	flag.StringVar(dumpFile, "d", "", "Path to HAR file to dump traffic (shorthand)")
 	flag.Parse()
 
 	log.Println("===========================================")
@@ -29,20 +24,16 @@ func main() {
 		log.Fatalf("Failed to initialize certificates: %v", err)
 	}
 
-	StartCertServer(*certPort)
-
 	config, err := LoadConfig(*configFile)
 	if err != nil {
 		log.Fatalf("Failed to load config: %v", err)
 	}
 
-	var harLogger *HarLogger
-	if *dumpFile != "" {
-		harLogger = NewHarLogger()
-		log.Printf("Dumping traffic to %s", *dumpFile)
-	}
+	harManager := NewHarLoggerManager(config)
+	defer harManager.Shutdown()
 
-	proxy := NewMapRemoteProxy(config, harLogger)
+	// The main proxy logic is now handled by each server's handler
+	// proxy := NewMapRemoteProxy(config, harLogger)
 
 	watcher, err := NewConfigWatcher(*configFile, config)
 	if err != nil {
@@ -51,43 +42,28 @@ func main() {
 	watcher.Start()
 	defer watcher.Stop()
 
-	startServers(config)
+	startServers(config, harManager)
 
-	log.Println("===========================================")
-	log.Printf("Proxy server: http://localhost:%s", *proxyPort)
-	log.Printf("Certificate page: http://localhost:%s", *certPort)
 	log.Println("===========================================")
 	log.Printf("Loaded %d mapping rules:", len(config.Mappings))
 	for i, mapping := range config.Mappings {
 		log.Printf("  [%d] %s -> %s (on %v)", i+1, mapping.GetFromURL(), mapping.GetToURL(), mapping.listenNames)
 	}
-
 	log.Println("===========================================")
 	fmt.Println()
 	fmt.Println("🔐 HTTPS Interception Setup:")
-	fmt.Printf("   1. Visit http://localhost:%s to download root certificate\n", *certPort)
-	fmt.Println("   2. Install the certificate on your device")
-	fmt.Printf("   3. Configure proxy: localhost:%s\n", *proxyPort)
+	fmt.Println("   1. Configure your system or browser to use one of the proxy servers.")
+	fmt.Println("   2. Visit '/.ssl' on any server with 'cert: \"auto\"' to download the root certificate.")
 	fmt.Println()
 
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 
-	go func() {
-		if err := http.ListenAndServe(":"+*proxyPort, proxy); err != nil {
-			log.Fatalf("Proxy server failed: %v", err)
-		}
-	}()
-
 	<-sigChan
-	log.Println("\nShutting down proxy server...")
-
-	if harLogger != nil {
-		harLogger.SaveToFile(*dumpFile)
-	}
+	log.Println("\nShutting down servers...")
 }
 
-func startServers(config *Config) {
+func startServers(config *Config, harManager *HarLoggerManager) {
 	// 将 mappings 按 server name 分组
 	serverMappings := make(map[string][]*Mapping)
 	for i := range config.Mappings {
@@ -103,52 +79,41 @@ func startServers(config *Config) {
 		if serverConfig == nil {
 			continue
 		}
-		handler := createServerHandler(mappings, serverConfig.Port)
+		handler := createServerHandler(name, mappings, serverConfig, config, harManager)
 		go startServer(name, serverConfig, handler)
 	}
 }
 
-func createServerHandler(mappings []*Mapping, port int) http.Handler {
+func createServerHandler(serverName string, mappings []*Mapping, serverConfig *ListenConfig, config *Config, harManager *HarLoggerManager) http.Handler {
 	mux := http.NewServeMux()
+	proxy := NewMapRemoteProxy(config, harManager, serverName)
 
-	// 分离相对路径和绝对路径的 mapping
-	var absoluteMappings []*Mapping
-	for _, mapping := range mappings {
-		fromURL := mapping.GetFromURL()
-		if !strings.HasPrefix(fromURL, "http://") && !strings.HasPrefix(fromURL, "https://") {
-			// 相对路径直接注册
-			handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				proxy := NewDedicatedProxy(mapping, port)
-				proxy.ServeHTTP(w, r)
-			})
-			mux.Handle(fromURL, handler)
-			log.Printf("[SERVER] Registered mapping '%s' on port %d", fromURL, port)
-		} else {
-			absoluteMappings = append(absoluteMappings, mapping)
+	// 如果 cert 是 auto，注册证书下载处理器
+	if certStr, ok := serverConfig.Cert.(string); ok && certStr == "auto" {
+		certHandlers := &CertHandlers{}
+		certHandlers.RegisterHandlers(mux)
+	}
+
+	// 创建一个统一的处理器来处理所有请求
+	mainHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// 代理请求 (CONNECT)
+		if r.Method == http.MethodConnect {
+			proxy.ServeHTTP(w, r)
+			return
 		}
-	}
 
-	// 为绝对路径创建一个统一的处理器
-	if len(absoluteMappings) > 0 {
-		absoluteHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// 遍历绝对路径 mappings，找到匹配的
-			for _, mapping := range absoluteMappings {
-				// 简单的 host 匹配
-				fromURL := mapping.GetFromURL()
-				if strings.Contains(fromURL, r.Host) {
-					proxy := NewDedicatedProxy(mapping, port)
-					proxy.ServeHTTP(w, r)
-					return
-				}
-			}
-			// 如果没有匹配的，返回 404
-			http.NotFound(w, r)
-		})
-		mux.Handle("/", absoluteHandler)
-		log.Printf("[SERVER] Registered a catch-all handler on port %d for %d absolute URL mappings", port, len(absoluteMappings))
-	}
+		// 检查 mux 中是否有更具体的匹配 (例如证书下载页面或相对路径)
+		handler, pattern := mux.Handler(r)
+		if pattern != "" {
+			handler.ServeHTTP(w, r)
+			return
+		}
 
-	return mux
+		// 默认处理 HTTP 请求转发
+		proxy.ServeHTTP(w, r)
+	})
+
+	return mainHandler
 }
 
 func startServer(name string, config *ListenConfig, handler http.Handler) {
