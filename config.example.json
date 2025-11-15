@@ -60,7 +60,7 @@
   "mappings": [
     {
       "comment": "示例1: 简单的 API 转发，需要 admin 组权限",
-      "listen": "api_server",
+      "servers": "api_server",
       "from": "https://api.example.com/v1*",
       "to": "https://backend.example.com/api/v1*",
       "proxy": "us_proxies",
@@ -71,7 +71,7 @@
     },
     {
       "comment": "示例2: 绑定到多个监听服务，dev_user 或 guest 组有权限",
-      "listen": ["default", "api_server"],
+      "servers": ["default", "api_server"],
       "from": "https://multi.example.com/*",
       "to": "https://backend.multi.com/*",
       "proxy": ["us_proxies", "eu_proxies"],
@@ -82,13 +82,13 @@
     },
     {
       "comment": "示例3: 本地静态文件服务，无需认证",
-      "listen": "local_dev",
+      "servers": "local_dev",
       "from": "/static/*",
       "local": "./static/*"
     },
     {
       "comment": "示例4: OpenAI 请求转发，只有 dev_user 有权限",
-      "listen": "openai_specific",
+      "servers": "openai_specific",
       "from": {
         "url": "https://api.openai.com/v1*",
         "headers": {

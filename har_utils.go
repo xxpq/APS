@@ -14,13 +14,54 @@ func (p *MapRemoteProxy) logHarEntry(req *http.Request, resp *http.Response, sta
 		return
 	}
 
+	dumpPaths := p.collectDumpPaths(mapping, user)
+	if len(dumpPaths) == 0 {
+		return
+	}
+
 	harEntry, err := p.createHarEntry(req, resp, startTime)
 	if err != nil {
 		log.Printf("Error creating HAR entry: %v", err)
 		return
 	}
 
-	p.harManager.LogEntry(*harEntry, p.serverName, mapping, user)
+	p.harManager.LogEntry(dumpPaths, *harEntry)
+}
+
+// collectDumpPaths gathers all unique dump file paths from server, mapping, user, and groups.
+func (p *MapRemoteProxy) collectDumpPaths(mapping *Mapping, user *User) []string {
+	paths := make(map[string]struct{})
+
+	// Server level
+	if server, ok := p.config.Servers[p.serverName]; ok && server.Dump != "" {
+		paths[server.Dump] = struct{}{}
+	}
+
+	// Mapping level
+	if mapping != nil && mapping.Dump != "" {
+		paths[mapping.Dump] = struct{}{}
+	}
+
+	// User and Group levels
+	if user != nil {
+		if user.Dump != "" {
+			paths[user.Dump] = struct{}{}
+		}
+		if p.config.Auth != nil && p.config.Auth.Groups != nil {
+			for _, groupName := range user.Groups {
+				if group, ok := p.config.Auth.Groups[groupName]; ok && group.Dump != "" {
+					paths[group.Dump] = struct{}{}
+				}
+			}
+		}
+	}
+
+	// Convert map keys to a slice
+	result := make([]string, 0, len(paths))
+	for path := range paths {
+		result = append(result, path)
+	}
+	return result
 }
 
 func (p *MapRemoteProxy) createHarEntry(req *http.Request, resp *http.Response, startTime time.Time) (*HarEntry, error) {

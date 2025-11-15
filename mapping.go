@@ -38,7 +38,7 @@ func (p *MapRemoteProxy) mapRequest(r *http.Request) (string, bool, *Mapping) {
 func (p *MapRemoteProxy) calculateMatchScore(mapping *Mapping, r *http.Request, originalURL string) (int, string) {
 	// Check if the mapping is for the current server
 	isForThisServer := false
-	for _, name := range mapping.listenNames {
+	for _, name := range mapping.serverNames {
 		if name == p.serverName {
 			isForThisServer = true
 			break

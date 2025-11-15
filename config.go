@@ -227,7 +227,7 @@ type Mapping struct {
 	From   interface{} `json:"from"`         // 可以是字符串或 EndpointConfig 对象
 	To     interface{} `json:"to,omitempty"` // 可以是字符串或 EndpointConfig 对象
 	Local  string      `json:"local,omitempty"`
-	Listen interface{} `json:"listen,omitempty"` // string or []string
+	Servers interface{} `json:"servers,omitempty"` // string or []string
 	Cc     []string    `json:"cc,omitempty"`
 	Proxy    interface{} `json:"proxy,omitempty"` // string or []string, 引用 proxies 的 key
 	Endpoint interface{} `json:"endpoint,omitempty"`
@@ -240,7 +240,7 @@ type Mapping struct {
 	// 解析后的内部字段
 	fromConfig    *EndpointConfig
 	toConfig      *EndpointConfig
-	listenNames   []string
+	serverNames   []string
 	proxyNames    []string
 	endpointNames []string
 	tunnelNames   []string
@@ -485,23 +485,26 @@ func processConfig(config *Config) error {
 			mapping.toConfig = toConfig
 		}
 
-		// 解析 listen names
-		mapping.listenNames = parseStringOrArray(mapping.Listen)
-		if len(mapping.listenNames) == 0 {
-			// 默认绑定到 default server
-			if _, ok := config.Servers["default"]; ok {
-				mapping.listenNames = []string{"default"}
-			} else {
-				log.Printf("Warning: mapping %d skipped - 'listen' is not specified and no 'default' server found", i+1)
+		// 解析 server names
+		mapping.serverNames = parseStringOrArray(mapping.Servers)
+		if len(mapping.serverNames) == 0 {
+			// If no servers are specified, this mapping applies to ALL servers.
+			// This is a common use case for global rules.
+			// We will populate serverNames with all available server names.
+			for name := range config.Servers {
+				mapping.serverNames = append(mapping.serverNames, name)
+			}
+			if len(mapping.serverNames) == 0 {
+				log.Printf("Warning: mapping %d skipped - 'servers' is not specified and no servers are defined", i+1)
 				continue
 			}
-		}
-
-		// 验证 listen names 是否存在
-		for _, name := range mapping.listenNames {
-			if _, ok := config.Servers[name]; !ok {
-				log.Printf("Warning: mapping %d skipped - server name '%s' not found in servers config", i+1, name)
-				continue
+		} else {
+			// 验证 server names 是否存在
+			for _, name := range mapping.serverNames {
+				if _, ok := config.Servers[name]; !ok {
+					log.Printf("Warning: mapping %d skipped - server name '%s' not found in servers config", i+1, name)
+					continue
+				}
 			}
 		}
 
@@ -570,7 +573,7 @@ func (c *Config) Reload(filename string) error {
 
 	log.Printf("Configuration reloaded: %d valid mapping rules", len(newConfig.Mappings))
 	for _, mapping := range c.Mappings {
-		log.Printf("  Rule: %s -> %s on servers: %v", mapping.GetFromURL(), mapping.GetToURL(), mapping.listenNames)
+		log.Printf("  Rule: %s -> %s on servers: %v", mapping.GetFromURL(), mapping.GetToURL(), mapping.serverNames)
 	}
 
 	return nil

@@ -49,7 +49,7 @@ func main() {
 	log.Println("===========================================")
 	log.Printf("Loaded %d mapping rules:", len(config.Mappings))
 	for i, mapping := range config.Mappings {
-		log.Printf("  [%d] %s -> %s (on %v)", i+1, mapping.GetFromURL(), mapping.GetToURL(), mapping.listenNames)
+		log.Printf("  [%d] %s -> %s (on %v)", i+1, mapping.GetFromURL(), mapping.GetToURL(), mapping.serverNames)
 	}
 	log.Println("===========================================")
 	fmt.Println()
@@ -70,7 +70,7 @@ func startServers(config *Config, harManager *HarLoggerManager, tunnelManager *T
 	serverMappings := make(map[string][]*Mapping)
 	for i := range config.Mappings {
 		mapping := &config.Mappings[i]
-		for _, serverName := range mapping.listenNames {
+		for _, serverName := range mapping.serverNames {
 			serverMappings[serverName] = append(serverMappings[serverName], mapping)
 		}
 	}

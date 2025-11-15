@@ -93,15 +93,64 @@ type HarTimings struct {
 	Receive float64 `json:"receive"`
 }
 
-// HarLogger manages the HAR log
+// HarLogger manages a single HAR log file.
 type HarLogger struct {
 	mu       sync.Mutex
 	log      *HarLog
 	filePath string
 }
 
-func NewHarLogger(filePath string) *HarLogger {
-	// 尝试读取现有文件
+// HarLoggerManager manages multiple HarLogger instances.
+type HarLoggerManager struct {
+	mu      sync.Mutex
+	loggers map[string]*HarLogger
+	config  *Config
+}
+
+func NewHarLoggerManager(config *Config) *HarLoggerManager {
+	return &HarLoggerManager{
+		loggers: make(map[string]*HarLogger),
+		config:  config,
+	}
+}
+
+// GetLogger retrieves or creates a HarLogger for a given file path.
+func (m *HarLoggerManager) GetLogger(filePath string) *HarLogger {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if logger, exists := m.loggers[filePath]; exists {
+		return logger
+	}
+
+	logger := newHarLogger(filePath)
+	m.loggers[filePath] = logger
+	return logger
+}
+
+// LogEntry logs a HAR entry to all specified file paths.
+func (m *HarLoggerManager) LogEntry(filePaths []string, entry HarEntry) {
+	for _, path := range filePaths {
+		if path != "" {
+			logger := m.GetLogger(path)
+			logger.addEntry(entry)
+		}
+	}
+}
+
+// Shutdown saves all managed HAR logs to their respective files.
+func (m *HarLoggerManager) Shutdown() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	log.Println("Shutting down HAR logger manager, saving all logs...")
+	for _, logger := range m.loggers {
+		logger.saveToFile()
+	}
+}
+
+// newHarLogger creates a new HarLogger instance.
+func newHarLogger(filePath string) *HarLogger {
+	// Attempt to read existing file
 	existingData, err := ioutil.ReadFile(filePath)
 	if err == nil {
 		var harLog HarLog
@@ -115,7 +164,7 @@ func NewHarLogger(filePath string) *HarLogger {
 		log.Printf("[HAR DUMP] Warning: Could not parse existing HAR file %s, it will be overwritten.", filePath)
 	}
 
-	// 如果文件不存在或无法解析，则创建一个新的
+	// Create a new log if file doesn't exist or is invalid
 	log.Printf("[HAR DUMP] Initialized new HAR logger for: %s", filePath)
 	return &HarLogger{
 		filePath: filePath,
@@ -132,17 +181,17 @@ func NewHarLogger(filePath string) *HarLogger {
 	}
 }
 
-func (h *HarLogger) AddEntry(entry HarEntry) {
+func (h *HarLogger) addEntry(entry HarEntry) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.log.Log.Entries = append(h.log.Log.Entries, entry)
 }
 
-func (h *HarLogger) SaveToFile() {
+func (h *HarLogger) saveToFile() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	// 确保目录存在
+	// Ensure directory exists
 	dir := filepath.Dir(h.filePath)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		log.Printf("Error creating directory for HAR file %s: %v", h.filePath, err)

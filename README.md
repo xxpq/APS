@@ -45,7 +45,7 @@ go build -o proxy_tool.exe .
     {
       "from": "https://api.example.com/*",
       "to": "https://backend.example.com/*",
-      "listen": ["main"]
+      "servers": ["main"]
     }
   ]
 }
@@ -234,7 +234,7 @@ go build -o proxy_tool.exe .
   "from": "string | object",
   "to": "string | object",
   "local": "string (optional)",
-  "listen": ["string array (optional)"],
+  "servers": ["string array (optional)"],
   "proxy": ["string array (optional)"],
   "p12": "string (optional)",
   "endpoint": "string | string array (optional)",
@@ -247,16 +247,16 @@ go build -o proxy_tool.exe .
 
 **核心关联字段**：
 
-- `listen` (可选): 一个字符串数组，指定这条规则在哪些 `servers` 上生效。
+- `servers` (可选): 一个字符串数组，指定这条规则在哪些 `servers` 上生效。
   - 如果 `from` 是**绝对 URL** (e.g., `https://...`)，规则在通过指定 `server` 代理时生效。
   - 如果 `from` 是**相对 URL** (e.g., `/api/*`)，规则在直接访问指定 `server` 时生效。
-  - **如果不提供 `listen`**，规则默认在**所有**定义的 `servers` 上生效。
+  - **如果不提供 `servers`**，规则默认在**所有**定义的 `servers` 上生效。
 - `proxy` (可选): 一个字符串数组，指定请求匹配后，使用哪些在 `proxies` 中定义的代理池。每次请求会从所有指定的代理池中随机选择一个代理地址。
 - `p12` (可选): 一个字符串，引用在 `p12s` 中定义的客户端证书名称。如果提供，代理在转发此请求时会带上该证书，用于 mTLS 认证。
 - `auth` (可选): 为单条规则定义认证要求。
   - `{"users": ["admin"], "groups": ["developers"]}`: 允许 `admin` 用户或 `developers` 组的成员访问。
   - `{"required": true}`: 允许任何已定义的用户访问。
-- `dump` (可选): 为匹配此规则的流量启用 HAR 日志，**优先级最高**。
+- `dump` (可选): 为匹配此规则的流量启用 HAR 日志。
 - `endpoint` (可选): 一个字符串或字符串数组，引用 `endpoint` 客户端的名称。用于将请求通过隧道转发到内网机器。如果提供了多个名称，将从在线的客户端中随机选择一个。**`endpoint` 优先于 `tunnel`**。
 - `tunnel` (可选): 一个字符串或字符串数组，引用 `tunnels` 中定义的隧道名称。用于将请求随机转发到属于该隧道的**任何一个在线 `endpoint`**。
 - **连接策略**: `timeout`, `idleTimeout`, `maxThread`, `quality` (详情见下文)。
@@ -284,19 +284,19 @@ go build -o proxy_tool.exe .
       "comment": "规则1: 仅在公共代理上生效",
       "from": "https://api.openai.com/*",
       "to": "https://api.openai.com/*",
-      "listen": ["public_proxy"]
+      "servers": ["public_proxy"]
     },
     {
       "comment": "规则2: 托管本地文件，仅在开发服务器上生效",
       "from": "/static/*",
       "local": "./static/*",
-      "listen": ["dev_server"]
+      "servers": ["dev_server"]
     },
     {
       "comment": "规则3: 在两个服务器上都生效",
       "from": "https://api.google.com/*",
       "to": "https://api.google.com/*",
-      "listen": ["public_proxy", "dev_server"]
+      "servers": ["public_proxy", "dev_server"]
     }
   ]
 }
@@ -417,18 +417,30 @@ go build -o proxy_tool.exe .
 }
 ```
 
-**HAR 文件选择优先级** (从高到低):
+**HAR 文件记录行为**:
 
-1. `mapping.dump`
-2. `user.dump`
-3. `group.dump`
-4. `server.dump`
+如果一个请求同时命中了多个层级（`server`, `group`, `user`, `mapping`）的 `dump` 配置，该请求的流量将被**同时记录到所有**指定的 HAR 文件中。
 
 **场景分析**：
 
-- `inspector` 用户访问 `https://critical.api.com` -> 日志写入 `critical_api.har` (Mapping 优先级最高)。
-- `inspector` 用户访问其他网站 -> 日志写入 `inspector_user.har` (User 优先级次之)。
-- 其他匿名用户访问任何网站 (除了 critical.api.com) -> 日志写入 `default.har` (Server 优先级最低)。
+假设 `inspector` 用户属于 `developers` 组，且 `developers` 组的配置为 `"dump": "./logs/dev_group.har"`。
+
+- `inspector` 用户访问 `https://critical.api.com`:
+  - 日志将被写入 **3** 个文件:
+    1. `./logs/critical_api.har` (来自 mapping)
+    2. `./logs/inspector_user.har` (来自 user)
+    3. `./logs/dev_group.har` (来自 group)
+- `inspector` 用户访问其他网站:
+  - 日志将被写入 **3** 个文件:
+    1. `./logs/default.har` (来自 server)
+    2. `./logs/inspector_user.har` (来自 user)
+    3. `./logs/dev_group.har` (来自 group)
+- 其他匿名用户访问 `https://critical.api.com`:
+  - 日志将被写入 **1** 个文件:
+    1. `./logs/critical_api.har` (来自 mapping)
+- 其他匿名用户访问其他网站:
+  - 日志将被写入 **1** 个文件:
+    1. `./logs/default.har` (来自 server)
 
 ---
 
