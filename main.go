@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"crypto/tls"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -22,6 +21,7 @@ type ServerManager struct {
 	mu            sync.Mutex
 	wg            sync.WaitGroup
 	config        *Config
+	dataStore     *DataStore
 	harManager    *HarLoggerManager
 	tunnelManager *TunnelManager
 	scriptRunner  *ScriptRunner
@@ -30,10 +30,11 @@ type ServerManager struct {
 	replayManager *ReplayManager
 }
 
-func NewServerManager(config *Config, harManager *HarLoggerManager, tunnelManager *TunnelManager, scriptRunner *ScriptRunner, trafficShaper *TrafficShaper, stats *StatsCollector, replayManager *ReplayManager) *ServerManager {
+func NewServerManager(config *Config, dataStore *DataStore, harManager *HarLoggerManager, tunnelManager *TunnelManager, scriptRunner *ScriptRunner, trafficShaper *TrafficShaper, stats *StatsCollector, replayManager *ReplayManager) *ServerManager {
 	return &ServerManager{
 		servers:       make(map[string]*http.Server),
 		config:        config,
+		dataStore:     dataStore,
 		harManager:    harManager,
 		tunnelManager: tunnelManager,
 		scriptRunner:  scriptRunner,
@@ -61,7 +62,7 @@ func (sm *ServerManager) Start(name string, serverConfig *ListenConfig) {
 		}
 	}
 
-	handler := createServerHandler(name, serverMappings[name], serverConfig, sm.config, sm.harManager, sm.tunnelManager, sm.scriptRunner, sm.trafficShaper, sm.stats, sm.replayManager)
+	handler := createServerHandler(name, serverMappings[name], serverConfig, sm.config, sm.dataStore, sm.harManager, sm.tunnelManager, sm.scriptRunner, sm.trafficShaper, sm.stats, sm.replayManager)
 	server := startServer(name, serverConfig, handler)
 	if server != nil {
 		sm.servers[name] = server
@@ -107,6 +108,7 @@ func (sm *ServerManager) StopAll() {
 
 func main() {
 	configFile := flag.String("config", "config.json", "Path to configuration file")
+	dataFile := flag.String("data", "data.json", "Path to data file for quota persistence")
 	flag.Parse()
 
 	log.Println("===========================================")
@@ -122,16 +124,21 @@ func main() {
 		log.Fatalf("Failed to load config: %v", err)
 	}
 
+	dataStore, err := LoadDataStore(*dataFile)
+	if err != nil {
+		log.Fatalf("Failed to load data store: %v", err)
+	}
+
 	harManager := NewHarLoggerManager(config)
 	defer harManager.Shutdown()
 
 	tunnelManager := NewTunnelManager(config)
 	scriptRunner := NewScriptRunner(config.Scripting)
-	trafficShaper := NewTrafficShaper()
+	trafficShaper := NewTrafficShaper(dataStore.QuotaUsage)
 	statsCollector := NewStatsCollector()
 	replayManager := NewReplayManager(config)
 
-	serverManager := NewServerManager(config, harManager, tunnelManager, scriptRunner, trafficShaper, statsCollector, replayManager)
+	serverManager := NewServerManager(config, dataStore, harManager, tunnelManager, scriptRunner, trafficShaper, statsCollector, replayManager)
 
 	watcher, err := NewConfigWatcher(*configFile, config, serverManager)
 	if err != nil {
@@ -142,7 +149,7 @@ func main() {
 
 	serverManager.StartAll()
 
-	startQuotaPersistence(config, trafficShaper, *configFile)
+	startQuotaPersistence(dataStore, trafficShaper, *dataFile)
 
 	log.Println("===========================================")
 	log.Printf("Loaded %d mapping rules:", len(config.Mappings))
@@ -186,9 +193,9 @@ func (sm *ServerManager) StartAll() {
 	}
 }
 
-func createServerHandler(serverName string, mappings []*Mapping, serverConfig *ListenConfig, config *Config, harManager *HarLoggerManager, tunnelManager *TunnelManager, scriptRunner *ScriptRunner, trafficShaper *TrafficShaper, stats *StatsCollector, replayManager *ReplayManager) http.Handler {
+func createServerHandler(serverName string, mappings []*Mapping, serverConfig *ListenConfig, config *Config, dataStore *DataStore, harManager *HarLoggerManager, tunnelManager *TunnelManager, scriptRunner *ScriptRunner, trafficShaper *TrafficShaper, stats *StatsCollector, replayManager *ReplayManager) http.Handler {
 	mux := http.NewServeMux()
-	proxy := NewMapRemoteProxy(config, harManager, tunnelManager, scriptRunner, trafficShaper, stats, serverName)
+	proxy := NewMapRemoteProxy(config, dataStore, harManager, tunnelManager, scriptRunner, trafficShaper, stats, serverName)
 
 	// 检查此 server 是否为 tunnel 接入点
 	if tunnel := tunnelManager.GetTunnelForServer(serverName); tunnel != nil {
@@ -278,49 +285,30 @@ func startServer(name string, config *ListenConfig, handler http.Handler) *http.
 	}
 	return server
 }
-func startQuotaPersistence(config *Config, trafficShaper *TrafficShaper, configFile string) {
+func startQuotaPersistence(dataStore *DataStore, trafficShaper *TrafficShaper, dataFile string) {
 	ticker := time.NewTicker(10 * time.Second)
 	go func() {
 		for range ticker.C {
 			trafficShaper.quotas.Range(func(key, value interface{}) bool {
 				sourceKey := key.(string)
+				dataStore.mu.Lock()
 				if tq, ok := value.(*TrafficQuota); ok {
-					if config.QuotaUsage == nil {
-						config.QuotaUsage = make(map[string]*QuotaUsageData)
+					if _, ok := dataStore.QuotaUsage[sourceKey]; !ok {
+						dataStore.QuotaUsage[sourceKey] = &QuotaUsageData{}
 					}
-					if _, ok := config.QuotaUsage[sourceKey]; !ok {
-						config.QuotaUsage[sourceKey] = &QuotaUsageData{}
-					}
-					config.QuotaUsage[sourceKey].TrafficUsed = tq.Used
+					dataStore.QuotaUsage[sourceKey].TrafficUsed = tq.Used
 				} else if rq, ok := value.(*RequestQuota); ok {
-					if config.QuotaUsage == nil {
-						config.QuotaUsage = make(map[string]*QuotaUsageData)
+					if _, ok := dataStore.QuotaUsage[sourceKey]; !ok {
+						dataStore.QuotaUsage[sourceKey] = &QuotaUsageData{}
 					}
-					if _, ok := config.QuotaUsage[sourceKey]; !ok {
-						config.QuotaUsage[sourceKey] = &QuotaUsageData{}
-					}
-					config.QuotaUsage[sourceKey].RequestsUsed = rq.Used
+					dataStore.QuotaUsage[sourceKey].RequestsUsed = rq.Used
 				}
+				dataStore.mu.Unlock()
 				return true
 			})
-			if err := saveConfig(config, configFile); err != nil {
+			if err := SaveDataStore(dataStore, dataFile); err != nil {
 				log.Printf("[QUOTA] Error saving quota usage: %v", err)
 			}
 		}
 	}()
-}
-
-func saveConfig(config *Config, filename string) error {
-	config.mu.Lock()
-	defer config.mu.Unlock()
-
-	file, err := os.OpenFile(filename, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-
-	encoder := json.NewEncoder(file)
-	encoder.SetIndent("", "  ")
-	return encoder.Encode(config)
 }

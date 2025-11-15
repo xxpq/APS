@@ -103,9 +103,11 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	// Check all applicable quotas
 	for source, quotaLimit := range quotas {
 		var initialUsage int64
-		if usage, ok := p.config.QuotaUsage[source]; ok {
+		p.dataStore.mu.Lock()
+		if usage, ok := p.dataStore.QuotaUsage[source]; ok {
 			initialUsage = usage.TrafficUsed
 		}
+		p.dataStore.mu.Unlock()
 		quota, err := p.trafficShaper.GetTrafficQuota(source, quotaLimit, initialUsage)
 		if err != nil {
 			log.Printf("[TRAFFIC] Error creating quota for %s: %v", source, err)
@@ -121,9 +123,11 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	// Check all applicable request quotas
 	for source, quotaLimit := range requestQuotas {
 		var initialUsage int64
-		if usage, ok := p.config.QuotaUsage[source]; ok {
+		p.dataStore.mu.Lock()
+		if usage, ok := p.dataStore.QuotaUsage[source]; ok {
 			initialUsage = usage.RequestsUsed
 		}
+		p.dataStore.mu.Unlock()
 		quota, err := p.trafficShaper.GetRequestQuota(source, quotaLimit, initialUsage)
 		if err != nil {
 			log.Printf("[TRAFFIC] Error creating request quota for %s: %v", source, err)

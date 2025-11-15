@@ -20,15 +20,19 @@ func init() {
 }
 
 type Config struct {
-	Servers    map[string]*ListenConfig   `json:"servers"`
-	Proxies    map[string]*ProxyConfig    `json:"proxies"`
-	Tunnels    map[string]*TunnelConfig   `json:"tunnels,omitempty"`
-	Auth       *AuthConfig                `json:"auth,omitempty"`
-	P12s       map[string]*P12Config      `json:"p12s,omitempty"`
-	Scripting  *ScriptingConfig           `json:"scripting,omitempty"`
-	Mappings   []Mapping                  `json:"mappings"`
+	Servers   map[string]*ListenConfig `json:"servers"`
+	Proxies   map[string]*ProxyConfig  `json:"proxies"`
+	Tunnels   map[string]*TunnelConfig `json:"tunnels,omitempty"`
+	Auth      *AuthConfig              `json:"auth,omitempty"`
+	P12s      map[string]*P12Config    `json:"p12s,omitempty"`
+	Scripting *ScriptingConfig         `json:"scripting,omitempty"`
+	Mappings  []Mapping                `json:"mappings"`
+	mu        sync.RWMutex
+}
+
+type DataStore struct {
 	QuotaUsage map[string]*QuotaUsageData `json:"quotaUsage,omitempty"`
-	mu         sync.RWMutex
+	mu         sync.Mutex
 }
 
 type QuotaUsageData struct {
@@ -507,6 +511,47 @@ func LoadConfig(filename string) (*Config, error) {
 	}
 
 	return &config, nil
+}
+
+func LoadDataStore(filename string) (*DataStore, error) {
+	file, err := os.Open(filename)
+	if err != nil {
+		if os.IsNotExist(err) {
+			log.Printf("Data file '%s' not found, creating a new one.", filename)
+			return &DataStore{QuotaUsage: make(map[string]*QuotaUsageData)}, nil
+		}
+		return nil, err
+	}
+	defer file.Close()
+
+	var dataStore DataStore
+	decoder := json.NewDecoder(file)
+	if err := decoder.Decode(&dataStore); err != nil {
+		log.Printf("Error decoding data file '%s', starting with empty data: %v", filename, err)
+		// If the file is corrupted or empty, start with a fresh data store
+		return &DataStore{QuotaUsage: make(map[string]*QuotaUsageData)}, nil
+	}
+
+	if dataStore.QuotaUsage == nil {
+		dataStore.QuotaUsage = make(map[string]*QuotaUsageData)
+	}
+
+	return &dataStore, nil
+}
+
+func SaveDataStore(dataStore *DataStore, filename string) error {
+	dataStore.mu.Lock()
+	defer dataStore.mu.Unlock()
+
+	file, err := os.OpenFile(filename, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	encoder := json.NewEncoder(file)
+	encoder.SetIndent("", "  ")
+	return encoder.Encode(dataStore)
 }
 
 func processConfig(config *Config) error {

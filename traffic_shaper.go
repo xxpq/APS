@@ -34,8 +34,19 @@ type RequestQuota struct {
 	Exceeded bool
 }
 
-func NewTrafficShaper() *TrafficShaper {
-	return &TrafficShaper{}
+func NewTrafficShaper(initialUsage map[string]*QuotaUsageData) *TrafficShaper {
+	ts := &TrafficShaper{}
+	for key, data := range initialUsage {
+		if data.TrafficUsed > 0 {
+			// This will be fully populated when GetTrafficQuota is called with the limit
+			ts.quotas.Store(key, &TrafficQuota{Used: data.TrafficUsed})
+		}
+		if data.RequestsUsed > 0 {
+			// This will be fully populated when GetRequestQuota is called with the limit
+			ts.quotas.Store(key, &RequestQuota{Used: data.RequestsUsed})
+		}
+	}
+	return ts
 }
 
 // GetLimiter returns a rate limiter for a given key and rate limit string (e.g., "1mbps").
