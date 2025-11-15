@@ -21,6 +21,7 @@ type Config struct {
 	Proxies  map[string]interface{}      `json:"proxies"`
 	Tunnels  map[string]*TunnelConfig    `json:"tunnels,omitempty"`
 	Auth     *AuthConfig                 `json:"auth,omitempty"`
+	P12s     map[string]*P12Config       `json:"p12s,omitempty"`
 	Mappings []Mapping                   `json:"mappings"`
 	mu       sync.RWMutex
 }
@@ -28,6 +29,11 @@ type Config struct {
 type TunnelConfig struct {
 	Servers  []string `json:"servers"`
 	Password string   `json:"password,omitempty"` // AES key for encryption
+}
+
+type P12Config struct {
+	Path     string `json:"path"`
+	Password string `json:"password"`
 }
 
 type AuthConfig struct {
@@ -223,6 +229,7 @@ type Mapping struct {
 	Cc     []string    `json:"cc,omitempty"`
 	Proxy    interface{} `json:"proxy,omitempty"` // string or []string, 引用 proxies 的 key
 	Endpoint interface{} `json:"endpoint,omitempty"`
+	P12      string      `json:"p12,omitempty"` // 引用 p12s 的 key
 	Auth     *RuleAuth   `json:"auth,omitempty"`
 	Dump     string      `json:"dump,omitempty"`
 	ConnectionPolicies

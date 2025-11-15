@@ -80,3 +80,8 @@ func (t *TunnelRoundTripper) roundTripViaTunnel(req *http.Request, endpoint *End
 
 	return resp, nil
 }
+
+// GetInnerTransport returns the next round tripper in the chain.
+func (t *TunnelRoundTripper) GetInnerTransport() http.RoundTripper {
+	return t.next
+}

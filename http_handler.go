@@ -3,12 +3,15 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"io"
 	"io/ioutil"
 	"log"
 	"net/http"
 	"net/url"
 	"time"
+
+	"golang.org/x/crypto/pkcs12"
 )
 
 func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
@@ -97,6 +100,22 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		Transport: p.client.Transport,
 		Timeout:   policies.Timeout, // Apply overall request timeout
 	}
+
+	// Check for mTLS/P12 configuration
+	if matched && mapping != nil && mapping.P12 != "" {
+		if p12Config, ok := p.config.P12s[mapping.P12]; ok {
+			p12Client, err := p.createClientWithP12(p12Config.Path, p12Config.Password, policies)
+			if err != nil {
+				log.Printf("[P12] Error creating client with P12 certificate: %v", err)
+			} else {
+				log.Printf("[P12] Using client certificate from %s for this request", p12Config.Path)
+				client = p12Client
+			}
+		} else {
+			log.Printf("[P12] Warning: P12 certificate name '%s' not found in config", mapping.P12)
+		}
+	}
+
 	var proxyManager *ProxyManager
 
 	if matched && mapping != nil {
@@ -298,4 +317,43 @@ func (tr *ThrottledReader) Read(p []byte) (n int, err error) {
 		time.Sleep(delay)
 	}
 	return tr.r.Read(p)
+}
+
+// createClientWithP12 creates an HTTP client configured with a client certificate from a P12 file.
+func (p *MapRemoteProxy) createClientWithP12(p12Path, password string, policies FinalPolicies) (*http.Client, error) {
+	p12Bytes, err := ioutil.ReadFile(p12Path)
+	if err != nil {
+		return nil, err
+	}
+
+	privateKey, certificate, err := pkcs12.Decode(p12Bytes, password)
+	if err != nil {
+		return nil, err
+	}
+
+	// Create a new transport, inheriting from the default one but adding the client cert
+	// This is important to keep other transport settings like proxy, timeouts, etc.
+	baseTransport := p.client.Transport.(*TunnelRoundTripper).GetInnerTransport().(*http.Transport)
+	transport := baseTransport.Clone()
+
+	transport.TLSClientConfig = &tls.Config{
+		InsecureSkipVerify: true, // Keep this for general proxy functionality
+		Certificates: []tls.Certificate{
+			{
+				Certificate: [][]byte{certificate.Raw},
+				PrivateKey:  privateKey,
+			},
+		},
+	}
+
+	// Wrap it in the TunnelRoundTripper again
+	tunnelTransport := NewTunnelRoundTripper(p.tunnelManager, transport)
+
+	return &http.Client{
+		Transport: tunnelTransport,
+		Timeout:   policies.Timeout,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}, nil
 }

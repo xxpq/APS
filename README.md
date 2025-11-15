@@ -87,6 +87,9 @@ go build -o proxy_tool.exe .
     "users": { ... },
     "groups": { ... }
   },
+  "p12s": {
+    "cert_name_1": { ... }
+  },
   "mappings": [
     { ... },
     { ... }
@@ -201,7 +204,28 @@ go build -o proxy_tool.exe .
 
 ---
 
-### 4. `mappings` - 定义路由和处理规则
+### 4. `p12s` - 定义客户端证书
+
+`p12s` 是一个 `map`，用于注册和命名客户端证书（.p12 或 .pfx 文件），以便在 `mapping` 规则中引用以实现双向认证 (mTLS)。
+
+```json
+{
+  "p12s": {
+    "my_client_cert": {
+      "path": "./certs/client.p12",
+      "password": "p12_password"
+    }
+  }
+}
+```
+
+**字段说明**:
+- `path` (必需): `.p12` 或 `.pfx` 证书文件的路径。
+- `password` (必需): 证书文件的密码。
+
+---
+
+### 5. `mappings` - 定义路由和处理规则
 
 `mappings` 是一个规则数组，是工具的核心。每条规则定义了如何匹配请求，并如何处理它。
 
@@ -212,6 +236,7 @@ go build -o proxy_tool.exe .
   "local": "string (optional)",
   "listen": ["string array (optional)"],
   "proxy": ["string array (optional)"],
+  "p12": "string (optional)",
   "auth": { ... },
   "dump": "string (optional)",
   "cc": ["string array (optional)"]
@@ -225,6 +250,7 @@ go build -o proxy_tool.exe .
   - 如果 `from` 是**相对 URL** (e.g., `/api/*`)，规则在直接访问指定 `server` 时生效。
   - **如果不提供 `listen`**，规则默认在**所有**定义的 `servers` 上生效。
 - `proxy` (可选): 一个字符串数组，指定请求匹配后，使用哪些在 `proxies` 中定义的代理池。每次请求会从所有指定的代理池中随机选择一个代理地址。
+- `p12` (可选): 一个字符串，引用在 `p12s` 中定义的客户端证书名称。如果提供，代理在转发此请求时会带上该证书，用于 mTLS 认证。
 - `auth` (可选): 为单条规则定义认证要求。
   - `{"users": ["admin"], "groups": ["developers"]}`: 允许 `admin` 用户或 `developers` 组的成员访问。
   - `{"required": true}`: 允许任何已定义的用户访问。
@@ -462,7 +488,38 @@ go build -o proxy_tool.exe .
 
 ---
 
-### 示例 6: NAT 穿透 (Tunnels & Endpoints)
+### 示例 6: 双向认证 (mTLS)
+
+此示例展示了如何配置一个需要客户端证书的 API。
+
+```json
+{
+  "servers": {
+    "main": { "port": 8080, "cert": "auto" }
+  },
+  "p12s": {
+    "api_cert": {
+      "path": "./certs/my_api_client_cert.p12",
+      "password": "cert_password"
+    }
+  },
+  "mappings": [
+    {
+      "comment": "访问需要 mTLS 的内部 API",
+      "from": "https://secure.internal.api/*",
+      "to": "https://backend.internal.api/*",
+      "p12": "api_cert"
+    }
+  ]
+}
+```
+
+**效果**:
+当通过代理访问 `https://secure.internal.api/some/path` 时，代理会在 TLS 握手期间向 `backend.internal.api` 服务器出示 `my_api_client_cert.p12` 证书。如果后端服务器验证此证书，连接将成功建立。
+
+---
+
+### 示例 7: NAT 穿透 (Tunnels & Endpoints)
 
 此功能允许你在 NAT 或防火墙后的机器上运行一个 `endpoint` 客户端，并让主代理服务器通过一个安全的 `tunnel` 将请求转发给它。
 
