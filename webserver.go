@@ -2,14 +2,14 @@ package main
 
 import (
 	"crypto/rand"
-	"encoding/json"
 	"encoding/hex"
+	"encoding/json"
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
-	"strings"
 )
 
 // CertHandlers contains the HTTP handlers for the certificate download page.
@@ -34,6 +34,7 @@ type SessionStore struct {
 	mu       sync.RWMutex
 	sessions map[string]Session
 }
+
 func (s *SessionStore) Set(token string, sess Session) {
 	s.mu.Lock()
 	s.sessions[token] = sess
@@ -50,6 +51,7 @@ func (s *SessionStore) Delete(token string) {
 	delete(s.sessions, token)
 	s.mu.Unlock()
 }
+
 var AdminSessions = &SessionStore{sessions: make(map[string]Session)}
 
 // AdminHandlers contains the HTTP handlers for the admin panel.
@@ -75,7 +77,12 @@ func (h *AdminHandlers) RegisterHandlers(mux *http.ServeMux) {
 	mux.HandleFunc("/.api/logout", h.handleLogout)
 	mux.HandleFunc("/.api/config", h.handleConfig)
 	// Serve static files for the admin panel
-	mux.Handle("/.admin/", http.StripPrefix("/.admin/", http.FileServer(http.Dir("./admin-ui/dist"))))
+	// mux.Handle("/.admin/", http.StripPrefix("/.admin/", http.FileServer(http.Dir("./admin-ui/dist"))))
+	// index.html文件内容现在在 admin_page_content 变量内
+	mux.HandleFunc("/.admin/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Write([]byte(admin_page_content))
+	})
 	log.Println("Admin panel API available at '/.api' and UI at '/.admin/'")
 }
 
@@ -258,204 +265,169 @@ func (h *CertHandlers) handleCertPage(w http.ResponseWriter, r *http.Request) {
 	html := `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Cato Proxy Service - 证书安装</title>
-    <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            min-height: 100vh;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            padding: 20px;
-        }
-        .container {
-            background: white;
-            border-radius: 16px;
-            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
-            max-width: 800px;
-            width: 100%;
-            padding: 40px;
-        }
-        h1 {
-            color: #333;
-            font-size: 32px;
-            margin-bottom: 10px;
-            text-align: center;
-        }
-        .subtitle {
-            color: #666;
-            text-align: center;
-            margin-bottom: 30px;
-            font-size: 16px;
-        }
-        .download-section {
-            background: #f7f9fc;
-            border-radius: 12px;
-            padding: 30px;
-            margin-bottom: 30px;
-            text-align: center;
-        }
-        .download-btn {
-            display: inline-block;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            padding: 15px 40px;
-            border-radius: 8px;
-            text-decoration: none;
-            font-size: 18px;
-            font-weight: 600;
-            transition: transform 0.2s, box-shadow 0.2s;
-            box-shadow: 0 4px 15px rgba(102, 126, 234, 0.4);
-        }
-        .download-btn:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 6px 20px rgba(102, 126, 234, 0.6);
-        }
-        .instructions {
-            margin-top: 30px;
-        }
-        .os-section {
-            margin-bottom: 25px;
-            padding: 20px;
-            border-left: 4px solid #667eea;
-            background: #f7f9fc;
-            border-radius: 8px;
-        }
-        .os-section h3 {
-            color: #667eea;
-            margin-bottom: 12px;
-            font-size: 20px;
-        }
-        .os-section ol {
-            margin-left: 20px;
-            color: #555;
-            line-height: 1.8;
-        }
-        .os-section li {
-            margin-bottom: 8px;
-        }
-        .warning {
-            background: #fff3cd;
-            border: 1px solid #ffc107;
-            border-radius: 8px;
-            padding: 15px;
-            margin-top: 20px;
-            color: #856404;
-        }
-        .warning strong {
-            display: block;
-            margin-bottom: 5px;
-        }
-        code {
-            background: #e9ecef;
-            padding: 2px 6px;
-            border-radius: 4px;
-            font-family: 'Courier New', monospace;
-            font-size: 14px;
-        }
-        .status {
-            text-align: center;
-            margin-top: 20px;
-            padding: 15px;
-            background: #d4edda;
-            border: 1px solid #c3e6cb;
-            border-radius: 8px;
-            color: #155724;
-        }
-    </style>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>APS - 证书安装</title>
+  <link href="https://cdnjs.cloudflare.com/ajax/libs/ibm-plex/6.0.0/css/ibm-plex.min.css" rel="stylesheet">
+  <link href="https://unpkg.com/carbon-components@10.58.14/css/carbon-components.min.css" rel="stylesheet">
+  <style>
+    body {
+      font-family: "IBM Plex Sans", system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji";
+      background: #f4f4f4;
+    }
+    .container {
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 1rem;
+    }
+    .hero {
+      background: white;
+      border-radius: 8px;
+      padding: 1.25rem 1.5rem;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.06);
+      border: 1px solid #e0e0e0;
+    }
+    .title {
+      display: flex;
+      align-items: center;
+      gap: .5rem;
+      margin-bottom: .5rem;
+    }
+    .subtitle {
+      color: #525252;
+      margin-bottom: .75rem;
+    }
+    .grid {
+      margin-top: 1rem;
+    }
+    .tile {
+      background: white;
+      border-radius: 8px;
+      border: 1px solid #e0e0e0;
+      padding: 1rem;
+      height: 100%;
+    }
+    .download-area {
+      display: flex;
+      align-items: center;
+      gap: .75rem;
+      flex-wrap: wrap;
+    }
+    code {
+      background: #e9ecef;
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      font-size: 0.85rem;
+    }
+    .warning {
+      background: #fff3cd;
+      border: 1px solid #ffc107;
+      border-radius: 8px;
+      padding: 12px;
+      color: #856404;
+      margin-top: .75rem;
+    }
+  </style>
 </head>
 <body>
-    <div class="container">
-        <h1>🔒 Cato Proxy Service</h1>
-        <p class="subtitle">Root Certificate Installation</p>
-        
-        <div class="download-section">
-            <p style="margin-bottom: 20px; color: #666;">下载根证书以信任 HTTPS 代理连接</p>
-            <a href="/.ssl/cert" class="download-btn" download="Cato_Proxy_Service.crt">
-                📥 下载根证书
-            </a>
+  <header class="bx--header" role="banner" aria-label="APS">
+    <a class="bx--header__name" href="#" title="APS">APS</a>
+    <nav class="bx--header__nav" aria-label="导航">
+      <ul class="bx--header__menu-bar">
+        <li><a class="bx--header__menu-item" href="/.admin/" target="_self">管理面板</a></li>
+        <li><a class="bx--header__menu-item" href="/.api/stats" target="_blank">统计 JSON</a></li>
+      </ul>
+    </nav>
+  </header>
+
+  <main class="container">
+    <section class="hero">
+      <div class="title">
+        <svg width="28" height="28" viewBox="0 0 32 32" fill="currentColor" aria-hidden="true"><path d="M16,2,2,7.5V14c0,7.07,5.16,13.73,14,16,8.84-2.27,14-8.93,14-16V7.5ZM28,14c0,6-4.31,11.4-12,13.6C8.31,25.4,4,20,4,14V9.23L16,5.14,28,9.23Z"/><path d="M7 13H25V15H7zM7 18H20V20H7z"/></svg>
+        <h2>HTTPS 根证书安装</h2>
+      </div>
+      <p class="subtitle">为启用 HTTPS 流量解密，请在系统中安装并信任代理根证书。</p>
+
+      <div class="download-area">
+        <a class="bx--btn bx--btn--primary" href="/.ssl/cert" download="APS_Root_CA.crt">下载根证书</a>
+        <a class="bx--btn bx--btn--tertiary" href="/.admin/" target="_self">打开管理面板</a>
+        <span class="bx--tag bx--tag--cool-gray">文件名: APS_Root_CA.crt</span>
+      </div>
+
+      <div class="warning">
+        <strong>注意</strong> 此证书仅用于开发与测试环境。安装后，代理可解密 HTTPS 流量，请勿在生产环境或公共网络中使用。
+      </div>
+    </section>
+
+    <section class="grid">
+      <div class="bx--grid bx--grid--condensed">
+        <div class="bx--row">
+          <div class="bx--col-lg-8 bx--col-md-8 bx--col-sm-4">
+            <div class="tile">
+              <h4>Windows</h4>
+              <ol>
+                <li>双击下载的证书文件，点击“安装证书”。</li>
+                <li>选择“本地计算机”（需要管理员权限）。</li>
+                <li>选择“将所有的证书都放入下列存储”。</li>
+                <li>点击“浏览”，选择“受信任的根证书颁发机构”。</li>
+                <li>完成向导并确认。</li>
+              </ol>
+            </div>
+          </div>
+          <div class="bx--col-lg-8 bx--col-md-8 bx--col-sm-4">
+            <div class="tile">
+              <h4>macOS</h4>
+              <ol>
+                <li>双击证书，在钥匙串访问中打开。</li>
+                <li>双击列表中的证书，展开“信任”。</li>
+                <li>将“使用此证书时”设为“始终信任”。</li>
+                <li>关闭窗口并输入密码确认。</li>
+              </ol>
+            </div>
+          </div>
+          <div class="bx--col-lg-8 bx--col-md-8 bx--col-sm-4">
+            <div class="tile">
+              <h4>Linux (Ubuntu/Debian)</h4>
+              <ol>
+                <li>复制证书至系统目录：<br><code>sudo cp APS_Root_CA.crt /usr/local/share/ca-certificates/</code></li>
+                <li>更新证书存储：<br><code>sudo update-ca-certificates</code></li>
+              </ol>
+            </div>
+          </div>
+          <div class="bx--col-lg-8 bx--col-md-8 bx--col-sm-4">
+            <div class="tile">
+              <h4>iOS / iPadOS</h4>
+              <ol>
+                <li>用 Safari 下载证书。</li>
+                <li>设置 → 通用 → VPN与设备管理 → 安装描述文件。</li>
+                <li>设置 → 通用 → 关于本机 → 证书信任设置 → 启用完全信任。</li>
+              </ol>
+            </div>
+          </div>
+          <div class="bx--col-lg-8 bx--col-md-8 bx--col-sm-4">
+            <div class="tile">
+              <h4>Android</h4>
+              <ol>
+                <li>下载证书。</li>
+                <li>设置 → 安全 → 加密与凭据 → 从存储设备安装。</li>
+                <li>选择下载的证书并确认名称。</li>
+              </ol>
+            </div>
+          </div>
         </div>
+      </div>
+    </section>
 
-        <div class="instructions">
-            <h2 style="margin-bottom: 20px; color: #333;">📋 安装说明</h2>
+    <section class="grid">
+      <div class="tile">
+        <h4>下一步</h4>
+        <p>安装完成后，重启浏览器或应用并配置系统代理，然后可在 <code>/.admin/</code> 访问管理面板，在 <code>/.api/stats</code> 查看实时统计 JSON。</p>
+      </div>
+    </section>
+  </main>
 
-            <div class="os-section">
-                <h3>🪟 Windows</h3>
-                <ol>
-                    <li>双击下载的 <code>Cato_Proxy_Service.crt</code> 文件</li>
-                    <li>点击"安装证书"</li>
-                    <li>选择"本地计算机"（需要管理员权限）</li>
-                    <li>选择"将所有的证书都放入下列存储"</li>
-                    <li>点击"浏览"，选择"受信任的根证书颁发机构"</li>
-                    <li>点击"确定"，完成安装</li>
-                </ol>
-            </div>
-
-            <div class="os-section">
-                <h3>🍎 macOS</h3>
-                <ol>
-                    <li>双击下载的 <code>Cato_Proxy_Service.crt</code> 文件</li>
-                    <li>在钥匙串访问中找到"Cato Proxy Service Root CA"</li>
-                    <li>双击证书，展开"信任"部分</li>
-                    <li>将"使用此证书时"设置为"始终信任"</li>
-                    <li>关闭窗口，输入密码确认</li>
-                </ol>
-            </div>
-
-            <div class="os-section">
-                <h3>🐧 Linux (Ubuntu/Debian)</h3>
-                <ol>
-                    <li>复制证书到系统目录：<br>
-                        <code>sudo cp Cato_Proxy_Service.crt /usr/local/share/ca-certificates/</code>
-                    </li>
-                    <li>更新证书存储：<br>
-                        <code>sudo update-ca-certificates</code>
-                    </li>
-                </ol>
-            </div>
-
-            <div class="os-section">
-                <h3>📱 iOS/iPadOS</h3>
-                <ol>
-                    <li>使用 Safari 浏览器下载证书</li>
-                    <li>前往"设置" > "通用" > "VPN与设备管理"</li>
-                    <li>点击下载的描述文件，点击"安装"</li>
-                    <li>前往"设置" > "通用" > "关于本机" > "证书信任设置"</li>
-                    <li>启用"Cato Proxy Service Root CA"的完全信任</li>
-                </ol>
-            </div>
-
-            <div class="os-section">
-                <h3>🤖 Android</h3>
-                <ol>
-                    <li>下载证书文件</li>
-                    <li>前往"设置" > "安全" > "加密与凭据"</li>
-                    <li>选择"从存储设备安装"</li>
-                    <li>找到并选择下载的证书文件</li>
-                    <li>输入证书名称，确认安装</li>
-                </ol>
-            </div>
-
-            <div class="warning">
-                <strong>⚠️ 重要提示</strong>
-                此证书仅用于开发和测试环境。安装后，代理可以解密您的 HTTPS 流量。
-                请勿在生产环境或公共网络中使用。
-            </div>
-
-            <div class="status">
-                <strong>✅ 安装完成后</strong><br>
-                请重启浏览器或应用程序，并配置系统代理。
-            </div>
-        </div>
-    </div>
+  <script src="https://unpkg.com/carbon-components@10.58.14/scripts/carbon-components.min.js"></script>
 </body>
 </html>`
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -470,7 +442,7 @@ func (h *CertHandlers) handleCertDownload(w http.ResponseWriter, r *http.Request
 	}
 
 	w.Header().Set("Content-Type", "application/x-x509-ca-cert")
-	w.Header().Set("Content-Disposition", "attachment; filename=Cato_Proxy_Service.crt")
+	w.Header().Set("Content-Disposition", "attachment; filename=Any_Proxy_Service.crt")
 	w.Write(certPEM)
 
 	clientIP := r.RemoteAddr

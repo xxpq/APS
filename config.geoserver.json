@@ -1,7 +1,8 @@
 {
   "servers": {
     "default": {
-      "port": 8899
+      "port": 8899,
+      "panel": true
     }
   },
   "proxies": null,
@@ -11,5 +12,13 @@
       "to": "http://10.1.24.223:8089/geoserver/*",
       "servers": "default"
     }
-  ]
+  ],
+  "auth":{
+    "users": {
+      "admin":{
+        "password": "admin",
+        "admin": true
+      }
+    }
+  }
 }

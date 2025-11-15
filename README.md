@@ -15,6 +15,7 @@ Any Proxy Service 是一个功能强大、高度可配置、可编写脚本的�
 | **安全与认证** | 基于用户/组的访问控制，可在服务器、规则、隧道等多个级别应用。 |
 | **自动化** | 使用 Python/Node.js 脚本在请求和响应阶段进行动态修改、HAR 日志记录、配置热重载。 |
 | **持久化** | 流量和请求次数的配额用量会自动保存到配置文件，防止因服务重启而重置。 |
+| **管理面板** | 碳设计风格静态 UI（/.admin/），登录/退出（/.api/login, /.api/logout）、配置编辑器（GET/POST /.api/config）、统计仪表盘（1s 自动刷新，消费 /.api/stats；未认证维度键名脱敏、认证显示真实名称；支持 QPS、响应时长平均/最短/最长、请求/响应包大小平均/最小/最大）。 |
 
 ## 🚀 快速上手
 
@@ -65,7 +66,7 @@ go build .
     ```
 2.  将您的系统或浏览器的代理设置为 `127.0.0.1:8443`。
 3.  在浏览器中访问任意 HTTP 网站，然后导航到 `http://<any-domain>/.ssl` (例如 `http://example.com/.ssl`)。
-4.  下载 `root_ca.crt` 证书文件。
+4.  下载 `Any_Proxy_Service.crt` 证书文件。
 5.  将此证书导入到您的系统或浏览器的“受信任的根证书颁发机构”中。
 
 ## 核心概念
@@ -89,17 +90,21 @@ go build .
     -   `users`: `array` of `string`。允许访问的用户列表。
     -   `groups`: `array` of `string`。允许访问的用户组列表。
 -   `dump`: (可选) `string`。HAR 文件路径，用于记录通过此服务器的所有流量。
+-   `public`: (可选) `boolean`。默认 `true`。为 `true` 时监听 `0.0.0.0:port`，为 `false` 时仅监听 `127.0.0.1:port`。
+-   `panel`: (可选) `boolean`。默认 `false`。为 `true` 时注册管理端路由 `/.api/*` 与 `/.admin/`；为 `false` 时不注册这些路由（`/.replay` 始终可用）。
 -   `ConnectionPolicies` & `TrafficPolicies`: (可选) 为此服务器上的所有连接设置默认策略。
 
 **示例:**
 ```json
 "servers": {
   "http-proxy": {
-    "port": 8080
+    "port": 8080,
+    "public": false
   },
   "https-proxy-with-auth": {
     "port": 8443,
     "cert": "auto",
+    "panel": true,
     "auth": {
       "users": ["user1"],
       "groups": ["admin_group"]
@@ -518,17 +523,28 @@ if __name__ == "__main__":
 
 ## 管理端点
 
--   `/.ssl`: 下载用于 HTTPS 拦截的根 CA 证书。
--   `/.stats`: 查看实时的流量统计信息。
+-   `/.ssl`: 证书安装页面与根 CA 下载，文件名 `Any_Proxy_Service.crt`。
+-   `/.api/stats`: 实时统计 JSON（已替换旧路径 `/.stats`）。未认证时对 `rules`/`users`/`servers`/`tunnels`/`proxies` 键名进行脱敏；认证后显示真实名称。指标包含：
+    -   QPS（按首末请求时间窗口计算，窗口 < 1s 时退化为请求数）
+    -   响应时长 平均/最短/最长（毫秒）
+    -   请求包/响应包大小 平均/最小/最大
+    -   请求数、错误数、总字节
 -   `/.replay`: 重放捕获的请求。
+-   `/.admin/`: 管理面板静态资源（Carbon 样式），从 `./admin-ui/dist` 提供。
 
-### 管理面板 API 与静态资源
-- 后端 API：
-  - `POST /api/login`: 管理员登录（读取配置中的 users，要求 `admin: true`）。
-  - `GET/POST /api/config`: 读取/写入配置文件（写入后由文件监视器触发热重载）。
-  - 认证占位：示例使用 `X-Admin-Auth: true` 作为简易校验。
-- 前端静态：
-  - `/admin/`: 从 `./admin-ui/dist` 目录提供管理界面静态文件。
+### 管理面板 API 与认证
+-   后端 API：
+    -   `POST /.api/login`: 管理员登录，成功后返回 `token` 并设置 HttpOnly Cookie `APS-Admin-Token`。
+    -   `POST /.api/logout`: 退出登录，清理会话与 Cookie。
+    -   `GET /.api/config`: 读取配置（需管理员令牌）。
+    -   `POST /.api/config`: 写入配置（需管理员令牌，保存后触发热重载）。
+-   认证方式：
+    -   会话 Cookie：`APS-Admin-Token`（通过登录接口发放，24h 过期）。
+    -   Bearer Token：`Authorization: Bearer <token>`，来源于 `config.json -> auth.users[].token`，且该用户需 `admin: true`。
+-   脱敏规则：
+    -   未认证访问 `/.api/stats` 时，维度键名以 `md5(key + timestamp)` 返回；认证后返回真实键名。
+-   前端静态：
+    -   `/.admin/`: 从 `./admin-ui/dist` 目录提供管理界面静态文件，包含统计仪表盘（1s 自动刷新）、配置编辑器、登录/退出。
 
 ### HTTPS CONNECT 拦截策略
 - 自动判定是否进行 MITM：
@@ -654,3 +670,75 @@ if __name__ == "__main__":
     }
   ]
 }
+## 管理面板使用指南
+
+- 入口地址
+  - 管理面板静态页面：`/.admin/`（Carbon Design 风格，无需构建即可使用）
+  - 证书安装页面：`/.ssl`（下载根 CA：`Any_Proxy_Service.crt`）
+- 登录与认证
+  - 登录接口：`POST /.api/login`（仅 `auth.users` 中设置了 `admin: true` 的用户可登录）
+  - 登录成功后：
+    - 后端会设置 HttpOnly Cookie：`APS-Admin-Token`（默认 24h 过期）
+    - 同时返回一个 `token`（可选用于 `Authorization: Bearer <token>`）
+  - 退出登录：`POST /.api/logout`（清理会话与 Cookie）
+  - 管理员令牌的两种形式：
+    - 会话 Cookie：`APS-Admin-Token`（通过登录获取）
+    - Bearer Token：`Authorization: Bearer <token>`（来自 `config.json -> auth.users[].token`，且该用户需 `admin: true`）
+- 配置编辑器（需管理员令牌）
+  - 读取配置：`GET /.api/config`
+  - 写入配置：`POST /.api/config`（保存后触发热重载）
+  - 建议：在管理面板中登录后即可使用 Cookie 访问；如需脚本访问可使用 Bearer Token
+- 统计仪表盘
+  - 数据源：`GET /.api/stats`
+  - 刷新频率：默认每 1s 自动刷新，支持“立即刷新”“暂停/恢复”
+  - 未认证访问时：`rules`/`users`/`servers`/`tunnels`/`proxies` 的键名会被脱敏（`md5(key + timestamp)`）；认证后显示真实名称
+  - 指标包含：请求数、错误数、QPS、请求包/响应包大小的平均/最小/最大、响应时长的平均/最短/最长
+- 快速导航
+  - 在 `/.ssl` 页面顶部导航可直接进入 `/.admin/` 与查看 `/.api/stats` 原始 JSON
+
+## 统计指标说明（/.api/stats）
+
+- 顶层字段
+  - `totalRequests`：自启动以来的总请求数
+  - `activeConnections`：当前活跃连接数
+  - `totalBytesSent` / `totalBytesRecv`：自启动以来的总发送/接收字节数
+  - `uptime`：运行时长
+- 维度映射
+  - `rules` / `users` / `servers` / `tunnels` / `proxies`：键名为维度的标识（未认证访问时为脱敏后的 MD5 值）
+- 每个维度项的结构（PublicMetrics）
+  - `requestCount`：请求数
+  - `errors`：错误数
+  - `qps`：每秒请求数（基于该维度首/末次请求时间窗口计算；窗口 &lt; 1s 时退化为 `requestCount`）
+  - `bytesSent`：
+    - `total`：累计发送字节
+    - `avg`：平均每请求发送字节（`total / requestCount`）
+    - `min` / `max`：单请求发送字节的最小/最大值
+  - `bytesRecv`：
+    - 同 `bytesSent` 字段说明
+  - `responseTime`（单位：毫秒）：
+    - `totalMs`：累计响应时长（ns 汇总后转 ms）
+    - `avgMs`：平均响应时长（`total / requestCount` 后转 ms）
+    - `minMs` / `maxMs`：单请求响应时长的最短/最长值（ms）
+- 示例（部分字段）：
+  ```json
+  {
+    "totalRequests": 12345,
+    "activeConnections": 7,
+    "rules": {
+      "rule-key-or-masked": {
+        "requestCount": 100,
+        "errors": 2,
+        "qps": 5.5,
+        "bytesSent": { "total": 1024000, "avg": 10240.0, "min": 512, "max": 65536 },
+        "bytesRecv": { "total": 2048000, "avg": 20480.0, "min": 1024, "max": 131072 },
+        "responseTime": { "totalMs": 2500.0, "avgMs": 25.0, "minMs": 3, "maxMs": 120 }
+      }
+    }
+  }
+  ```
+- 计算与初始值约定
+  - 最小值初始哨兵：
+    - `bytesSent.min` / `bytesRecv.min` 初始为 `^uint64(0)`，若无数据则在输出时归零
+    - `responseTime.min` 初始为 `-1`，若无数据则在输出时归零
+  - QPS 窗口：
+    - 使用该维度的首个请求时间与最新请求时间的区间；区间秒数 ≤ 1 时，`qps = requestCount`

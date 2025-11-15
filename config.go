@@ -356,6 +356,8 @@ type ListenConfig struct {
 	Dump     string      `json:"dump,omitempty"`
 	Endpoint interface{} `json:"endpoint,omitempty"` // string or []string
 	Tunnel   interface{} `json:"tunnel,omitempty"`   // string or []string
+	Public   *bool       `json:"public,omitempty"`   // true: 0.0.0.0:port, false: 127.0.0.1:port (default true)
+	Panel    *bool       `json:"panel,omitempty"`    // true: register /.api & /.admin, false: do not (default false)
 	ConnectionPolicies
 	TrafficPolicies
 }
@@ -375,6 +377,10 @@ func (lc *ListenConfig) UnmarshalJSON(data []byte) error {
 	var port int
 	if err := json.Unmarshal(data, &port); err == nil {
 		lc.Port = port
+		// Defaults when only port is provided
+		t := true
+		lc.Public = &t     // public defaults to true
+		// panel defaults to false (nil)
 		return nil
 	}
 
@@ -385,6 +391,13 @@ func (lc *ListenConfig) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	*lc = ListenConfig(obj)
+
+	// Apply defaults
+	if lc.Public == nil {
+		t := true
+		lc.Public = &t
+	}
+	// lc.Panel: nil means default false
 
 	// Check the type of Cert
 	if certStr, ok := obj.Cert.(string); ok {

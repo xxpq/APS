@@ -213,15 +213,18 @@ func createServerHandler(serverName string, mappings []*Mapping, serverConfig *L
 		certHandlers.RegisterHandlers(mux)
 	}
 
-	// 添加统计数据端点
-	mux.HandleFunc("/.api/stats", stats.ServeHTTP)
-
-	// 添加重放端点
+	// 添加重放端点（始终可用）
 	mux.HandleFunc("/.replay", replayManager.ServeHTTP)
 
-	// 注册管理面板处理器
-	adminHandlers := NewAdminHandlers(config, configFile)
-	adminHandlers.RegisterHandlers(mux)
+	// 根据 panel 控制 /.api 与 /.admin 的注册
+	if serverConfig.Panel != nil && *serverConfig.Panel {
+		// 添加统计数据端点
+		mux.HandleFunc("/.api/stats", stats.ServeHTTP)
+
+		// 注册管理面板处理器
+		adminHandlers := NewAdminHandlers(config, configFile)
+		adminHandlers.RegisterHandlers(mux)
+	}
 
 	// 创建一个统一的处理器来处理所有请求
 	mainHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -246,10 +249,15 @@ func createServerHandler(serverName string, mappings []*Mapping, serverConfig *L
 }
 
 func startServer(name string, config *ListenConfig, handler http.Handler) *http.Server {
-	addr := fmt.Sprintf(":%d", config.Port)
+	// Determine bind address based on 'public' (default: true)
+	host := "127.0.0.1"
+	if config.Public == nil || *config.Public {
+		host = "0.0.0.0"
+	}
+	addr := fmt.Sprintf("%s:%d", host, config.Port)
 	server := &http.Server{Addr: addr, Handler: handler}
 
-	log.Printf("Starting server '%s' on port %d", name, config.Port)
+	log.Printf("Starting server '%s' on %s", name, addr)
 
 	if config.Cert != nil {
 		// HTTPS server
