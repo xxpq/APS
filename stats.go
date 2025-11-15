@@ -21,10 +21,19 @@ type StatsCollector struct {
 
 // RuleStats holds metrics for a specific mapping rule.
 type RuleStats struct {
-	MatchCount uint64
-	BytesSent  uint64
-	BytesRecv  uint64
-	Errors     uint64
+	MatchCount        uint64
+	BytesSent         uint64
+	BytesRecv         uint64
+	Errors            uint64
+	TotalResponseTime int64 // in nanoseconds
+	MinResponseTime   int64 // in nanoseconds
+	MaxResponseTime   int64 // in nanoseconds
+	TotalRequestSize  uint64
+	MinRequestSize    uint64
+	MaxRequestSize    uint64
+	firstRequestTime  time.Time
+	lastRequestTime   time.Time
+	mutex             sync.Mutex
 }
 
 func NewStatsCollector() *StatsCollector {
@@ -54,7 +63,10 @@ func (sc *StatsCollector) AddBytesRecv(n uint64) {
 }
 
 func (sc *StatsCollector) getRuleStats(ruleKey string) *RuleStats {
-	stats, _ := sc.RuleStats.LoadOrStore(ruleKey, &RuleStats{})
+	stats, _ := sc.RuleStats.LoadOrStore(ruleKey, &RuleStats{
+		MinResponseTime: -1,
+		MinRequestSize:  ^uint64(0),
+	})
 	return stats.(*RuleStats)
 }
 
@@ -76,6 +88,42 @@ func (sc *StatsCollector) AddRuleBytesRecv(ruleKey string, n uint64) {
 func (sc *StatsCollector) IncRuleErrors(ruleKey string) {
 	stats := sc.getRuleStats(ruleKey)
 	atomic.AddUint64(&stats.Errors, 1)
+}
+
+func (sc *StatsCollector) AddRuleResponseTime(ruleKey string, d time.Duration) {
+	stats := sc.getRuleStats(ruleKey)
+	ns := d.Nanoseconds()
+	atomic.AddInt64(&stats.TotalResponseTime, ns)
+
+	stats.mutex.Lock()
+	defer stats.mutex.Unlock()
+
+	if stats.MinResponseTime == -1 || ns < stats.MinResponseTime {
+		stats.MinResponseTime = ns
+	}
+	if ns > stats.MaxResponseTime {
+		stats.MaxResponseTime = ns
+	}
+}
+
+func (sc *StatsCollector) AddRuleRequestSize(ruleKey string, size uint64) {
+	stats := sc.getRuleStats(ruleKey)
+	atomic.AddUint64(&stats.TotalRequestSize, size)
+
+	stats.mutex.Lock()
+	defer stats.mutex.Unlock()
+
+	if size < stats.MinRequestSize {
+		stats.MinRequestSize = size
+	}
+	if size > stats.MaxRequestSize {
+		stats.MaxRequestSize = size
+	}
+	now := time.Now()
+	if stats.firstRequestTime.IsZero() {
+		stats.firstRequestTime = now
+	}
+	stats.lastRequestTime = now
 }
 
 // StatsReadWriteCloser is a wrapper around an io.ReadWriteCloser that tracks bytes read and written.
@@ -109,10 +157,17 @@ func (s *StatsReadWriteCloser) Close() error {
 // ServeHTTP provides an HTTP endpoint to expose stats as JSON.
 func (sc *StatsCollector) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	type PublicRuleStats struct {
-		MatchCount uint64 `json:"matchCount"`
-		BytesSent  uint64 `json:"bytesSent"`
-		BytesRecv  uint64 `json:"bytesRecv"`
-		Errors     uint64 `json:"errors"`
+		MatchCount        uint64  `json:"matchCount"`
+		BytesSent         uint64  `json:"bytesSent"`
+		BytesRecv         uint64  `json:"bytesRecv"`
+		Errors            uint64  `json:"errors"`
+		AvgResponseTimeMs float64 `json:"avgResponseTimeMs"`
+		MinResponseTimeMs int64   `json:"minResponseTimeMs"`
+		MaxResponseTimeMs int64   `json:"maxResponseTimeMs"`
+		AvgRequestSize    float64 `json:"avgRequestSize"`
+		MinRequestSize    uint64  `json:"minRequestSize"`
+		MaxRequestSize    uint64  `json:"maxRequestSize"`
+		QPS               float64 `json:"qps"`
 	}
 
 	type PublicStats struct {
@@ -128,11 +183,55 @@ func (sc *StatsCollector) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	sc.RuleStats.Range(func(key, value interface{}) bool {
 		ruleKey := key.(string)
 		stats := value.(*RuleStats)
+		stats.mutex.Lock()
+		defer stats.mutex.Unlock()
+
+		matchCount := atomic.LoadUint64(&stats.MatchCount)
+		totalResponseTime := atomic.LoadInt64(&stats.TotalResponseTime)
+		totalRequestSize := atomic.LoadUint64(&stats.TotalRequestSize)
+
+		var avgResponseTimeMs float64
+		if matchCount > 0 {
+			avgResponseTimeMs = float64(totalResponseTime) / float64(matchCount) / 1e6
+		}
+
+		var avgRequestSize float64
+		if matchCount > 0 {
+			avgRequestSize = float64(totalRequestSize) / float64(matchCount)
+		}
+
+		minResponseTimeMs := stats.MinResponseTime / 1e6
+		if stats.MinResponseTime == -1 {
+			minResponseTimeMs = 0
+		}
+
+		minRequestSize := stats.MinRequestSize
+		if minRequestSize == ^uint64(0) {
+			minRequestSize = 0
+		}
+
+		var qps float64
+		if !stats.firstRequestTime.IsZero() && !stats.lastRequestTime.IsZero() {
+			duration := stats.lastRequestTime.Sub(stats.firstRequestTime).Seconds()
+			if duration > 1 {
+				qps = float64(matchCount) / duration
+			} else {
+				qps = float64(matchCount)
+			}
+		}
+
 		ruleStatsMap[ruleKey] = &PublicRuleStats{
-			MatchCount: atomic.LoadUint64(&stats.MatchCount),
-			BytesSent:  atomic.LoadUint64(&stats.BytesSent),
-			BytesRecv:  atomic.LoadUint64(&stats.BytesRecv),
-			Errors:     atomic.LoadUint64(&stats.Errors),
+			MatchCount:        matchCount,
+			BytesSent:         atomic.LoadUint64(&stats.BytesSent),
+			BytesRecv:         atomic.LoadUint64(&stats.BytesRecv),
+			Errors:            atomic.LoadUint64(&stats.Errors),
+			AvgResponseTimeMs: avgResponseTimeMs,
+			MinResponseTimeMs: minResponseTimeMs,
+			MaxResponseTimeMs: stats.MaxResponseTime / 1e6,
+			AvgRequestSize:    avgRequestSize,
+			MinRequestSize:    minRequestSize,
+			MaxRequestSize:    stats.MaxRequestSize,
+			QPS:               qps,
 		}
 		return true
 	})

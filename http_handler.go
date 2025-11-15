@@ -36,6 +36,15 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	targetURL, matched, mapping := p.mapRequest(r)
 	originalURL := p.buildOriginalURL(r)
 
+	// If not in proxy mode (i.e., direct request to the server) and no rule matched,
+	// it's a 404 Not Found error. This prevents infinite loops where the server
+	// tries to proxy a request to itself.
+	if !r.URL.IsAbs() && !matched {
+		http.NotFound(w, r)
+		log.Printf("[%s] %s (NO MAPPING - 404 Not Found)", r.Method, originalURL)
+		return
+	}
+
 	// 如果匹配到了规则，需要再次检查该规则的权限
 	authorized, user, username := p.checkAuth(r, mapping)
 	if !authorized {
@@ -181,7 +190,18 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var requestBody io.Reader = r.Body
+	var originalBody []byte
 	if matched && mapping != nil {
+		var err error
+		originalBody, err = io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, "Failed to read request body", http.StatusInternalServerError)
+			return
+		}
+		r.Body = io.NopCloser(bytes.NewBuffer(originalBody)) // Restore body for further processing
+
+		p.stats.AddRuleRequestSize(mapping.GetFromURL(), uint64(len(originalBody)))
+
 		modifiedBody, err := p.modifyRequestBody(r, mapping)
 		if err != nil {
 			http.Error(w, "Failed to modify request body", http.StatusInternalServerError)
@@ -189,6 +209,10 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		requestBody = bytes.NewBuffer(modifiedBody)
+	} else {
+		originalBody, _ = io.ReadAll(r.Body)
+		r.Body = io.NopCloser(bytes.NewBuffer(originalBody))
+		requestBody = bytes.NewBuffer(originalBody)
 	}
 
 	proxyReq, err := http.NewRequest(r.Method, targetURL, requestBody)
@@ -315,6 +339,10 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 
 	startTime := time.Now()
 	resp, err := client.Do(proxyReq)
+	responseTime := time.Since(startTime)
+	if mapping != nil {
+		p.stats.AddRuleResponseTime(mapping.GetFromURL(), responseTime)
+	}
 	if err != nil {
 		if mapping != nil {
 			p.stats.IncRuleErrors(mapping.GetFromURL())
