@@ -17,11 +17,17 @@ func init() {
 }
 
 type Config struct {
-	Servers  map[string]*ListenConfig `json:"servers"`
-	Proxies  map[string]interface{}   `json:"proxies"`
-	Auth     *AuthConfig              `json:"auth,omitempty"`
-	Mappings []Mapping                `json:"mappings"`
+	Servers  map[string]*ListenConfig    `json:"servers"`
+	Proxies  map[string]interface{}      `json:"proxies"`
+	Tunnels  map[string]*TunnelConfig    `json:"tunnels,omitempty"`
+	Auth     *AuthConfig                 `json:"auth,omitempty"`
+	Mappings []Mapping                   `json:"mappings"`
 	mu       sync.RWMutex
+}
+
+type TunnelConfig struct {
+	Servers  []string `json:"servers"`
+	Password string   `json:"password,omitempty"` // AES key for encryption
 }
 
 type AuthConfig struct {
@@ -30,14 +36,16 @@ type AuthConfig struct {
 }
 
 type User struct {
-	Password string   `json:"password"`
-	Groups   []string `json:"groups,omitempty"`
-	Dump     string   `json:"dump,omitempty"`
+	Password string      `json:"password"`
+	Groups   []string    `json:"groups,omitempty"`
+	Dump     string      `json:"dump,omitempty"`
+	Endpoint interface{} `json:"endpoint,omitempty"` // string or []string
 }
 
 type Group struct {
-	Users []string `json:"users"`
-	Dump  string   `json:"dump,omitempty"`
+	Users    []string    `json:"users"`
+	Dump     string      `json:"dump,omitempty"`
+	Endpoint interface{} `json:"endpoint,omitempty"` // string or []string
 }
 
 // EndpointConfig 用于配置请求或响应的详细信息
@@ -203,15 +211,17 @@ type Mapping struct {
 	Local  string      `json:"local,omitempty"`
 	Listen interface{} `json:"listen,omitempty"` // string or []string
 	Cc     []string    `json:"cc,omitempty"`
-	Proxy  interface{} `json:"proxy,omitempty"` // string or []string, 引用 proxies 的 key
-	Auth   *RuleAuth   `json:"auth,omitempty"`
-	Dump   string      `json:"dump,omitempty"`
+	Proxy    interface{} `json:"proxy,omitempty"` // string or []string, 引用 proxies 的 key
+	Endpoint interface{} `json:"endpoint,omitempty"`
+	Auth     *RuleAuth   `json:"auth,omitempty"`
+	Dump     string      `json:"dump,omitempty"`
 
 	// 解析后的内部字段
 	fromConfig    *EndpointConfig
 	toConfig      *EndpointConfig
 	listenNames   []string
 	proxyNames    []string
+	endpointNames []string
 	resolvedProxy *ProxyManager
 }
 
@@ -221,11 +231,12 @@ type RuleAuth struct {
 }
 
 type ListenConfig struct {
-	Port int         `json:"port"`
-	Cert interface{} `json:"cert,omitempty"` // string ("auto") or CertFiles
-	Key  string      `json:"key,omitempty"`
-	Auth *ServerAuth `json:"auth,omitempty"`
-	Dump string      `json:"dump,omitempty"`
+	Port     int         `json:"port"`
+	Cert     interface{} `json:"cert,omitempty"` // string ("auto") or CertFiles
+	Key      string      `json:"key,omitempty"`
+	Auth     *ServerAuth `json:"auth,omitempty"`
+	Dump     string      `json:"dump,omitempty"`
+	Endpoint interface{} `json:"endpoint,omitempty"` // string or []string
 }
 
 type ServerAuth struct {
@@ -493,6 +504,9 @@ func processConfig(config *Config) error {
 				mapping.resolvedProxy = NewProxyManager(allProxies)
 			}
 		}
+
+		// 解析 endpoint names
+		mapping.endpointNames = parseStringOrArray(mapping.Endpoint)
 
 		// 验证通过，添加到有效列表
 		validMappings = append(validMappings, *mapping)

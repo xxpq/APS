@@ -32,6 +32,8 @@ func main() {
 	harManager := NewHarLoggerManager(config)
 	defer harManager.Shutdown()
 
+	tunnelManager := NewTunnelManager(config)
+
 	// The main proxy logic is now handled by each server's handler
 	// proxy := NewMapRemoteProxy(config, harLogger)
 
@@ -42,7 +44,7 @@ func main() {
 	watcher.Start()
 	defer watcher.Stop()
 
-	startServers(config, harManager)
+	startServers(config, harManager, tunnelManager)
 
 	log.Println("===========================================")
 	log.Printf("Loaded %d mapping rules:", len(config.Mappings))
@@ -63,7 +65,7 @@ func main() {
 	log.Println("\nShutting down servers...")
 }
 
-func startServers(config *Config, harManager *HarLoggerManager) {
+func startServers(config *Config, harManager *HarLoggerManager, tunnelManager *TunnelManager) {
 	// 将 mappings 按 server name 分组
 	serverMappings := make(map[string][]*Mapping)
 	for i := range config.Mappings {
@@ -79,14 +81,22 @@ func startServers(config *Config, harManager *HarLoggerManager) {
 		if serverConfig == nil {
 			continue
 		}
-		handler := createServerHandler(name, mappings, serverConfig, config, harManager)
+		handler := createServerHandler(name, mappings, serverConfig, config, harManager, tunnelManager)
 		go startServer(name, serverConfig, handler)
 	}
 }
 
-func createServerHandler(serverName string, mappings []*Mapping, serverConfig *ListenConfig, config *Config, harManager *HarLoggerManager) http.Handler {
+func createServerHandler(serverName string, mappings []*Mapping, serverConfig *ListenConfig, config *Config, harManager *HarLoggerManager, tunnelManager *TunnelManager) http.Handler {
 	mux := http.NewServeMux()
-	proxy := NewMapRemoteProxy(config, harManager, serverName)
+	proxy := NewMapRemoteProxy(config, harManager, tunnelManager, serverName)
+
+	// 检查此 server 是否为 tunnel 接入点
+	if tunnel := tunnelManager.GetTunnelForServer(serverName); tunnel != nil {
+		mux.HandleFunc("/.tunnel", func(w http.ResponseWriter, r *http.Request) {
+			log.Printf("[TUNNEL] Incoming WebSocket connection for tunnel '%s' on server '%s'", tunnel.name, serverName)
+			tunnelManager.ServeWs(tunnel, w, r)
+		})
+	}
 
 	// 如果 cert 是 auto，注册证书下载处理器
 	if certStr, ok := serverConfig.Cert.(string); ok && certStr == "auto" {

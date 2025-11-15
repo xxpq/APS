@@ -10,13 +10,14 @@ import (
 )
 
 type MapRemoteProxy struct {
-	config     *Config
-	harManager *HarLoggerManager
-	serverName string
-	client     *http.Client
+	config        *Config
+	harManager    *HarLoggerManager
+	tunnelManager *TunnelManager
+	serverName    string
+	client        *http.Client
 }
 
-func NewMapRemoteProxy(config *Config, harManager *HarLoggerManager, serverName string) *MapRemoteProxy {
+func NewMapRemoteProxy(config *Config, harManager *HarLoggerManager, tunnelManager *TunnelManager, serverName string) *MapRemoteProxy {
 	transport := &http.Transport{
 		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 		DialContext: (&net.Dialer{
@@ -29,12 +30,15 @@ func NewMapRemoteProxy(config *Config, harManager *HarLoggerManager, serverName 
 		ExpectContinueTimeout: 1 * time.Second,
 	}
 
+	tunnelTransport := NewTunnelRoundTripper(tunnelManager, transport)
+
 	return &MapRemoteProxy{
-		config:     config,
-		harManager: harManager,
-		serverName: serverName,
+		config:        config,
+		harManager:    harManager,
+		tunnelManager: tunnelManager,
+		serverName:    serverName,
 		client: &http.Client{
-			Transport: transport,
+			Transport: tunnelTransport,
 			CheckRedirect: func(req *http.Request, via []*http.Request) error {
 				return http.ErrUseLastResponse
 			},
@@ -67,8 +71,10 @@ func (p *MapRemoteProxy) createProxyClient(proxyURL string) (*http.Client, error
 		ExpectContinueTimeout: 1 * time.Second,
 	}
 
+	tunnelTransport := NewTunnelRoundTripper(p.tunnelManager, transport)
+
 	return &http.Client{
-		Transport: transport,
+		Transport: tunnelTransport,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			return http.ErrUseLastResponse
 		},

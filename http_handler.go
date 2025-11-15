@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"io/ioutil"
 	"log"
@@ -55,6 +56,12 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Failed to create proxy request", http.StatusInternalServerError)
 		log.Printf("Error creating request: %v", err)
 		return
+	}
+
+	// 将 mapping 注入 context，以便 TunnelRoundTripper 访问
+	if mapping != nil {
+		ctx := context.WithValue(r.Context(), "mapping", mapping)
+		proxyReq = proxyReq.WithContext(ctx)
 	}
 
 	copyHeaders(proxyReq.Header, r.Header)

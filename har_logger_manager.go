@@ -35,9 +35,8 @@ func (m *HarLoggerManager) processEntries() {
 		m.mu.Lock()
 		logger, exists := m.loggers[job.dumpPath]
 		if !exists {
-			logger = NewHarLogger()
+			logger = NewHarLogger(job.dumpPath)
 			m.loggers[job.dumpPath] = logger
-			log.Printf("[HAR DUMP] Initialized new HAR logger for: %s", job.dumpPath)
 		}
 		m.mu.Unlock()
 		logger.AddEntry(job.entry)
@@ -45,28 +44,32 @@ func (m *HarLoggerManager) processEntries() {
 }
 
 func (m *HarLoggerManager) LogEntry(entry HarEntry, serverName string, mapping *Mapping, user *User) {
-	dumpPath := m.findDumpPath(serverName, mapping, user)
-	if dumpPath != "" {
-		m.entryCh <- harEntryJob{entry: entry, dumpPath: dumpPath}
+	dumpPaths := m.findDumpPaths(serverName, mapping, user)
+	for _, path := range dumpPaths {
+		if path != "" {
+			m.entryCh <- harEntryJob{entry: entry, dumpPath: path}
+		}
 	}
 }
 
-func (m *HarLoggerManager) findDumpPath(serverName string, mapping *Mapping, user *User) string {
-	// 优先级: mapping > user > group > server
+func (m *HarLoggerManager) findDumpPaths(serverName string, mapping *Mapping, user *User) []string {
+	paths := make(map[string]struct{}) // 使用 map 来自动去重
+
+	// 检查所有层级并收集 dump 路径
 	if mapping != nil && mapping.Dump != "" {
-		return mapping.Dump
+		paths[mapping.Dump] = struct{}{}
 	}
 
 	if user != nil {
 		if user.Dump != "" {
-			return user.Dump
+			paths[user.Dump] = struct{}{}
 		}
 		// 检查用户所属的组
 		if m.config.Auth != nil && m.config.Auth.Groups != nil {
 			for _, groupName := range user.Groups {
 				if group, ok := m.config.Auth.Groups[groupName]; ok {
 					if group.Dump != "" {
-						return group.Dump
+						paths[group.Dump] = struct{}{}
 					}
 				}
 			}
@@ -75,11 +78,16 @@ func (m *HarLoggerManager) findDumpPath(serverName string, mapping *Mapping, use
 
 	if serverConfig, ok := m.config.Servers[serverName]; ok {
 		if serverConfig.Dump != "" {
-			return serverConfig.Dump
+			paths[serverConfig.Dump] = struct{}{}
 		}
 	}
 
-	return ""
+	// 将 map 的键转换为切片
+	result := make([]string, 0, len(paths))
+	for path := range paths {
+		result = append(result, path)
+	}
+	return result
 }
 
 func (m *HarLoggerManager) Shutdown() {
@@ -88,8 +96,8 @@ func (m *HarLoggerManager) Shutdown() {
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	for path, logger := range m.loggers {
-		logger.SaveToFile(path)
+	for _, logger := range m.loggers {
+		logger.SaveToFile()
 	}
 	log.Println("[HAR DUMP] All HAR logs saved.")
 }

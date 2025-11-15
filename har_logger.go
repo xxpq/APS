@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"io/ioutil"
 	"log"
+	"os"
+	"path/filepath"
 	"sync"
 )
 
@@ -93,12 +95,30 @@ type HarTimings struct {
 
 // HarLogger manages the HAR log
 type HarLogger struct {
-	mu  sync.Mutex
-	log *HarLog
+	mu       sync.Mutex
+	log      *HarLog
+	filePath string
 }
 
-func NewHarLogger() *HarLogger {
+func NewHarLogger(filePath string) *HarLogger {
+	// 尝试读取现有文件
+	existingData, err := ioutil.ReadFile(filePath)
+	if err == nil {
+		var harLog HarLog
+		if json.Unmarshal(existingData, &harLog) == nil {
+			log.Printf("[HAR DUMP] Loaded %d existing entries from: %s", len(harLog.Log.Entries), filePath)
+			return &HarLogger{
+				filePath: filePath,
+				log:      &harLog,
+			}
+		}
+		log.Printf("[HAR DUMP] Warning: Could not parse existing HAR file %s, it will be overwritten.", filePath)
+	}
+
+	// 如果文件不存在或无法解析，则创建一个新的
+	log.Printf("[HAR DUMP] Initialized new HAR logger for: %s", filePath)
 	return &HarLogger{
+		filePath: filePath,
 		log: &HarLog{
 			Log: HarContent{
 				Version: "1.2",
@@ -118,20 +138,27 @@ func (h *HarLogger) AddEntry(entry HarEntry) {
 	h.log.Log.Entries = append(h.log.Log.Entries, entry)
 }
 
-func (h *HarLogger) SaveToFile(filename string) {
+func (h *HarLogger) SaveToFile() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	data, err := json.MarshalIndent(h.log, "", "  ")
-	if err != nil {
-		log.Printf("Error marshalling HAR log: %v", err)
+	// 确保目录存在
+	dir := filepath.Dir(h.filePath)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		log.Printf("Error creating directory for HAR file %s: %v", h.filePath, err)
 		return
 	}
 
-	err = ioutil.WriteFile(filename, data, 0644)
+	data, err := json.MarshalIndent(h.log, "", "  ")
 	if err != nil {
-		log.Printf("Error writing HAR file: %v", err)
+		log.Printf("Error marshalling HAR log for %s: %v", h.filePath, err)
+		return
+	}
+
+	err = ioutil.WriteFile(h.filePath, data, 0644)
+	if err != nil {
+		log.Printf("Error writing HAR file %s: %v", h.filePath, err)
 	} else {
-		log.Printf("HAR log saved to %s", filename)
+		log.Printf("HAR log with %d entries saved to %s", len(h.log.Log.Entries), h.filePath)
 	}
 }
