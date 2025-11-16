@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -76,9 +77,15 @@ func (h *AdminHandlers) RegisterHandlers(mux *http.ServeMux) {
 	mux.HandleFunc("/.api/login", h.handleLogin)
 	mux.HandleFunc("/.api/logout", h.handleLogout)
 	mux.HandleFunc("/.api/config", h.handleConfig)
-	// Serve static files for the admin panel
-	// mux.Handle("/.admin/", http.StripPrefix("/.admin/", http.FileServer(http.Dir("./admin-ui/dist"))))
-	// index.html文件内容现在在 admin_page_content 变量内
+
+	// 资源管理接口
+	mux.HandleFunc("/.api/users", h.handleUsers)
+	mux.HandleFunc("/.api/proxies", h.handleProxies)
+	mux.HandleFunc("/.api/tunnels", h.handleTunnels)
+	mux.HandleFunc("/.api/servers", h.handleServers)
+	mux.HandleFunc("/.api/rules", h.handleRules)
+
+	// 管理面板页面
 	mux.HandleFunc("/.admin/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Write([]byte(admin_page_content))
@@ -259,6 +266,347 @@ func (h *AdminHandlers) setConfig(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "success, reload triggered"})
+}
+
+// ===== 辅助：保存当前内存配置到文件（需持有写锁）=====
+func (h *AdminHandlers) saveConfigLocked() error {
+	file, err := os.OpenFile(h.configPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	encoder := json.NewEncoder(file)
+	encoder.SetIndent("", "  ")
+	return encoder.Encode(h.config)
+}
+
+// ===== 用户管理 =====
+func (h *AdminHandlers) handleUsers(w http.ResponseWriter, r *http.Request) {
+	if !h.isAdminToken(extractToken(r)) {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		h.configMux.RLock()
+		defer h.configMux.RUnlock()
+		resp := make(map[string]interface{})
+		if h.config.Auth != nil && h.config.Auth.Users != nil {
+			for name, u := range h.config.Auth.Users {
+				if u == nil {
+					continue
+				}
+				resp[name] = map[string]interface{}{
+					"admin":  u.Admin,
+					"token":  u.Token,
+					"groups": u.Groups,
+					"dump":   u.Dump,
+					"endpoint": u.Endpoint,
+					"tunnel":   u.Tunnel,
+					"connectionPolicies": u.ConnectionPolicies,
+					"trafficPolicies":    u.TrafficPolicies,
+				}
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	case http.MethodPost:
+		var req struct {
+			Name string `json:"name"`
+			User User   `json:"user"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" {
+			http.Error(w, "Invalid payload", http.StatusBadRequest)
+			return
+		}
+		h.configMux.Lock()
+		defer h.configMux.Unlock()
+		if h.config.Auth == nil {
+			h.config.Auth = &AuthConfig{}
+		}
+		if h.config.Auth.Users == nil {
+			h.config.Auth.Users = make(map[string]*User)
+		}
+		// 覆盖或新增
+		u := req.User
+		h.config.Auth.Users[req.Name] = &u
+		if err := h.saveConfigLocked(); err != nil {
+			http.Error(w, "Failed to persist config", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"status": "upserted"})
+	case http.MethodDelete:
+		name := r.URL.Query().Get("name")
+		if name == "" {
+			http.Error(w, "name is required", http.StatusBadRequest)
+			return
+		}
+		h.configMux.Lock()
+		defer h.configMux.Unlock()
+		if h.config.Auth != nil && h.config.Auth.Users != nil {
+			delete(h.config.Auth.Users, name)
+		}
+		if err := h.saveConfigLocked(); err != nil {
+			http.Error(w, "Failed to persist config", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"status": "deleted"})
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// ===== 代理管理 =====
+func (h *AdminHandlers) handleProxies(w http.ResponseWriter, r *http.Request) {
+	if !h.isAdminToken(extractToken(r)) {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		h.configMux.RLock()
+		defer h.configMux.RUnlock()
+		resp := make(map[string]*ProxyConfig)
+		if h.config.Proxies != nil {
+			for name, p := range h.config.Proxies {
+				resp[name] = p
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	case http.MethodPost:
+		var req struct {
+			Name  string      `json:"name"`
+			Proxy ProxyConfig `json:"proxy"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" {
+			http.Error(w, "Invalid payload", http.StatusBadRequest)
+			return
+		}
+		h.configMux.Lock()
+		defer h.configMux.Unlock()
+		if h.config.Proxies == nil {
+			h.config.Proxies = make(map[string]*ProxyConfig)
+		}
+		p := req.Proxy
+		h.config.Proxies[req.Name] = &p
+		if err := h.saveConfigLocked(); err != nil {
+			http.Error(w, "Failed to persist config", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"status": "upserted"})
+	case http.MethodDelete:
+		name := r.URL.Query().Get("name")
+		if name == "" {
+			http.Error(w, "name is required", http.StatusBadRequest)
+			return
+		}
+		h.configMux.Lock()
+		defer h.configMux.Unlock()
+		if h.config.Proxies != nil {
+			delete(h.config.Proxies, name)
+		}
+		if err := h.saveConfigLocked(); err != nil {
+			http.Error(w, "Failed to persist config", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"status": "deleted"})
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// ===== 隧道管理 =====
+func (h *AdminHandlers) handleTunnels(w http.ResponseWriter, r *http.Request) {
+	if !h.isAdminToken(extractToken(r)) {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		h.configMux.RLock()
+		defer h.configMux.RUnlock()
+		resp := make(map[string]*TunnelConfig)
+		if h.config.Tunnels != nil {
+			for name, t := range h.config.Tunnels {
+				resp[name] = t
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	case http.MethodPost:
+		var req struct {
+			Name   string       `json:"name"`
+			Tunnel TunnelConfig `json:"tunnel"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" {
+			http.Error(w, "Invalid payload", http.StatusBadRequest)
+			return
+		}
+		h.configMux.Lock()
+		defer h.configMux.Unlock()
+		if h.config.Tunnels == nil {
+			h.config.Tunnels = make(map[string]*TunnelConfig)
+		}
+		t := req.Tunnel
+		h.config.Tunnels[req.Name] = &t
+		if err := h.saveConfigLocked(); err != nil {
+			http.Error(w, "Failed to persist config", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"status": "upserted"})
+	case http.MethodDelete:
+		name := r.URL.Query().Get("name")
+		if name == "" {
+			http.Error(w, "name is required", http.StatusBadRequest)
+			return
+		}
+		h.configMux.Lock()
+		defer h.configMux.Unlock()
+		if h.config.Tunnels != nil {
+			delete(h.config.Tunnels, name)
+		}
+		if err := h.saveConfigLocked(); err != nil {
+			http.Error(w, "Failed to persist config", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"status": "deleted"})
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// ===== 服务器管理 =====
+func (h *AdminHandlers) handleServers(w http.ResponseWriter, r *http.Request) {
+	if !h.isAdminToken(extractToken(r)) {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		h.configMux.RLock()
+		defer h.configMux.RUnlock()
+		resp := make(map[string]*ListenConfig)
+		if h.config.Servers != nil {
+			for name, s := range h.config.Servers {
+				resp[name] = s
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	case http.MethodPost:
+		var req struct {
+			Name   string       `json:"name"`
+			Server ListenConfig `json:"server"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" {
+			http.Error(w, "Invalid payload", http.StatusBadRequest)
+			return
+		}
+		h.configMux.Lock()
+		defer h.configMux.Unlock()
+		if h.config.Servers == nil {
+			h.config.Servers = make(map[string]*ListenConfig)
+		}
+		s := req.Server
+		// 保持未提供字段为默认值
+		h.config.Servers[req.Name] = &s
+		if err := h.saveConfigLocked(); err != nil {
+			http.Error(w, "Failed to persist config", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"status": "upserted"})
+	case http.MethodDelete:
+		name := r.URL.Query().Get("name")
+		if name == "" {
+			http.Error(w, "name is required", http.StatusBadRequest)
+			return
+		}
+		h.configMux.Lock()
+		defer h.configMux.Unlock()
+		if h.config.Servers != nil {
+			delete(h.config.Servers, name)
+		}
+		if err := h.saveConfigLocked(); err != nil {
+			http.Error(w, "Failed to persist config", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"status": "deleted"})
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// ===== 规则管理 =====
+func (h *AdminHandlers) handleRules(w http.ResponseWriter, r *http.Request) {
+	if !h.isAdminToken(extractToken(r)) {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		h.configMux.RLock()
+		defer h.configMux.RUnlock()
+		// 直接返回当前配置中的 Mappings（内部解析字段为非导出，不会泄露）
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(h.config.Mappings)
+	case http.MethodPost:
+		var req struct {
+			Index   *int    `json:"index,omitempty"`
+			Mapping Mapping `json:"mapping"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid payload", http.StatusBadRequest)
+			return
+		}
+		h.configMux.Lock()
+		defer h.configMux.Unlock()
+		if req.Index != nil {
+			if *req.Index < 0 || *req.Index >= len(h.config.Mappings) {
+				http.Error(w, "index out of range", http.StatusBadRequest)
+				return
+			}
+			h.config.Mappings[*req.Index] = req.Mapping
+		} else {
+			h.config.Mappings = append(h.config.Mappings, req.Mapping)
+		}
+		if err := h.saveConfigLocked(); err != nil {
+			http.Error(w, "Failed to persist config", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"status": "upserted"})
+	case http.MethodDelete:
+		idxStr := r.URL.Query().Get("index")
+		if idxStr == "" {
+			http.Error(w, "index is required", http.StatusBadRequest)
+			return
+		}
+		idx, err := strconv.Atoi(idxStr)
+		if err != nil || idx < 0 || idx >= len(h.config.Mappings) {
+			http.Error(w, "invalid index", http.StatusBadRequest)
+			return
+		}
+		h.configMux.Lock()
+		defer h.configMux.Unlock()
+		h.config.Mappings = append(h.config.Mappings[:idx], h.config.Mappings[idx+1:]...)
+		if err := h.saveConfigLocked(); err != nil {
+			http.Error(w, "Failed to persist config", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"status": "deleted"})
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
 }
 
 func (h *CertHandlers) handleCertPage(w http.ResponseWriter, r *http.Request) {

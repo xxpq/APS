@@ -1,24 +1,34 @@
 {
   "servers": {
     "default": {
-      "port": 8899,
+      "port": 8090,
+      "public": true,
       "panel": true
     }
   },
   "proxies": null,
-  "mappings": [
-    {
-      "from": "http://localhost:8899/geoserver/*",
-      "to": "http://10.1.24.223:8089/geoserver/*",
-      "servers": "default"
-    }
-  ],
-  "auth":{
+  "auth": {
     "users": {
-      "admin":{
+      "admin": {
         "password": "admin",
         "admin": true
       }
+    },
+    "groups": null
+  },
+  "mappings": [
+    {
+      "from": "http://127.0.0.1:8090/geoserver/*",
+      "to": {
+        "headers": {
+          "access-control-allow-origin": "http://10.1.24.223:8083",
+          "content-security-policy": null,
+          "cross-origin-opener-policy": null,
+          "cross-origin-resource-policy": null,
+          "x-frame-options": null
+        },
+        "url": "http://10.1.24.223:8089/geoserver/*"
+      }
     }
-  }
+  ]
 }
