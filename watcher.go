@@ -8,11 +8,12 @@ import (
 )
 
 type ConfigWatcher struct {
-	filename      string
-	config        *Config
-	lastModTime   time.Time
-	stopChan      chan struct{}
-	serverManager *ServerManager
+	filename          string
+	config            *Config
+	lastModTime       time.Time
+	stopChan          chan struct{}
+	serverManager     *ServerManager
+	lastTunnelBinding map[string]bool
 }
 
 func NewConfigWatcher(filename string, config *Config, serverManager *ServerManager) (*ConfigWatcher, error) {
@@ -21,12 +22,23 @@ func NewConfigWatcher(filename string, config *Config, serverManager *ServerMana
 		return nil, err
 	}
 
+	// 初始化每个 server 是否绑定了隧道的状态，用于后续变更检测与重启（/.tunnel 注册）
+	binding := make(map[string]bool)
+	if config != nil && config.Tunnels != nil {
+		for _, t := range config.Tunnels {
+			for _, sName := range t.Servers {
+				binding[sName] = true
+			}
+		}
+	}
+
 	return &ConfigWatcher{
-		filename:      filename,
-		config:        config,
-		lastModTime:   info.ModTime(),
-		stopChan:      make(chan struct{}),
-		serverManager: serverManager,
+		filename:          filename,
+		config:            config,
+		lastModTime:       info.ModTime(),
+		stopChan:          make(chan struct{}),
+		serverManager:     serverManager,
+		lastTunnelBinding: binding,
 	}, nil
 }
 
@@ -63,6 +75,29 @@ func (w *ConfigWatcher) watch() {
 				} else {
 					log.Printf("Config reloaded successfully, synchronizing servers...")
 					w.syncServers(oldServers, w.config.Servers)
+
+					// 重新计算每个 server 是否绑定了隧道；若绑定状态发生变化，则重启该 server
+					// 以便让 createServerHandler() 重新注册或移除 '/.tunnel' 端点
+					newBinding := make(map[string]bool)
+					if w.config.Tunnels != nil {
+						for _, t := range w.config.Tunnels {
+							for _, sName := range t.Servers {
+								newBinding[sName] = true
+							}
+						}
+					}
+					for name := range w.config.Servers {
+						oldHas := w.lastTunnelBinding[name]
+						newHas := newBinding[name]
+						if oldHas != newHas {
+							log.Printf("Tunnel binding changed for server '%s' (old=%v, new=%v). Restarting to re-register handlers...", name, oldHas, newHas)
+							w.serverManager.Stop(name)
+							// 确保端口释放
+							time.Sleep(100 * time.Millisecond)
+							w.serverManager.Start(name, w.config.Servers[name])
+						}
+					}
+					w.lastTunnelBinding = newBinding
 				}
 			}
 

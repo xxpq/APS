@@ -2,11 +2,17 @@
   "servers": {
     "default": {
       "port": 8090,
+      "endpoint": true,
       "public": true,
       "panel": true
     }
   },
-  "proxies": null,
+  "tunnels": {
+    "dev": {
+      "servers": ["default"],
+      "password": "test"
+    }
+  },
   "auth": {
     "users": {
       "admin": {
@@ -18,8 +24,9 @@
   },
   "mappings": [
     {
-      "from": "http://127.0.0.1:8090/geoserver/*",
+      "from": "http://8.159.132.172:8090/geoserver/*",
       "to": {
+        "tunnel": "dev",
         "headers": {
           "access-control-allow-origin": "http://10.1.24.223:8083",
           "content-security-policy": null,

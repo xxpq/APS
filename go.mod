@@ -1,4 +1,4 @@
-module proxy_tool
+module aps
 
 go 1.25.0
 

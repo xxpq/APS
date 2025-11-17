@@ -205,6 +205,9 @@ func createServerHandler(serverName string, mappings []*Mapping, serverConfig *L
 			log.Printf("[TUNNEL] Incoming WebSocket connection for tunnel '%s' on server '%s'", tunnel.name, serverName)
 			tunnelManager.ServeWs(tunnel, w, r)
 		})
+		log.Printf("Registered '/.tunnel' on server '%s' for tunnel '%s'", serverName, tunnel.name)
+	} else {
+		log.Printf("No tunnel bound to server '%s'. '/.tunnel' is not registered.", serverName)
 	}
 
 	// 如果 cert 是 auto，注册证书下载处理器
@@ -223,6 +226,7 @@ func createServerHandler(serverName string, mappings []*Mapping, serverConfig *L
 
 		// 注册管理面板处理器
 		adminHandlers := NewAdminHandlers(config, configFile)
+		adminHandlers.SetTunnelManager(tunnelManager)
 		adminHandlers.RegisterHandlers(mux)
 	}
 

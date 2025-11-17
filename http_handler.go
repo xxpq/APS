@@ -2,6 +2,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/tls"
@@ -9,6 +10,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/http/httputil"
 	"net/url"
 	"os"
 	"strings"
@@ -325,13 +327,71 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	resp, err := client.Do(proxyReq)
-	if err != nil {
-		isError = true
-		p.logHarEntry(r, nil, startTime, mapping, user)
-		http.Error(w, "Failed to proxy request", http.StatusBadGateway)
-		log.Printf("Error proxying request: %v", err)
-		return
+	var resp *http.Response
+	if tunnelKey != "" {
+		var endpoint *EndpointConn
+		var tunnel *Tunnel
+
+		if len(mapping.endpointNames) > 0 {
+			endpointName := mapping.endpointNames[0]
+			endpoint, tunnel = p.tunnelManager.FindEndpoint(endpointName)
+			if endpoint == nil {
+				isError = true
+				http.Error(w, "Specified endpoint not found: "+endpointName, http.StatusBadGateway)
+				log.Printf("[TUNNEL] Specified endpoint '%s' not found", endpointName)
+				return
+			}
+		} else {
+			endpoint, tunnel = p.tunnelManager.GetRandomEndpointFromTunnel(tunnelKey)
+			if endpoint == nil {
+				isError = true
+				http.Error(w, "No available endpoint for tunnel: "+tunnelKey, http.StatusBadGateway)
+				log.Printf("[TUNNEL] No available endpoint for tunnel '%s'", tunnelKey)
+				return
+			}
+		}
+
+		reqBytes, err := httputil.DumpRequest(proxyReq, true)
+		if err != nil {
+			isError = true
+			http.Error(w, "Failed to serialize request for tunnel", http.StatusInternalServerError)
+			log.Printf("[TUNNEL] Error serializing request: %v", err)
+			return
+		}
+
+		log.Printf("[TUNNEL] Forwarding request for %s via tunnel '%s' to endpoint '%s'", originalURL, tunnelKey, endpoint.name)
+
+		// Create the payload with URL and serialized request data
+		reqPayload := &RequestPayload{
+			URL:  proxyReq.URL.String(),
+			Data: reqBytes,
+		}
+
+		respBytes, err := endpoint.SendRequest(r.Context(), reqPayload, tunnel)
+		if err != nil {
+			isError = true
+			http.Error(w, "Failed to send request through tunnel", http.StatusBadGateway)
+			log.Printf("[TUNNEL] Error sending request via endpoint '%s': %v", endpoint.name, err)
+			return
+		}
+
+		resp, err = http.ReadResponse(bufio.NewReader(bytes.NewReader(respBytes)), proxyReq)
+		if err != nil {
+			isError = true
+			http.Error(w, "Failed to read response from tunnel", http.StatusInternalServerError)
+			log.Printf("[TUNNEL] Error reading response from endpoint '%s': %v", endpoint.name, err)
+			return
+		}
+	} else {
+		var err error
+		resp, err = client.Do(proxyReq)
+		if err != nil {
+			isError = true
+			p.logHarEntry(r, nil, startTime, mapping, user)
+			http.Error(w, "Failed to proxy request", http.StatusBadGateway)
+			log.Printf("Error proxying request: %v", err)
+			return
+		}
 	}
 	defer resp.Body.Close()
 

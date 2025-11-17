@@ -57,10 +57,11 @@ var AdminSessions = &SessionStore{sessions: make(map[string]Session)}
 
 // AdminHandlers contains the HTTP handlers for the admin panel.
 type AdminHandlers struct {
-	config     *Config
-	configPath string
-	configMux  sync.RWMutex
-	sessions   *SessionStore
+	config        *Config
+	configPath    string
+	configMux     sync.RWMutex
+	sessions      *SessionStore
+	tunnelManager *TunnelManager
 }
 
 // NewAdminHandlers creates a new AdminHandlers instance.
@@ -70,6 +71,11 @@ func NewAdminHandlers(config *Config, configPath string) *AdminHandlers {
 		configPath: configPath,
 		sessions:   AdminSessions,
 	}
+}
+
+// SetTunnelManager sets the tunnel manager reference for endpoint status queries
+func (h *AdminHandlers) SetTunnelManager(tm *TunnelManager) {
+	h.tunnelManager = tm
 }
 
 // RegisterHandlers registers the admin panel handlers to the given ServeMux.
@@ -82,6 +88,7 @@ func (h *AdminHandlers) RegisterHandlers(mux *http.ServeMux) {
 	mux.HandleFunc("/.api/users", h.handleUsers)
 	mux.HandleFunc("/.api/proxies", h.handleProxies)
 	mux.HandleFunc("/.api/tunnels", h.handleTunnels)
+	mux.HandleFunc("/.api/tunnels/endpoints", h.handleTunnelEndpoints)
 	mux.HandleFunc("/.api/servers", h.handleServers)
 	mux.HandleFunc("/.api/rules", h.handleRules)
 
@@ -480,6 +487,60 @@ func (h *AdminHandlers) handleTunnels(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+// ===== 隧道在线 endpoint 查询 =====
+func (h *AdminHandlers) handleTunnelEndpoints(w http.ResponseWriter, r *http.Request) {
+	if !h.isAdminToken(extractToken(r)) {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	tunnelName := r.URL.Query().Get("tunnel")
+	if tunnelName == "" {
+		http.Error(w, "tunnel parameter is required", http.StatusBadRequest)
+		return
+	}
+
+	if h.tunnelManager == nil {
+		http.Error(w, "Tunnel manager not initialized", http.StatusInternalServerError)
+		return
+	}
+
+	h.tunnelManager.mu.RLock()
+	tunnel, exists := h.tunnelManager.tunnels[tunnelName]
+	h.tunnelManager.mu.RUnlock()
+
+	if !exists {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"tunnel":    tunnelName,
+			"endpoints": []interface{}{},
+		})
+		return
+	}
+
+	tunnel.mu.RLock()
+	defer tunnel.mu.RUnlock()
+
+	endpoints := make([]map[string]interface{}, 0, len(tunnel.endpoints))
+	for name, ep := range tunnel.endpoints {
+		endpoints = append(endpoints, map[string]interface{}{
+			"name":       name,
+			"remoteAddr": ep.ws.RemoteAddr().String(),
+			"online":     true,
+		})
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"tunnel":    tunnelName,
+		"endpoints": endpoints,
+	})
 }
 
 // ===== 服务器管理 =====

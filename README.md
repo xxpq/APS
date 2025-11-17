@@ -92,6 +92,8 @@ go build .
 -   `dump`: (可选) `string`。HAR 文件路径，用于记录通过此服务器的所有流量。
 -   `public`: (可选) `boolean`。默认 `true`。为 `true` 时监听 `0.0.0.0:port`，为 `false` 时仅监听 `127.0.0.1:port`。
 -   `panel`: (可选) `boolean`。默认 `false`。为 `true` 时注册管理端路由 `/.api/*` 与 `/.admin/`；为 `false` 时不注册这些路由（`/.replay` 始终可用）。
+-   `endpoint`: (可选) `string` 或 `array` of `string`。服务级默认端点标签，用于标识或未来的默认路由参考。当前版本的请求转发以规则级 `tunnel`/`endpoint` 为准，`servers.endpoint` 不参与路由决策。
+-   `tunnel`: (可选) `string` 或 `array` of `string`。服务级默认隧道标签。当前版本的请求转发以规则级 `tunnel` 为准；隧道接入是否允许由 `tunnels.<name>.servers` 指定，服务在被指定后会开放 `/.tunnel` 供端点客户端连接。
 -   `ConnectionPolicies` & `TrafficPolicies`: (可选) 为此服务器上的所有连接设置默认策略。
 
 **示例:**
@@ -113,6 +115,47 @@ go build .
   }
 }
 ```
+
+**进一步案例：服务器作为隧道接入点与端点路由**
+
+- 配置片段：
+```json
+{
+  "servers": {
+    "edge": { "port": 3000, "panel": true }
+  },
+  "tunnels": {
+    "my-secure-tunnel": {
+      "servers": ["edge"],
+      "password": "shared-secret"
+    }
+  },
+  "mappings": [
+    {
+      "from": "https://remote-app.com/*",
+      "to": "https://remote-app.com/*",
+      "servers": ["edge"],
+      "tunnel": "my-secure-tunnel"
+    },
+    {
+      "from": "https://remote-app.com/*",
+      "to": "https://remote-app.com/*",
+      "servers": ["edge"],
+      "endpoint": "app-instance-1"
+    }
+  ]
+}
+```
+
+- 端点客户端启动示例：
+```bash
+go run ./endpoint/main.go -server 127.0.0.1:3000 -tunnel my-secure-tunnel -name app-instance-1 -password "shared-secret"
+```
+
+- 说明：
+  - 将某隧道绑定到服务器需在 `tunnels.<name>.servers` 中声明；绑定后该服务器自动开放 `/.tunnel` 接入。
+  - 映射规则中使用 `tunnel` 或 `endpoint` 字段决定路由；当隧道内无在线端点或指定端点离线时会回退为直连。
+  - `servers.endpoint` / `servers.tunnel` 字段当前仅用于标识与未来默认路由扩展；不影响路由行为。
 
 ### `mappings`
 

@@ -19,7 +19,6 @@ import (
 	"os"
 	"os/signal"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -30,8 +29,6 @@ import (
 const (
 	MessageTypeRequest  = "request"
 	MessageTypeResponse = "response"
-	MessageTypePing     = "ping"
-	MessageTypePong     = "pong"
 	MessageTypeCancel   = "cancel"
 )
 
@@ -42,6 +39,7 @@ type TunnelMessage struct {
 }
 
 type RequestPayload struct {
+	URL  string `json:"url"`
 	Data []byte `json:"data"`
 }
 
@@ -50,27 +48,17 @@ type ResponsePayload struct {
 	Error string `json:"error,omitempty"`
 }
 
-type PingPayload struct {
-	Timestamp int64 `json:"timestamp"`
-}
-
-type PongPayload struct {
-	Timestamp int64 `json:"timestamp"`
-}
-
 var (
 	serverAddr     = flag.String("server", "localhost:8080", "proxy server address (e.g., 'your_proxy.com:8080')")
 	name           = flag.String("name", "default-endpoint", "unique name for this endpoint client")
 	tunnelName     = flag.String("tunnel", "", "name of the tunnel to connect to (must be defined in server config)")
 	tunnelPassword = flag.String("password", "", "tunnel password for encryption")
+	debug          = flag.Bool("debug", false, "enable debug logging")
 
-	lastPongTime   atomic.Value
 	activeRequests sync.Map // Stores map[string]context.CancelFunc
 )
 
 const (
-	pingInterval   = 10 * time.Second
-	pongTimeout    = 30 * time.Second
 	reconnectDelay = 5 * time.Second
 )
 
@@ -114,8 +102,20 @@ func runClientSession(interrupt chan os.Signal) {
 	defer conn.Close()
 	log.Println("Successfully connected to tunnel server.")
 
+	// The server will send pings, and the client will automatically respond with pongs.
+	// We just need to handle the ping message to know the connection is alive.
+	// The gorilla/websocket library handles the pong response automatically.
+	conn.SetPingHandler(func(appData string) error {
+		if *debug {
+			log.Println("Ping received")
+		}
+		// The library will automatically send a pong. We don't need to do anything here
+		// except perhaps update a read deadline if we were managing it manually.
+		// Since the server-side read deadline is the primary check, this is sufficient.
+		return nil
+	})
+
 	done := make(chan struct{})
-	lastPongTime.Store(time.Now())
 
 	// Start reader goroutine
 	go func() {
@@ -123,8 +123,17 @@ func runClientSession(interrupt chan os.Signal) {
 		for {
 			_, message, err := conn.ReadMessage()
 			if err != nil {
-				log.Println("Read error:", err)
+				// Check for clean close or actual error
+				if websocket.IsUnexpectedCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
+					log.Printf("Read error: %v", err)
+				} else {
+					log.Println("Connection closed gracefully.")
+				}
 				return
+			}
+
+			if *debug {
+				log.Printf("RECV: %s", message)
 			}
 
 			var msg TunnelMessage
@@ -136,8 +145,6 @@ func runClientSession(interrupt chan os.Signal) {
 			switch msg.Type {
 			case MessageTypeRequest:
 				go handleRequest(conn, msg.ID, msg.Payload)
-			case MessageTypePong:
-				lastPongTime.Store(time.Now())
 			case MessageTypeCancel:
 				log.Printf("[CANCEL] Received cancellation for request %s", msg.ID)
 				if cancelFunc, ok := activeRequests.Load(msg.ID); ok {
@@ -148,51 +155,21 @@ func runClientSession(interrupt chan os.Signal) {
 		}
 	}()
 
-	// Start heartbeat goroutine
-	go func() {
-		ticker := time.NewTicker(pingInterval)
-		defer ticker.Stop()
-
-		for {
-			select {
-			case <-ticker.C:
-				// Check if the last pong is too old
-				if time.Since(lastPongTime.Load().(time.Time)) > pongTimeout {
-					log.Printf("Pong timeout. Disconnecting.")
-					conn.Close() // This will cause the reader to error out and close 'done'
-					return
-				}
-
-				// Send ping
-				pingPayload := PingPayload{Timestamp: time.Now().UnixNano()}
-				payloadBytes, _ := json.Marshal(pingPayload)
-				pingMsg := TunnelMessage{Type: MessageTypePing, Payload: payloadBytes}
-				msgBytes, _ := json.Marshal(pingMsg)
-
-				if err := conn.WriteMessage(websocket.TextMessage, msgBytes); err != nil {
-					log.Println("Write ping error:", err)
-					return
-				}
-				// log.Println("Ping sent.")
-			case <-done:
-				return
-			}
-		}
-	}()
-
 	select {
 	case <-done:
-		log.Println("Connection closed.")
+		log.Println("Reader finished, connection is likely closed.")
 	case <-interrupt:
 		log.Println("Interrupt received, closing connection.")
+		// Attempt a clean shutdown
 		err := conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
 		if err != nil {
 			log.Println("Write close error:", err)
 		}
-		// Wait a bit for the close message to be sent
+		// Wait for the reader to close or timeout
 		select {
 		case <-done:
 		case <-time.After(time.Second):
+			log.Println("Shutdown timeout, forcing close.")
 		}
 	}
 }
@@ -205,27 +182,50 @@ func handleRequest(conn *websocket.Conn, requestID string, payload json.RawMessa
 		activeRequests.Delete(requestID)
 	}()
 
+	if *debug {
+		log.Printf("[DEBUG %s] Handling request", requestID)
+	}
+
 	var reqPayload RequestPayload
 	if err := json.Unmarshal(payload, &reqPayload); err != nil {
-		log.Printf("Error unmarshalling request payload: %v", err)
+		log.Printf("[ERROR %s] Error unmarshalling request payload: %v", requestID, err)
 		sendErrorResponse(conn, requestID, "bad request payload")
 		return
+	}
+	if *debug {
+		log.Printf("[DEBUG %s] Unmarshalled payload, URL: %s, DataLen: %d", requestID, reqPayload.URL, len(reqPayload.Data))
 	}
 
 	decryptedData, err := decrypt(reqPayload.Data, *tunnelPassword)
 	if err != nil {
-		log.Printf("Error decrypting request: %v", err)
+		log.Printf("[ERROR %s] Error decrypting request: %v", requestID, err)
 		sendErrorResponse(conn, requestID, "decryption failed")
 		return
+	}
+	if *debug {
+		log.Printf("[DEBUG %s] Decrypted request data, len: %d", requestID, len(decryptedData))
 	}
 
 	req, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(decryptedData)))
 	if err != nil {
-		log.Printf("Error reading request: %v", err)
+		log.Printf("[ERROR %s] Error reading request: %v", requestID, err)
 		sendErrorResponse(conn, requestID, "cannot read request")
 		return
 	}
+
+	targetURL, err := url.Parse(reqPayload.URL)
+	if err != nil {
+		log.Printf("[ERROR %s] Error parsing target URL from payload: %v", requestID, err)
+		sendErrorResponse(conn, requestID, "invalid target URL in payload")
+		return
+	}
+	req.URL.Scheme = targetURL.Scheme
+	req.URL.Host = targetURL.Host
+	req.Host = targetURL.Host
+	req.RequestURI = ""
 	req = req.WithContext(ctx)
+
+	log.Printf("Forwarding request %s to %s", requestID, req.URL.String())
 
 	client := &http.Client{
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
@@ -234,30 +234,38 @@ func handleRequest(conn *websocket.Conn, requestID string, payload json.RawMessa
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		// Check if the error is due to cancellation
 		if errors.Is(err, context.Canceled) {
-			log.Printf("[CANCEL] Request %s was cancelled locally.", requestID)
-			// Don't send a response, as the server-side has already timed out.
+			log.Printf("[CANCEL %s] Request was cancelled locally.", requestID)
 			return
 		}
-		log.Printf("Error executing request: %v", err)
+		log.Printf("[ERROR %s] Error executing request: %v", requestID, err)
 		sendErrorResponse(conn, requestID, err.Error())
 		return
 	}
 	defer resp.Body.Close()
 
+	if *debug {
+		log.Printf("[DEBUG %s] Received response: %s", requestID, resp.Status)
+	}
+
 	respData, err := httputil.DumpResponse(resp, true)
 	if err != nil {
-		log.Printf("Error dumping response: %v", err)
+		log.Printf("[ERROR %s] Error dumping response: %v", requestID, err)
 		sendErrorResponse(conn, requestID, "cannot dump response")
 		return
+	}
+	if *debug {
+		log.Printf("[DEBUG %s] Dumped response, len: %d", requestID, len(respData))
 	}
 
 	encryptedData, err := encrypt(respData, *tunnelPassword)
 	if err != nil {
-		log.Printf("Error encrypting response: %v", err)
+		log.Printf("[ERROR %s] Error encrypting response: %v", requestID, err)
 		sendErrorResponse(conn, requestID, "encryption failed")
 		return
+	}
+	if *debug {
+		log.Printf("[DEBUG %s] Encrypted response, len: %d", requestID, len(encryptedData))
 	}
 
 	sendSuccessResponse(conn, requestID, encryptedData)
@@ -288,7 +296,9 @@ func sendResponse(conn *websocket.Conn, requestID string, payload ResponsePayloa
 }
 
 func sendSuccessResponse(conn *websocket.Conn, requestID string, data []byte) {
-	log.Printf("Sending success response for request %s", requestID)
+	if *debug {
+		log.Printf("[DEBUG %s] Sending success response, len: %d", requestID, len(data))
+	}
 	sendResponse(conn, requestID, ResponsePayload{Data: data})
 }
 

@@ -14,7 +14,6 @@ import (
 	mrand "math/rand"
 	"net/http"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -24,14 +23,14 @@ const (
 	// Time allowed to write a message to the peer.
 	writeWait = 10 * time.Second
 
+	// Time allowed to read the next pong message from the peer.
+	pongWait = 30 * time.Second
+
+	// Send pings to peer with this period. Must be less than pongWait.
+	pingPeriod = (pongWait * 9) / 10
+
 	// Maximum message size allowed from peer.
 	maxMessageSize = 8192
-
-	// Endpoint is considered dead if no ping is received for this duration.
-	heartbeatTimeout = 30 * time.Second
-
-	// How often to check for dead endpoints.
-	heartbeatCheckInterval = 10 * time.Second
 )
 
 // TunnelManager manages all active tunnel connections from endpoints
@@ -56,7 +55,6 @@ type EndpointConn struct {
 	name            string
 	mu              sync.Mutex
 	pendingRequests map[string]chan *ResponsePayload
-	lastPingTime    atomic.Value // Stores time.Time
 	latency         time.Duration
 }
 
@@ -180,42 +178,24 @@ func (tm *TunnelManager) ServeWs(tunnel *Tunnel, w http.ResponseWriter, r *http.
 		name:            endpointName,
 		pendingRequests: make(map[string]chan *ResponsePayload),
 	}
-	conn.lastPingTime.Store(time.Now())
 
 	tunnel.RegisterEndpoint(endpointName, conn)
 
 	go conn.writePump()
 	go conn.readPump(tunnel)
-	go conn.monitorHeartbeat(tunnel)
-}
-
-func (c *EndpointConn) monitorHeartbeat(tunnel *Tunnel) {
-	ticker := time.NewTicker(heartbeatCheckInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ticker.C:
-			lastPing := c.lastPingTime.Load().(time.Time)
-			if time.Since(lastPing) > heartbeatTimeout {
-				log.Printf("[TUNNEL] Heartbeat timeout for endpoint '%s'. Disconnecting.", c.name)
-				c.ws.Close() // This will trigger the readPump to exit and unregister
-				return
-			}
-		// A way to stop this goroutine if the connection is closed from another place
-		case <-c.sendCh: // Assuming sendCh is closed when the connection is terminated
-			return
-		}
-	}
 }
 
 func (c *EndpointConn) readPump(tunnel *Tunnel) {
 	defer func() {
 		tunnel.UnregisterEndpoint(c.name)
-		close(c.sendCh) // Signal other goroutines to stop
 		c.ws.Close()
 	}()
 	c.ws.SetReadLimit(maxMessageSize)
+	c.ws.SetReadDeadline(time.Now().Add(pongWait))
+	c.ws.SetPongHandler(func(string) error {
+		c.ws.SetReadDeadline(time.Now().Add(pongWait))
+		return nil
+	})
 
 	for {
 		_, message, err := c.ws.ReadMessage()
@@ -233,20 +213,6 @@ func (c *EndpointConn) readPump(tunnel *Tunnel) {
 		}
 
 		switch msg.Type {
-		case MessageTypePing:
-			var pingPayload PingPayload
-			if err := json.Unmarshal(msg.Payload, &pingPayload); err == nil {
-				c.lastPingTime.Store(time.Now())
-				c.latency = time.Since(time.Unix(0, pingPayload.Timestamp))
-
-				// Respond with a pong
-				pongPayload := PongPayload{Timestamp: pingPayload.Timestamp}
-				payloadBytes, _ := json.Marshal(pongPayload)
-				pongMsg := TunnelMessage{Type: MessageTypePong, Payload: payloadBytes}
-				msgBytes, _ := json.Marshal(pongMsg)
-				c.sendCh <- msgBytes
-			}
-
 		case MessageTypeResponse:
 			var payload ResponsePayload
 			if err := json.Unmarshal(msg.Payload, &payload); err != nil {
@@ -260,13 +226,16 @@ func (c *EndpointConn) readPump(tunnel *Tunnel) {
 				continue
 			}
 
-			decryptedData, err := decrypt(payload.Data, tunnel.password)
-			if err != nil {
-				log.Printf("[TUNNEL] Error decrypting response from '%s': %v", c.name, err)
-				payload.Error = "decryption failed"
-				payload.Data = nil
-			} else {
-				payload.Data = decryptedData
+			// Only decrypt when data is present and no error is reported
+			if len(payload.Data) > 0 && payload.Error == "" {
+				decryptedData, err := decrypt(payload.Data, tunnel.password)
+				if err != nil {
+					log.Printf("[TUNNEL] Error decrypting response from '%s': %v", c.name, err)
+					payload.Error = "decryption failed"
+					payload.Data = nil
+				} else {
+					payload.Data = decryptedData
+				}
 			}
 
 			c.mu.Lock()
@@ -280,7 +249,9 @@ func (c *EndpointConn) readPump(tunnel *Tunnel) {
 }
 
 func (c *EndpointConn) writePump() {
+	ticker := time.NewTicker(pingPeriod)
 	defer func() {
+		ticker.Stop()
 		c.ws.Close()
 	}()
 	for {
@@ -288,6 +259,7 @@ func (c *EndpointConn) writePump() {
 		case message, ok := <-c.sendCh:
 			c.ws.SetWriteDeadline(time.Now().Add(writeWait))
 			if !ok {
+				// The sendCh channel was closed.
 				c.ws.WriteMessage(websocket.CloseMessage, []byte{})
 				return
 			}
@@ -298,7 +270,18 @@ func (c *EndpointConn) writePump() {
 			}
 			w.Write(message)
 
+			// Add queued chat messages to the current websocket message.
+			n := len(c.sendCh)
+			for i := 0; i < n; i++ {
+				w.Write(<-c.sendCh)
+			}
+
 			if err := w.Close(); err != nil {
+				return
+			}
+		case <-ticker.C:
+			c.ws.SetWriteDeadline(time.Now().Add(writeWait))
+			if err := c.ws.WriteMessage(websocket.PingMessage, nil); err != nil {
 				return
 			}
 		}
@@ -306,19 +289,26 @@ func (c *EndpointConn) writePump() {
 }
 
 // SendRequest sends a request to the endpoint and waits for a response
-func (c *EndpointConn) SendRequest(ctx context.Context, reqData []byte, tunnel *Tunnel) ([]byte, error) {
+func (c *EndpointConn) SendRequest(ctx context.Context, reqPayload *RequestPayload, tunnel *Tunnel) ([]byte, error) {
 	requestID := generateRequestID()
 
-	encryptedData, err := encrypt(reqData, tunnel.password)
+	// Encrypt the inner data of the payload
+	encryptedData, err := encrypt(reqPayload.Data, tunnel.password)
 	if err != nil {
 		return nil, fmt.Errorf("failed to encrypt request: %w", err)
 	}
 
-	payload, _ := json.Marshal(RequestPayload{Data: encryptedData})
+	// Create a new payload for sending, with the original URL and encrypted data
+	payloadToSend := RequestPayload{
+		URL:  reqPayload.URL,
+		Data: encryptedData,
+	}
+
+	payloadBytes, _ := json.Marshal(payloadToSend)
 	msg, _ := json.Marshal(TunnelMessage{
 		ID:      requestID,
 		Type:    MessageTypeRequest,
-		Payload: payload,
+		Payload: payloadBytes,
 	})
 
 	respCh := make(chan *ResponsePayload, 1)
@@ -353,11 +343,12 @@ func (c *EndpointConn) SendRequest(ctx context.Context, reqData []byte, tunnel *
 		// Context was cancelled (e.g., client timeout), notify the endpoint
 		log.Printf("[TUNNEL] Request %s cancelled by client, notifying endpoint '%s'", requestID, c.name)
 		cancelMsg, _ := json.Marshal(TunnelMessage{ID: requestID, Type: MessageTypeCancel})
-		// Use a select with a short timeout to avoid blocking if the send channel is full
+		// Use a non-blocking send to avoid panic on closed channel
 		select {
 		case c.sendCh <- cancelMsg:
-		case <-time.After(1 * time.Second):
-			log.Printf("[TUNNEL] Failed to send cancellation for request %s to endpoint '%s'", requestID, c.name)
+			// Sent successfully
+		default:
+			log.Printf("[TUNNEL] Failed to send cancellation for request %s to endpoint '%s' (channel closed or full)", requestID, c.name)
 		}
 		return nil, ctx.Err()
 	}

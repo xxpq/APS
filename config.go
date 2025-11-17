@@ -21,7 +21,7 @@ func init() {
 
 type Config struct {
 	Servers   map[string]*ListenConfig `json:"servers"`
-	Proxies   map[string]*ProxyConfig  `json:"proxies"`
+	Proxies   map[string]*ProxyConfig  `json:"proxies,omitempty"`
 	Tunnels   map[string]*TunnelConfig `json:"tunnels,omitempty"`
 	Auth      *AuthConfig              `json:"auth,omitempty"`
 	P12s      map[string]*P12Config    `json:"p12s,omitempty"`
@@ -168,9 +168,9 @@ type EndpointConfig struct {
 	Proxy       interface{}            `json:"proxy,omitempty"`       // 支持 string、[]string、本地文件路径或远程 URL
 	Match       string                 `json:"match,omitempty"`
 	Replace     map[string]string      `json:"replace,omitempty"`
-	GRPC      *GRPCConfig      `json:"grpc,omitempty"`
-	WebSocket *WebSocketConfig `json:"websocket,omitempty"`
-	Script    string           `json:"script,omitempty"`
+	GRPC        *GRPCConfig            `json:"grpc,omitempty"`
+	WebSocket   *WebSocketConfig       `json:"websocket,omitempty"`
+	Script      string                 `json:"script,omitempty"`
 }
 
 // GetHeader 获取 header 值，如果是数组则随机选择一个
@@ -319,17 +319,21 @@ func min(a, b int) int {
 	return b
 }
 
-type Mapping struct {
-	From     interface{} `json:"from"` // 可以是字符串或 EndpointConfig 对象
-	To       interface{} `json:"to"`   // 可以是字符串或 EndpointConfig 对象
-	Servers  interface{} `json:"servers,omitempty"` // string or []string
-	Cc       []string    `json:"cc,omitempty"`
-	Proxy    interface{} `json:"proxy,omitempty"` // string or []string, 引用 proxies 的 key
-	Endpoint interface{} `json:"endpoint,omitempty"`
+type ViaConfig struct {
+	Proxy    interface{} `json:"proxy,omitempty"`
 	Tunnel   interface{} `json:"tunnel,omitempty"`
-	P12      string      `json:"p12,omitempty"` // 引用 p12s 的 key
-	Auth     *RuleAuth   `json:"auth,omitempty"`
-	Dump     string      `json:"dump,omitempty"`
+	Endpoint interface{} `json:"endpoint,omitempty"`
+}
+
+type Mapping struct {
+	From    interface{} `json:"from"`              // 可以是字符串或 EndpointConfig 对象
+	To      interface{} `json:"to"`                // 可以是字符串或 EndpointConfig 对象
+	Via     *ViaConfig  `json:"via,omitempty"`
+	Servers interface{} `json:"servers,omitempty"` // string or []string
+	Cc      []string    `json:"cc,omitempty"`
+	P12     string      `json:"p12,omitempty"` // 引用 p12s 的 key
+	Auth    *RuleAuth   `json:"auth,omitempty"`
+	Dump    string      `json:"dump,omitempty"`
 	ConnectionPolicies
 	TrafficPolicies
 
@@ -379,7 +383,7 @@ func (lc *ListenConfig) UnmarshalJSON(data []byte) error {
 		lc.Port = port
 		// Defaults when only port is provided
 		t := true
-		lc.Public = &t     // public defaults to true
+		lc.Public = &t // public defaults to true
 		// panel defaults to false (nil)
 		return nil
 	}
@@ -633,34 +637,36 @@ func processConfig(config *Config) error {
 			}
 		}
 
-		// 解析 proxy names
-		proxySource := mapping.Proxy
-		if fromConfig.Proxy != nil {
-			proxySource = fromConfig.Proxy
-		}
-		mapping.proxyNames = parseStringOrArray(proxySource)
+		if mapping.Via != nil {
+			// 解析 proxy names from via
+			proxySource := mapping.Via.Proxy
+			if fromConfig.Proxy != nil {
+				proxySource = fromConfig.Proxy // from中的proxy优先级更高
+			}
+			mapping.proxyNames = parseStringOrArray(proxySource)
 
-		// 解析并初始化代理
-		if len(mapping.proxyNames) > 0 {
-			var allProxies []string
-			for _, name := range mapping.proxyNames {
-				if proxyConfig, ok := config.Proxies[name]; ok {
-					allProxies = append(allProxies, proxyConfig.URLs...)
-				} else {
-					// 也可能是直接的 proxy url
-					allProxies = append(allProxies, name)
+			// 解析并初始化代理
+			if len(mapping.proxyNames) > 0 {
+				var allProxies []string
+				for _, name := range mapping.proxyNames {
+					if proxyConfig, ok := config.Proxies[name]; ok {
+						allProxies = append(allProxies, proxyConfig.URLs...)
+					} else {
+						// 也可能是直接的 proxy url
+						allProxies = append(allProxies, name)
+					}
+				}
+				if len(allProxies) > 0 {
+					mapping.resolvedProxy = NewProxyManager(allProxies)
 				}
 			}
-			if len(allProxies) > 0 {
-				mapping.resolvedProxy = NewProxyManager(allProxies)
-			}
+
+			// 解析 endpoint names from via
+			mapping.endpointNames = parseStringOrArray(mapping.Via.Endpoint)
+
+			// 解析 tunnel names from via
+			mapping.tunnelNames = parseStringOrArray(mapping.Via.Tunnel)
 		}
-
-		// 解析 endpoint names
-		mapping.endpointNames = parseStringOrArray(mapping.Endpoint)
-
-		// 解析 tunnel names
-		mapping.tunnelNames = parseStringOrArray(mapping.Tunnel)
 
 		// 验证通过，添加到有效列表
 		validMappings = append(validMappings, *mapping)
@@ -692,6 +698,9 @@ func (c *Config) Reload(filename string) (map[string]*ListenConfig, error) {
 	oldServers := c.Servers
 	c.Servers = newConfig.Servers
 	c.Proxies = newConfig.Proxies
+	c.Tunnels = newConfig.Tunnels
+	c.P12s = newConfig.P12s
+	c.Scripting = newConfig.Scripting
 	c.Mappings = newConfig.Mappings
 	c.Auth = newConfig.Auth
 	c.mu.Unlock()

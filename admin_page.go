@@ -290,6 +290,16 @@ var admin_page_content = `
               <div class="bx--form-item"><label class="bx--label">隧道名</label><input id="tunnel-name" type="text" class="bx--text-input w-full"></div>
               <div class="bx--form-item mt-1"><label class="bx--label">密码（AES-GCM）</label><input id="tunnel-password" type="text" class="bx--text-input w-full" placeholder=""></div>
               <div class="bx--form-item mt-1"><label class="bx--label">服务器列表（逗号分隔）</label><input id="tunnel-servers" type="text" class="bx--text-input w-full" placeholder="serverA,serverB"></div>
+              
+              <div class="mt-3">
+                <h4>在线 Endpoint</h4>
+                <div class="table-wrap mt-1">
+                  <table class="bx--data-table carbon-table">
+                    <thead><tr><th>名称</th><th>远程地址</th><th>状态</th></tr></thead>
+                    <tbody id="tunnel-endpoints-tbody"></tbody>
+                  </table>
+                </div>
+              </div>
             </div>
           </div>
         </div>
@@ -729,6 +739,31 @@ async function deleteSelectedProxy() {
 }
 
 // ===== 隧道 =====
+var tunnelEndpointsUrl = "/.api/tunnels/endpoints";
+
+async function loadTunnelEndpoints(tunnelName) {
+  var tbody = document.getElementById("tunnel-endpoints-tbody");
+  if (!tbody) return;
+  tbody.innerHTML = "";
+  if (!tunnelName) return;
+
+  try {
+    var res = await fetch(tunnelEndpointsUrl + "?tunnel=" + encodeURIComponent(tunnelName), { headers: buildAuthHeaders({}) });
+    if (!res.ok) throw new Error(await res.text());
+    var data = await res.json();
+    (data.endpoints || []).forEach(function(ep){
+      var tr = document.createElement("tr");
+      var status = ep.online ? '<span class="pill" style="background:#a7f0ba;color:#0e6027;">在线</span>' : '<span class="pill">离线</span>';
+      tr.innerHTML = "<td>" + ep.name + "</td><td>" + (ep.remoteAddr || "-") + "</td><td>" + status + "</td>";
+      tbody.appendChild(tr);
+    });
+  } catch (e) {
+    var tr = document.createElement("tr");
+    tr.innerHTML = '<td colspan="4">加载失败: ' + (e.message || e) + '</td>';
+    tbody.appendChild(tr);
+  }
+}
+
 async function loadTunnels() {
   var msg = document.getElementById("tunnels-msg");
   if (msg) msg.textContent = "";
@@ -742,12 +777,13 @@ async function loadTunnels() {
       var t = data[name] || {};
       var servers = t.servers || [];
       var tr = document.createElement("tr");
-      tr.innerHTML = "<td>" + name + "</td><td>" + (t.password || "") + "</td><td>" + servers.join(",") + "</td>";
+      tr.innerHTML = "<td>" + name + "</td><td>" + (t.password ? "******" : "") + "</td><td>" + servers.join(",") + "</td>";
       tr.addEventListener("click", function(){
         var el;
         el = document.getElementById("tunnel-name"); if (el) el.value = name;
         el = document.getElementById("tunnel-password"); if (el) el.value = t.password || "";
         el = document.getElementById("tunnel-servers"); if (el) el.value = servers.join(",");
+        loadTunnelEndpoints(name);
       });
       if (tbody) tbody.appendChild(tr);
     });
