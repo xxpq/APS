@@ -1,0 +1,71 @@
+syntax = "proto3";
+
+package tunnel;
+
+option go_package = "./tunnelpb";
+
+// TunnelService defines the bidirectional streaming RPC for tunneling.
+service TunnelService {
+  // Establish creates a persistent bidirectional stream.
+  // The first message from the client MUST be a RegistrationRequest.
+  rpc Establish(stream EndpointToServer) returns (stream ServerToEndpoint);
+}
+
+// ServerToEndpoint is a wrapper for messages sent from the Server (APS) to the Endpoint client.
+message ServerToEndpoint {
+  // Unique ID for the message, used for request/response correlation and cancellations.
+  string id = 1;
+
+  oneof payload {
+    Request request = 2;
+    Cancel cancel = 3;
+    Heartbeat heartbeat = 4;
+  }
+}
+
+// EndpointToServer is a wrapper for messages sent from the Endpoint client to the Server (APS).
+message EndpointToServer {
+  oneof payload {
+    RegistrationRequest registration = 1;
+    Response response = 2;
+    Heartbeat heartbeat = 3;
+  }
+}
+
+// RegistrationRequest is the very first message sent by the client to identify itself.
+message RegistrationRequest {
+  string endpoint_name = 1;
+  string tunnel_name = 2;
+  string password = 3; // For authentication
+}
+
+// Request is a raw HTTP request forwarded from the server to the endpoint.
+message Request {
+  // The original URL the request was made to.
+  string url = 1;
+  // The raw bytes of the HTTP request (e.g., from httputil.DumpRequest).
+  // This data will be encrypted by the server before sending.
+  bytes data = 2;
+}
+
+// Response is a raw HTTP response sent back from the endpoint to the server.
+message Response {
+  // Correlates with the Request ID from ServerToEndpoint.
+  string id = 1;
+  oneof content {
+    // The raw bytes of the HTTP response (e.g., from httputil.DumpResponse).
+    // This data will be encrypted by the client before sending.
+    bytes data = 2;
+    string error = 3;
+  }
+}
+
+// Cancel is a message from the server to cancel an in-flight request.
+message Cancel {
+  // The ID of the request to cancel.
+}
+
+// Heartbeat is a message to check if the connection is still alive.
+message Heartbeat {
+  int64 timestamp = 1;
+}

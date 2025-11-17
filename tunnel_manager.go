@@ -6,31 +6,15 @@ import (
 	"crypto/cipher"
 	crand "crypto/rand"
 	"crypto/sha256"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log"
-	mrand "math/rand"
-	"net/http"
 	"sync"
-	"time"
 
-	"github.com/gorilla/websocket"
-)
-
-const (
-	// Time allowed to write a message to the peer.
-	writeWait = 10 * time.Second
-
-	// Time allowed to read the next pong message from the peer.
-	pongWait = 30 * time.Second
-
-	// Send pings to peer with this period. Must be less than pongWait.
-	pingPeriod = (pongWait * 9) / 10
-
-	// Maximum message size allowed from peer.
-	maxMessageSize = 8192
+	pb "aps/tunnelpb"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // TunnelManager manages all active tunnel connections from endpoints
@@ -42,29 +26,26 @@ type TunnelManager struct {
 
 // Tunnel represents a named tunnel with multiple endpoint connections
 type Tunnel struct {
-	mu        sync.RWMutex
-	name      string
-	endpoints map[string]*EndpointPool // endpointName -> EndpointPool
-	password  string                   // AES key
+	mu       sync.RWMutex
+	name     string
+	streams  map[string]*StreamPool // endpointName -> StreamPool
+	password string
 }
 
-// EndpointPool manages a pool of connections for a single endpoint name
-type EndpointPool struct {
+// StreamPool manages a pool of gRPC streams for a single endpoint name
+type StreamPool struct {
 	mu        sync.RWMutex
-	conns     map[string]*EndpointConn // connId -> EndpointConn
-	nextIndex int                      // For round-robin
+	streams   map[string]*EndpointStream // streamId -> EndpointStream
+	nextIndex int                        // For round-robin
 	name      string
 }
 
-// EndpointConn represents a single WebSocket connection from an endpoint client
-type EndpointConn struct {
-	id              string // Unique ID for this specific connection
-	ws              *websocket.Conn
-	sendCh          chan []byte
-	name            string
+// EndpointStream represents a single gRPC bidirectional stream from an endpoint client
+type EndpointStream struct {
+	id              string
+	stream          pb.TunnelService_EstablishServer
 	mu              sync.Mutex
-	pendingRequests map[string]chan *ResponsePayload
-	latency         time.Duration
+	pendingRequests map[string]chan *pb.Response
 }
 
 func NewTunnelManager(config *Config) *TunnelManager {
@@ -72,370 +53,217 @@ func NewTunnelManager(config *Config) *TunnelManager {
 		tunnels: make(map[string]*Tunnel),
 		config:  config,
 	}
-	// Initialize tunnels from config
 	if config.Tunnels != nil {
 		for name, tConfig := range config.Tunnels {
 			tm.tunnels[name] = &Tunnel{
-				name:      name,
-				endpoints: make(map[string]*EndpointPool),
-				password:  tConfig.Password,
+				name:     name,
+				streams:  make(map[string]*StreamPool),
+				password: tConfig.Password,
 			}
 		}
 	}
 	return tm
 }
 
-// GetTunnelForServer checks if a server is configured as a tunnel endpoint
-func (tm *TunnelManager) GetTunnelForServer(serverName string) *Tunnel {
+// RegisterEndpointStream validates a new stream and adds it to the appropriate pool.
+func (tm *TunnelManager) RegisterEndpointStream(tunnelName, endpointName, password string, stream pb.TunnelService_EstablishServer) (*EndpointStream, error) {
 	tm.mu.RLock()
-	defer tm.mu.RUnlock()
+	tunnel, exists := tm.tunnels[tunnelName]
+	tm.mu.RUnlock()
 
-	for tunnelName, tConfig := range tm.config.Tunnels {
-		for _, sName := range tConfig.Servers {
-			if sName == serverName {
-				return tm.tunnels[tunnelName]
-			}
-		}
-	}
-	return nil
-}
-
-// RegisterEndpoint adds a new endpoint connection to a tunnel
-func (t *Tunnel) RegisterEndpoint(endpointName string, conn *EndpointConn) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
-	pool, exists := t.endpoints[endpointName]
 	if !exists {
-		pool = &EndpointPool{
-			conns: make(map[string]*EndpointConn),
-			name:  endpointName,
-		}
-		t.endpoints[endpointName] = pool
+		return nil, fmt.Errorf("tunnel '%s' not found", tunnelName)
 	}
-	pool.AddConn(conn)
-	log.Printf("[TUNNEL] Connection %s for endpoint '%s' registered to tunnel '%s'. Pool size: %d", conn.id, endpointName, t.name, pool.Size())
+	if tunnel.password != "" && tunnel.password != password {
+		return nil, errors.New("invalid tunnel password")
+	}
+
+	endpointStream := &EndpointStream{
+		id:              generateRequestID(),
+		stream:          stream,
+		pendingRequests: make(map[string]chan *pb.Response),
+	}
+
+	tunnel.mu.Lock()
+	pool, exists := tunnel.streams[endpointName]
+	if !exists {
+		pool = &StreamPool{
+			streams: make(map[string]*EndpointStream),
+			name:    endpointName,
+		}
+		tunnel.streams[endpointName] = pool
+	}
+	pool.AddStream(endpointStream)
+	tunnel.mu.Unlock()
+
+	return endpointStream, nil
 }
 
-// UnregisterEndpoint removes an endpoint connection
-func (t *Tunnel) UnregisterEndpoint(endpointName string, connID string) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
-	pool, exists := t.endpoints[endpointName]
+// UnregisterEndpointStream removes a stream from its pool.
+func (tm *TunnelManager) UnregisterEndpointStream(tunnelName, endpointName, streamID string) {
+	tm.mu.RLock()
+	tunnel, exists := tm.tunnels[tunnelName]
+	tm.mu.RUnlock()
 	if !exists {
 		return
 	}
-	pool.RemoveConn(connID)
-	log.Printf("[TUNNEL] Connection %s for endpoint '%s' unregistered from tunnel '%s'. Pool size: %d", connID, endpointName, t.name, pool.Size())
+
+	tunnel.mu.Lock()
+	defer tunnel.mu.Unlock()
+	pool, exists := tunnel.streams[endpointName]
+	if !exists {
+		return
+	}
+	pool.RemoveStream(streamID)
 	if pool.Size() == 0 {
-		delete(t.endpoints, endpointName)
-		log.Printf("[TUNNEL] Endpoint pool for '%s' is now empty and has been removed.", endpointName)
+		delete(tunnel.streams, endpointName)
+		log.Printf("[GRPC] Endpoint pool for '%s' is now empty and has been removed.", endpointName)
 	}
 }
 
-// GetRandomEndpoint selects a random online endpoint from the tunnel
-func (t *Tunnel) GetRandomEndpoint() *EndpointConn {
-	t.mu.RLock()
-	defer t.mu.RUnlock()
-
-	if len(t.endpoints) == 0 {
-		return nil
-	}
-
-	// This part is a bit tricky. We want to select a random *pool* first,
-	// then get a connection from that pool. This maintains the original behavior
-	// of potentially balancing load across different endpoint *names*.
-	pools := make([]*EndpointPool, 0, len(t.endpoints))
-	for _, pool := range t.endpoints {
-		if pool.Size() > 0 {
-			pools = append(pools, pool)
+// HandleIncomingMessage processes a message received from an endpoint stream.
+func (tm *TunnelManager) HandleIncomingMessage(msg *pb.EndpointToServer) {
+	if resp := msg.GetResponse(); resp != nil {
+		// Find the correct stream and pending request channel
+		tm.mu.RLock()
+		defer tm.mu.RUnlock()
+		for _, tunnel := range tm.tunnels {
+			tunnel.mu.RLock()
+			for _, pool := range tunnel.streams {
+				pool.mu.RLock()
+				for _, stream := range pool.streams {
+					stream.mu.Lock()
+					if ch, ok := stream.pendingRequests[resp.Id]; ok {
+						ch <- resp
+						delete(stream.pendingRequests, resp.Id)
+					}
+					stream.mu.Unlock()
+				}
+				pool.mu.RUnlock()
+			}
+			tunnel.mu.RUnlock()
 		}
 	}
-	if len(pools) == 0 {
+}
+
+// SendRequest sends a request to an endpoint and waits for a response.
+func (tm *TunnelManager) SendRequest(ctx context.Context, tunnelName, endpointName string, reqPayload *RequestPayload) ([]byte, error) {
+	tm.mu.RLock()
+	tunnel, exists := tm.tunnels[tunnelName]
+	tm.mu.RUnlock()
+	if !exists {
+		return nil, status.Errorf(codes.NotFound, "tunnel '%s' not found", tunnelName)
+	}
+
+	tunnel.mu.RLock()
+	pool, exists := tunnel.streams[endpointName]
+	if !exists || pool.Size() == 0 {
+		tunnel.mu.RUnlock()
+		return nil, status.Errorf(codes.Unavailable, "endpoint '%s' is not connected to tunnel '%s'", endpointName, tunnelName)
+	}
+	stream := pool.GetStream()
+	tunnel.mu.RUnlock()
+
+	if stream == nil {
+		return nil, status.Errorf(codes.Unavailable, "no available stream for endpoint '%s'", endpointName)
+	}
+
+	requestID := generateRequestID()
+
+	encryptedData, err := encrypt(reqPayload.Data, tunnel.password)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to encrypt request: %v", err)
+	}
+
+	req := &pb.ServerToEndpoint{
+		Id: requestID,
+		Payload: &pb.ServerToEndpoint_Request{
+			Request: &pb.Request{
+				Url:  reqPayload.URL,
+				Data: encryptedData,
+			},
+		},
+	}
+
+	respCh := make(chan *pb.Response, 1)
+	stream.mu.Lock()
+	stream.pendingRequests[requestID] = respCh
+	stream.mu.Unlock()
+
+	defer func() {
+		stream.mu.Lock()
+		delete(stream.pendingRequests, requestID)
+		stream.mu.Unlock()
+	}()
+
+	if err := stream.stream.Send(req); err != nil {
+		return nil, status.Errorf(codes.Aborted, "failed to send request to endpoint: %v", err)
+	}
+
+	select {
+	case resp := <-respCh:
+		if resp.GetError() != "" {
+			return nil, errors.New(resp.GetError())
+		}
+		decryptedData, err := decrypt(resp.GetData(), tunnel.password)
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "failed to decrypt response: %v", err)
+		}
+		return decryptedData, nil
+	case <-ctx.Done():
+		// Notify endpoint of cancellation
+		cancelMsg := &pb.ServerToEndpoint{
+			Id:      requestID,
+			Payload: &pb.ServerToEndpoint_Cancel{Cancel: &pb.Cancel{}},
+		}
+		_ = stream.stream.Send(cancelMsg) // Best effort send
+		return nil, ctx.Err()
+	}
+}
+
+// AddStream adds a stream to the pool
+func (p *StreamPool) AddStream(stream *EndpointStream) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.streams[stream.id] = stream
+}
+
+// RemoveStream removes a stream from the pool
+func (p *StreamPool) RemoveStream(streamID string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	delete(p.streams, streamID)
+}
+
+// GetStream selects a stream from the pool using round-robin
+func (p *StreamPool) GetStream() *EndpointStream {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if len(p.streams) == 0 {
 		return nil
 	}
 
-	randomPool := pools[mrand.Intn(len(pools))]
-	return randomPool.GetConn() // Use round-robin from the selected pool
-}
-
-// AddConn adds a connection to the pool
-func (p *EndpointPool) AddConn(conn *EndpointConn) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.conns[conn.id] = conn
-}
-
-// RemoveConn removes a connection from the pool
-func (p *EndpointPool) RemoveConn(connID string) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	delete(p.conns, connID)
-}
-
-// GetConn selects a connection from the pool using round-robin
-func (p *EndpointPool) GetConn() *EndpointConn {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	if len(p.conns) == 0 {
-		return nil
+	streams := make([]*EndpointStream, 0, len(p.streams))
+	for _, s := range p.streams {
+		streams = append(streams, s)
 	}
 
-	// Convert map to slice to have a defined order for round-robin
-	conns := make([]*EndpointConn, 0, len(p.conns))
-	for _, c := range p.conns {
-		conns = append(conns, c)
-	}
-
-	if p.nextIndex >= len(conns) {
+	if p.nextIndex >= len(streams) {
 		p.nextIndex = 0
 	}
 
-	conn := conns[p.nextIndex]
+	stream := streams[p.nextIndex]
 	p.nextIndex++
 
-	return conn
+	return stream
 }
 
-// Size returns the number of connections in the pool
-func (p *EndpointPool) Size() int {
+// Size returns the number of streams in the pool
+func (p *StreamPool) Size() int {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	return len(p.conns)
-}
-
-// FindEndpoint searches for a specific endpoint by name across all tunnels.
-func (tm *TunnelManager) FindEndpoint(endpointName string) (*EndpointConn, *Tunnel) {
-	tm.mu.RLock()
-	defer tm.mu.RUnlock()
-
-	for _, tunnel := range tm.tunnels {
-		tunnel.mu.RLock()
-		if pool, exists := tunnel.endpoints[endpointName]; exists && pool.Size() > 0 {
-			conn := pool.GetConn() // Use round-robin to get a specific connection
-			tunnel.mu.RUnlock()
-			return conn, tunnel
-		}
-		tunnel.mu.RUnlock()
-	}
-	return nil, nil
-}
-
-// GetRandomEndpointFromTunnel finds a tunnel by name and returns a random endpoint from it.
-func (tm *TunnelManager) GetRandomEndpointFromTunnel(tunnelName string) (*EndpointConn, *Tunnel) {
-	tm.mu.RLock()
-	defer tm.mu.RUnlock()
-
-	tunnel, exists := tm.tunnels[tunnelName]
-	if !exists {
-		return nil, nil
-	}
-
-	endpoint := tunnel.GetRandomEndpoint()
-	if endpoint == nil {
-		return nil, nil
-	}
-	return endpoint, tunnel
-}
-
-// ServeWs handles websocket requests from the peer.
-func (tm *TunnelManager) ServeWs(tunnel *Tunnel, w http.ResponseWriter, r *http.Request) {
-	endpointName := r.Header.Get("X-Endpoint-Name")
-	if endpointName == "" {
-		http.Error(w, "X-Endpoint-Name header is required", http.StatusBadRequest)
-		return
-	}
-
-	ws, err := upgrader.Upgrade(w, r, nil)
-	if err != nil {
-		log.Printf("[TUNNEL] Upgrade error: %v", err)
-		return
-	}
-
-	connID := generateRequestID() // Reuse this function for a unique ID
-	conn := &EndpointConn{
-		id:              connID,
-		ws:              ws,
-		sendCh:          make(chan []byte, 256),
-		name:            endpointName,
-		pendingRequests: make(map[string]chan *ResponsePayload),
-	}
-
-	tunnel.RegisterEndpoint(endpointName, conn)
-
-	go conn.writePump()
-	go conn.readPump(tunnel)
-}
-
-func (c *EndpointConn) readPump(tunnel *Tunnel) {
-	defer func() {
-		tunnel.UnregisterEndpoint(c.name, c.id)
-		c.ws.Close()
-	}()
-	c.ws.SetReadLimit(maxMessageSize)
-	c.ws.SetReadDeadline(time.Now().Add(pongWait))
-	c.ws.SetPongHandler(func(string) error {
-		c.ws.SetReadDeadline(time.Now().Add(pongWait))
-		return nil
-	})
-
-	for {
-		_, message, err := c.ws.ReadMessage()
-		if err != nil {
-			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-				log.Printf("[TUNNEL] Endpoint '%s' read error: %v", c.name, err)
-			}
-			break
-		}
-
-		var msg TunnelMessage
-		if err := json.Unmarshal(message, &msg); err != nil {
-			log.Printf("[TUNNEL] Error unmarshalling message from '%s': %v", c.name, err)
-			continue
-		}
-
-		switch msg.Type {
-		case MessageTypeResponse:
-			var payload ResponsePayload
-			if err := json.Unmarshal(msg.Payload, &payload); err != nil {
-				log.Printf("[TUNNEL] Error unmarshalling response payload from '%s': %v", c.name, err)
-				c.mu.Lock()
-				if ch, ok := c.pendingRequests[msg.ID]; ok {
-					ch <- &ResponsePayload{Error: "payload unmarshal error"}
-					delete(c.pendingRequests, msg.ID)
-				}
-				c.mu.Unlock()
-				continue
-			}
-
-			// Only decrypt when data is present and no error is reported
-			if len(payload.Data) > 0 && payload.Error == "" {
-				decryptedData, err := decrypt(payload.Data, tunnel.password)
-				if err != nil {
-					log.Printf("[TUNNEL] Error decrypting response from '%s': %v", c.name, err)
-					payload.Error = "decryption failed"
-					payload.Data = nil
-				} else {
-					payload.Data = decryptedData
-				}
-			}
-
-			c.mu.Lock()
-			if ch, ok := c.pendingRequests[msg.ID]; ok {
-				ch <- &payload
-				delete(c.pendingRequests, msg.ID)
-			}
-			c.mu.Unlock()
-		}
-	}
-}
-
-func (c *EndpointConn) writePump() {
-	ticker := time.NewTicker(pingPeriod)
-	defer func() {
-		ticker.Stop()
-		c.ws.Close()
-	}()
-	for {
-		select {
-		case message, ok := <-c.sendCh:
-			c.ws.SetWriteDeadline(time.Now().Add(writeWait))
-			if !ok {
-				// The sendCh channel was closed.
-				c.ws.WriteMessage(websocket.CloseMessage, []byte{})
-				return
-			}
-
-			w, err := c.ws.NextWriter(websocket.TextMessage)
-			if err != nil {
-				return
-			}
-			w.Write(message)
-
-			// Add queued chat messages to the current websocket message.
-			n := len(c.sendCh)
-			for i := 0; i < n; i++ {
-				w.Write(<-c.sendCh)
-			}
-
-			if err := w.Close(); err != nil {
-				return
-			}
-		case <-ticker.C:
-			c.ws.SetWriteDeadline(time.Now().Add(writeWait))
-			if err := c.ws.WriteMessage(websocket.PingMessage, nil); err != nil {
-				return
-			}
-		}
-	}
-}
-
-// SendRequest sends a request to the endpoint and waits for a response
-func (c *EndpointConn) SendRequest(ctx context.Context, reqPayload *RequestPayload, tunnel *Tunnel) ([]byte, error) {
-	requestID := generateRequestID()
-
-	// Encrypt the inner data of the payload
-	encryptedData, err := encrypt(reqPayload.Data, tunnel.password)
-	if err != nil {
-		return nil, fmt.Errorf("failed to encrypt request: %w", err)
-	}
-
-	// Create a new payload for sending, with the original URL and encrypted data
-	payloadToSend := RequestPayload{
-		URL:  reqPayload.URL,
-		Data: encryptedData,
-	}
-
-	payloadBytes, _ := json.Marshal(payloadToSend)
-	msg, _ := json.Marshal(TunnelMessage{
-		ID:      requestID,
-		Type:    MessageTypeRequest,
-		Payload: payloadBytes,
-	})
-
-	respCh := make(chan *ResponsePayload, 1)
-	c.mu.Lock()
-	c.pendingRequests[requestID] = respCh
-	c.mu.Unlock()
-
-	defer func() {
-		c.mu.Lock()
-		delete(c.pendingRequests, requestID)
-		c.mu.Unlock()
-	}()
-
-	// Send the request message
-	select {
-	case c.sendCh <- msg:
-		// Successfully sent, now wait for response or cancellation
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	case <-time.After(5 * time.Second): // Timeout for sending the message itself
-		return nil, errors.New("failed to send request to endpoint channel")
-	}
-
-	// Wait for the response
-	select {
-	case resp := <-respCh:
-		if resp.Error != "" {
-			return nil, errors.New(resp.Error)
-		}
-		return resp.Data, nil
-	case <-ctx.Done():
-		// Context was cancelled (e.g., client timeout), notify the endpoint
-		log.Printf("[TUNNEL] Request %s cancelled by client, notifying endpoint '%s'", requestID, c.name)
-		cancelMsg, _ := json.Marshal(TunnelMessage{ID: requestID, Type: MessageTypeCancel})
-		// Use a non-blocking send to avoid panic on closed channel
-		select {
-		case c.sendCh <- cancelMsg:
-			// Sent successfully
-		default:
-			log.Printf("[TUNNEL] Failed to send cancellation for request %s to endpoint '%s' (channel closed or full)", requestID, c.name)
-		}
-		return nil, ctx.Err()
-	}
+	return len(p.streams)
 }
 
 func generateRequestID() string {
@@ -491,4 +319,10 @@ func decrypt(data []byte, password string) ([]byte, error) {
 	}
 	nonce, ciphertext := data[:nonceSize], data[nonceSize:]
 	return gcm.Open(nil, nonce, ciphertext, nil)
+}
+
+// RequestPayload is used by http handlers to pass request data to the tunnel manager.
+type RequestPayload struct {
+	URL  string
+	Data []byte
 }

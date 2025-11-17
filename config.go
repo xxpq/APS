@@ -320,14 +320,14 @@ func min(a, b int) int {
 }
 
 type ViaConfig struct {
-	Proxy    interface{} `json:"proxy,omitempty"`
-	Tunnel   interface{} `json:"tunnel,omitempty"`
-	Endpoint interface{} `json:"endpoint,omitempty"`
+	Proxies   interface{} `json:"proxies,omitempty"`
+	Tunnels   interface{} `json:"tunnels,omitempty"`
+	Endpoints interface{} `json:"endpoints,omitempty"`
 }
 
 type Mapping struct {
-	From    interface{} `json:"from"`              // 可以是字符串或 EndpointConfig 对象
-	To      interface{} `json:"to"`                // 可以是字符串或 EndpointConfig 对象
+	From    interface{} `json:"from"` // 可以是字符串或 EndpointConfig 对象
+	To      interface{} `json:"to"`   // 可以是字符串或 EndpointConfig 对象
 	Via     *ViaConfig  `json:"via,omitempty"`
 	Servers interface{} `json:"servers,omitempty"` // string or []string
 	Cc      []string    `json:"cc,omitempty"`
@@ -353,15 +353,15 @@ type RuleAuth struct {
 }
 
 type ListenConfig struct {
-	Port     int         `json:"port"`
-	Cert     interface{} `json:"cert,omitempty"` // string ("auto") or CertFiles
-	Key      string      `json:"key,omitempty"`
-	Auth     *ServerAuth `json:"auth,omitempty"`
-	Dump     string      `json:"dump,omitempty"`
-	Endpoint interface{} `json:"endpoint,omitempty"` // string or []string
-	Tunnel   interface{} `json:"tunnel,omitempty"`   // string or []string
-	Public   *bool       `json:"public,omitempty"`   // true: 0.0.0.0:port, false: 127.0.0.1:port (default true)
-	Panel    *bool       `json:"panel,omitempty"`    // true: register /.api & /.admin, false: do not (default false)
+	Port      int         `json:"port"`
+	Cert      interface{} `json:"cert,omitempty"` // string ("auto") or CertFiles
+	Key       string      `json:"key,omitempty"`
+	Auth      *ServerAuth `json:"auth,omitempty"`
+	Dump      string      `json:"dump,omitempty"`
+	Endpoints interface{} `json:"endpoints,omitempty"` // string or []string
+	Tunnels   interface{} `json:"tunnels,omitempty"`   // string or []string
+	Public    *bool       `json:"public,omitempty"`    // true: 0.0.0.0:port, false: 127.0.0.1:port (default true)
+	Panel     *bool       `json:"panel,omitempty"`     // true: register /.api & /.admin, false: do not (default false)
 	ConnectionPolicies
 	TrafficPolicies
 }
@@ -639,7 +639,7 @@ func processConfig(config *Config) error {
 
 		if mapping.Via != nil {
 			// 解析 proxy names from via
-			proxySource := mapping.Via.Proxy
+			proxySource := mapping.Via.Proxies
 			if fromConfig.Proxy != nil {
 				proxySource = fromConfig.Proxy // from中的proxy优先级更高
 			}
@@ -662,10 +662,10 @@ func processConfig(config *Config) error {
 			}
 
 			// 解析 endpoint names from via
-			mapping.endpointNames = parseStringOrArray(mapping.Via.Endpoint)
+			mapping.endpointNames = parseStringOrArray(mapping.Via.Endpoints)
 
 			// 解析 tunnel names from via
-			mapping.tunnelNames = parseStringOrArray(mapping.Via.Tunnel)
+			mapping.tunnelNames = parseStringOrArray(mapping.Via.Tunnels)
 		}
 
 		// 验证通过，添加到有效列表

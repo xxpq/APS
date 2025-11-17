@@ -1,4 +1,3 @@
-
 package main
 
 import (
@@ -28,13 +27,13 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Prepare variables for stats recording
 	var (
-		bytesSent    uint64
-		bytesRecv    uint64
-		isError      bool
-		ruleKey      string
-		userKey      string
-		tunnelKey    string
-		proxyKey     string
+		bytesSent uint64
+		bytesRecv uint64
+		isError   bool
+		ruleKey   string
+		userKey   string
+		tunnelKey string
+		proxyKey  string
 	)
 
 	// Defer the consolidated stats recording
@@ -56,10 +55,6 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	// Check if it's a gRPC or WebSocket request
-	if r.Method == http.MethodPost && strings.Contains(r.Header.Get("Content-Type"), "application/grpc") {
-		p.handleGRPC(w, r)
-		return
-	}
 	if strings.ToLower(r.Header.Get("Upgrade")) == "websocket" && strings.Contains(strings.ToLower(r.Header.Get("Connection")), "upgrade") {
 		p.handleWebSocket(w, r)
 		return
@@ -329,26 +324,35 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 
 	var resp *http.Response
 	if tunnelKey != "" {
-		var endpoint *EndpointConn
-		var tunnel *Tunnel
-
+		var endpointName string
 		if len(mapping.endpointNames) > 0 {
-			endpointName := mapping.endpointNames[0]
-			endpoint, tunnel = p.tunnelManager.FindEndpoint(endpointName)
-			if endpoint == nil {
-				isError = true
-				http.Error(w, "Specified endpoint not found: "+endpointName, http.StatusBadGateway)
-				log.Printf("[TUNNEL] Specified endpoint '%s' not found", endpointName)
-				return
-			}
-		} else {
-			endpoint, tunnel = p.tunnelManager.GetRandomEndpointFromTunnel(tunnelKey)
-			if endpoint == nil {
+			endpointName = mapping.endpointNames[0]
+		}
+
+		p.tunnelManager.mu.RLock()
+		tunnel, exists := p.tunnelManager.tunnels[tunnelKey]
+		p.tunnelManager.mu.RUnlock()
+		if !exists {
+			isError = true
+			http.Error(w, "Tunnel not found: "+tunnelKey, http.StatusBadGateway)
+			log.Printf("[TUNNEL] Tunnel '%s' not found", tunnelKey)
+			return
+		}
+
+		if endpointName == "" {
+			tunnel.mu.RLock()
+			if len(tunnel.streams) == 0 {
+				tunnel.mu.RUnlock()
 				isError = true
 				http.Error(w, "No available endpoint for tunnel: "+tunnelKey, http.StatusBadGateway)
 				log.Printf("[TUNNEL] No available endpoint for tunnel '%s'", tunnelKey)
 				return
 			}
+			for name := range tunnel.streams {
+				endpointName = name
+				break
+			}
+			tunnel.mu.RUnlock()
 		}
 
 		reqBytes, err := httputil.DumpRequest(proxyReq, true)
@@ -359,19 +363,18 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		log.Printf("[TUNNEL] Forwarding request for %s via tunnel '%s' to endpoint '%s'", originalURL, tunnelKey, endpoint.name)
+		log.Printf("[TUNNEL] Forwarding request for %s via tunnel '%s' to endpoint '%s'", originalURL, tunnelKey, endpointName)
 
-		// Create the payload with URL and serialized request data
 		reqPayload := &RequestPayload{
 			URL:  proxyReq.URL.String(),
 			Data: reqBytes,
 		}
 
-		respBytes, err := endpoint.SendRequest(r.Context(), reqPayload, tunnel)
+		respBytes, err := p.tunnelManager.SendRequest(r.Context(), tunnelKey, endpointName, reqPayload)
 		if err != nil {
 			isError = true
 			http.Error(w, "Failed to send request through tunnel", http.StatusBadGateway)
-			log.Printf("[TUNNEL] Error sending request via endpoint '%s': %v", endpoint.name, err)
+			log.Printf("[TUNNEL] Error sending request via endpoint '%s': %v", endpointName, err)
 			return
 		}
 
@@ -379,7 +382,7 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			isError = true
 			http.Error(w, "Failed to read response from tunnel", http.StatusInternalServerError)
-			log.Printf("[TUNNEL] Error reading response from endpoint '%s': %v", endpoint.name, err)
+			log.Printf("[TUNNEL] Error reading response from endpoint '%s': %v", endpointName, err)
 			return
 		}
 	} else {
@@ -571,7 +574,6 @@ func (p *MapRemoteProxy) modifyResponseBody(resp *http.Response, mapping *Mappin
 
 	return body, nil
 }
-
 
 type ThrottledReader struct {
 	r       io.Reader

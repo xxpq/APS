@@ -528,14 +528,13 @@ func (h *AdminHandlers) handleTunnelEndpoints(w http.ResponseWriter, r *http.Req
 	defer tunnel.mu.RUnlock()
 
 	endpoints := make([]map[string]interface{}, 0)
-	for poolName, pool := range tunnel.endpoints {
+	for poolName, pool := range tunnel.streams {
 		pool.mu.RLock()
-		for connId, conn := range pool.conns {
+		for streamId := range pool.streams {
 			endpoints = append(endpoints, map[string]interface{}{
-				"name":       poolName,
-				"connId":     connId,
-				"remoteAddr": conn.ws.RemoteAddr().String(),
-				"online":     true,
+				"name":     poolName,
+				"streamId": streamId,
+				"online":   true,
 			})
 		}
 		pool.mu.RUnlock()

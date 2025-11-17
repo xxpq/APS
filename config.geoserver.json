@@ -2,7 +2,6 @@
   "servers": {
     "default": {
       "port": 8090,
-      "endpoint": true,
       "public": true,
       "panel": true
     }
@@ -26,7 +25,6 @@
     {
       "from": "http://8.159.132.172:8090/geoserver/*",
       "to": {
-        "tunnel": "dev",
         "headers": {
           "access-control-allow-origin": "http://10.1.24.223:8083",
           "content-security-policy": null,
@@ -35,6 +33,9 @@
           "x-frame-options": null
         },
         "url": "http://10.1.24.223:8089/geoserver/*"
+      },
+      "via": {
+        "endpoints": "test_dev"
       }
     }
   ]

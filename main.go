@@ -9,10 +9,16 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strings"
 	"os/signal"
 	"sync"
 	"syscall"
 	"time"
+
+	pb "aps/tunnelpb"
+	"google.golang.org/grpc"
+	"golang.org/x/net/http2"
+	"golang.org/x/net/http2/h2c"
 )
 
 // ServerManager manages the lifecycle of multiple HTTP servers.
@@ -199,17 +205,6 @@ func createServerHandler(serverName string, mappings []*Mapping, serverConfig *L
 	mux := http.NewServeMux()
 	proxy := NewMapRemoteProxy(config, dataStore, harManager, tunnelManager, scriptRunner, trafficShaper, stats, serverName)
 
-	// 检查此 server 是否为 tunnel 接入点
-	if tunnel := tunnelManager.GetTunnelForServer(serverName); tunnel != nil {
-		mux.HandleFunc("/.tunnel", func(w http.ResponseWriter, r *http.Request) {
-			log.Printf("[TUNNEL] Incoming WebSocket connection for tunnel '%s' on server '%s'", tunnel.name, serverName)
-			tunnelManager.ServeWs(tunnel, w, r)
-		})
-		log.Printf("Registered '/.tunnel' on server '%s' for tunnel '%s'", serverName, tunnel.name)
-	} else {
-		log.Printf("No tunnel bound to server '%s'. '/.tunnel' is not registered.", serverName)
-	}
-
 	// 如果 cert 是 auto，注册证书下载处理器
 	if certStr, ok := serverConfig.Cert.(string); ok && certStr == "auto" {
 		certHandlers := &CertHandlers{}
@@ -231,7 +226,7 @@ func createServerHandler(serverName string, mappings []*Mapping, serverConfig *L
 	}
 
 	// 创建一个统一的处理器来处理所有请求
-	mainHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	httpHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// 代理请求 (CONNECT)
 		if r.Method == http.MethodConnect {
 			proxy.ServeHTTP(w, r)
@@ -249,7 +244,26 @@ func createServerHandler(serverName string, mappings []*Mapping, serverConfig *L
 		proxy.ServeHTTP(w, r)
 	})
 
-	return mainHandler
+	// 创建 gRPC 服务器
+	grpcServer := grpc.NewServer()
+	pb.RegisterTunnelServiceServer(grpcServer, &TunnelServiceServer{tunnelManager: tunnelManager})
+
+	// 创建一个分流处理器，根据请求头判断流量导向 gRPC 隧道或 HTTP 处理器
+	grpcOrHttpHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// 检查是否是 gRPC 隧道请求 (只检查是否存在 X-Aps-Tunnel header，具体版本验证在 gRPC handler 中进行)
+		isGrpcTunnel := r.ProtoMajor == 2 &&
+			strings.Contains(r.Header.Get("Content-Type"), "application/grpc") &&
+			r.Header.Get("X-Aps-Tunnel") != ""
+
+		if isGrpcTunnel {
+			grpcServer.ServeHTTP(w, r)
+		} else {
+			httpHandler.ServeHTTP(w, r)
+		}
+	})
+
+	// 使用 h2c 包裹处理器，以支持未加密的 HTTP/2 (h2c)
+	return h2c.NewHandler(grpcOrHttpHandler, &http2.Server{})
 }
 
 func startServer(name string, config *ListenConfig, handler http.Handler) *http.Server {
