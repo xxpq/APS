@@ -99,6 +99,9 @@ func runClientSession(ctx context.Context) {
 		"password":      *tunnelPassword,
 		"x-aps-tunnel":  endpointVersion,
 	})
+	if *debug {
+		log.Printf("[DEBUG] Connecting with metadata: %+v", md)
+	}
 	ctx = metadata.NewOutgoingContext(ctx, md)
 
 	stream, err := client.Establish(ctx)
@@ -168,6 +171,13 @@ func handleRequest(stream pb.TunnelService_EstablishClient, requestID string, re
 		return
 	}
 
+	if *debug {
+		// Log headers for debugging
+		var headers bytes.Buffer
+		req.Header.Write(&headers)
+		log.Printf("[DEBUG %s] Decrypted request headers:\n%s", requestID, headers.String())
+	}
+
 	targetURL, err := url.Parse(reqPayload.GetUrl())
 	if err != nil {
 		log.Printf("[ERROR %s] Error parsing target URL: %v", requestID, err)
@@ -192,6 +202,13 @@ func handleRequest(stream pb.TunnelService_EstablishClient, requestID string, re
 		return
 	}
 	defer resp.Body.Close()
+
+	if *debug {
+		log.Printf("[DEBUG %s] Received response: %s", requestID, resp.Status)
+		var headers bytes.Buffer
+		resp.Header.Write(&headers)
+		log.Printf("[DEBUG %s] Response headers:\n%s", requestID, headers.String())
+	}
 
 	respData, err := httputil.DumpResponse(resp, true)
 	if err != nil {

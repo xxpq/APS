@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math/rand"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -323,38 +324,43 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var resp *http.Response
-	if tunnelKey != "" {
-		var endpointName string
-		if len(mapping.endpointNames) > 0 {
-			endpointName = mapping.endpointNames[0]
-		}
 
-		p.tunnelManager.mu.RLock()
-		tunnel, exists := p.tunnelManager.tunnels[tunnelKey]
-		p.tunnelManager.mu.RUnlock()
-		if !exists {
+	// New tunnel/endpoint selection logic
+	var tunnelName, endpointName string
+	isTunnelRequest := false
+
+	if mapping != nil && len(mapping.endpointNames) > 0 {
+		// Priority 1: via.endpoints is specified. `via.tunnels` is ignored.
+		isTunnelRequest = true
+		randomEndpoint := mapping.endpointNames[rand.Intn(len(mapping.endpointNames))]
+
+		foundTunnel, ok := p.tunnelManager.FindTunnelForEndpoint(randomEndpoint)
+		if !ok {
 			isError = true
-			http.Error(w, "Tunnel not found: "+tunnelKey, http.StatusBadGateway)
-			log.Printf("[TUNNEL] Tunnel '%s' not found", tunnelKey)
+			http.Error(w, "Endpoint not found or not connected: "+randomEndpoint, http.StatusBadGateway)
+			log.Printf("[TUNNEL] Specified endpoint '%s' not found in any active tunnel", randomEndpoint)
 			return
 		}
+		tunnelName = foundTunnel
+		endpointName = randomEndpoint
+		tunnelKey = tunnelName // for stats
 
-		if endpointName == "" {
-			tunnel.mu.RLock()
-			if len(tunnel.streams) == 0 {
-				tunnel.mu.RUnlock()
-				isError = true
-				http.Error(w, "No available endpoint for tunnel: "+tunnelKey, http.StatusBadGateway)
-				log.Printf("[TUNNEL] No available endpoint for tunnel '%s'", tunnelKey)
-				return
-			}
-			for name := range tunnel.streams {
-				endpointName = name
-				break
-			}
-			tunnel.mu.RUnlock()
+	} else if mapping != nil && len(mapping.tunnelNames) > 0 {
+		// Priority 2: via.tunnels is specified.
+		isTunnelRequest = true
+		foundTunnel, foundEndpoint, err := p.tunnelManager.GetRandomEndpointFromTunnels(mapping.tunnelNames)
+		if err != nil {
+			isError = true
+			http.Error(w, "No available endpoint for specified tunnels", http.StatusBadGateway)
+			log.Printf("[TUNNEL] %v", err)
+			return
 		}
+		tunnelName = foundTunnel
+		endpointName = foundEndpoint
+		tunnelKey = tunnelName // for stats
+	}
 
+	if isTunnelRequest {
 		reqBytes, err := httputil.DumpRequest(proxyReq, true)
 		if err != nil {
 			isError = true
@@ -363,17 +369,17 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		log.Printf("[TUNNEL] Forwarding request for %s via tunnel '%s' to endpoint '%s'", originalURL, tunnelKey, endpointName)
+		log.Printf("[TUNNEL] Forwarding request for %s via tunnel '%s' to endpoint '%s'", originalURL, tunnelName, endpointName)
 
 		reqPayload := &RequestPayload{
 			URL:  proxyReq.URL.String(),
 			Data: reqBytes,
 		}
 
-		respBytes, err := p.tunnelManager.SendRequest(r.Context(), tunnelKey, endpointName, reqPayload)
+		respBytes, err := p.tunnelManager.SendRequest(r.Context(), tunnelName, endpointName, reqPayload)
 		if err != nil {
 			isError = true
-			http.Error(w, "Failed to send request through tunnel", http.StatusBadGateway)
+			http.Error(w, "Failed to send request through tunnel: "+err.Error(), http.StatusBadGateway)
 			log.Printf("[TUNNEL] Error sending request via endpoint '%s': %v", endpointName, err)
 			return
 		}
@@ -386,7 +392,7 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	} else {
-		var err error
+		// This is a direct request (not via tunnel)
 		resp, err = client.Do(proxyReq)
 		if err != nil {
 			isError = true

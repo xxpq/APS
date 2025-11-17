@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math/rand"
 	"sync"
 
 	pb "aps/tunnelpb"
@@ -144,6 +145,71 @@ func (tm *TunnelManager) HandleIncomingMessage(msg *pb.EndpointToServer) {
 			tunnel.mu.RUnlock()
 		}
 	}
+}
+
+// FindTunnelForEndpoint searches all tunnels to find the tunnel name for a given endpoint name.
+func (tm *TunnelManager) FindTunnelForEndpoint(endpointName string) (string, bool) {
+	tm.mu.RLock()
+	defer tm.mu.RUnlock()
+
+	for tunnelName, tunnel := range tm.tunnels {
+		tunnel.mu.RLock()
+		// Check if the endpoint pool exists in this tunnel
+		if pool, exists := tunnel.streams[endpointName]; exists && pool.Size() > 0 {
+			tunnel.mu.RUnlock()
+			return tunnelName, true
+		}
+		tunnel.mu.RUnlock()
+	}
+	return "", false
+}
+
+// GetRandomEndpointFromTunnels selects a random tunnel from the provided list,
+// then selects a random endpoint from that tunnel.
+func (tm *TunnelManager) GetRandomEndpointFromTunnels(tunnelNames []string) (string, string, error) {
+	tm.mu.RLock()
+	defer tm.mu.RUnlock()
+
+	if len(tunnelNames) == 0 {
+		return "", "", errors.New("no tunnel names provided")
+	}
+
+	// Create a new slice and shuffle it to avoid modifying the original slice
+	shuffledTunnels := make([]string, len(tunnelNames))
+	copy(shuffledTunnels, tunnelNames)
+	rand.Shuffle(len(shuffledTunnels), func(i, j int) {
+		shuffledTunnels[i], shuffledTunnels[j] = shuffledTunnels[j], shuffledTunnels[i]
+	})
+
+	for _, tunnelName := range shuffledTunnels {
+		tunnel, exists := tm.tunnels[tunnelName]
+		if !exists {
+			continue // Try next tunnel if this one doesn't exist
+		}
+
+		tunnel.mu.RLock()
+		if len(tunnel.streams) == 0 {
+			tunnel.mu.RUnlock()
+			continue // No endpoints in this tunnel, try next
+		}
+
+		// Collect available endpoint names that have active streams
+		endpointNames := make([]string, 0, len(tunnel.streams))
+		for name, pool := range tunnel.streams {
+			if pool.Size() > 0 {
+				endpointNames = append(endpointNames, name)
+			}
+		}
+		tunnel.mu.RUnlock()
+
+		if len(endpointNames) > 0 {
+			// Pick a random endpoint
+			randomEndpointName := endpointNames[rand.Intn(len(endpointNames))]
+			return tunnelName, randomEndpointName, nil
+		}
+	}
+
+	return "", "", fmt.Errorf("no available endpoints in any of the specified tunnels: %v", tunnelNames)
 }
 
 // SendRequest sends a request to an endpoint and waits for a response.
