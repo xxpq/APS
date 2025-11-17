@@ -44,12 +44,21 @@ type TunnelManager struct {
 type Tunnel struct {
 	mu        sync.RWMutex
 	name      string
-	endpoints map[string]*EndpointConn // endpointName -> EndpointConn
+	endpoints map[string]*EndpointPool // endpointName -> EndpointPool
 	password  string                   // AES key
+}
+
+// EndpointPool manages a pool of connections for a single endpoint name
+type EndpointPool struct {
+	mu        sync.RWMutex
+	conns     map[string]*EndpointConn // connId -> EndpointConn
+	nextIndex int                      // For round-robin
+	name      string
 }
 
 // EndpointConn represents a single WebSocket connection from an endpoint client
 type EndpointConn struct {
+	id              string // Unique ID for this specific connection
 	ws              *websocket.Conn
 	sendCh          chan []byte
 	name            string
@@ -68,7 +77,7 @@ func NewTunnelManager(config *Config) *TunnelManager {
 		for name, tConfig := range config.Tunnels {
 			tm.tunnels[name] = &Tunnel{
 				name:      name,
-				endpoints: make(map[string]*EndpointConn),
+				endpoints: make(map[string]*EndpointPool),
 				password:  tConfig.Password,
 			}
 		}
@@ -95,17 +104,34 @@ func (tm *TunnelManager) GetTunnelForServer(serverName string) *Tunnel {
 func (t *Tunnel) RegisterEndpoint(endpointName string, conn *EndpointConn) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	// TODO: Handle existing connection with the same name
-	t.endpoints[endpointName] = conn
-	log.Printf("[TUNNEL] Endpoint '%s' registered to tunnel '%s'", endpointName, t.name)
+
+	pool, exists := t.endpoints[endpointName]
+	if !exists {
+		pool = &EndpointPool{
+			conns: make(map[string]*EndpointConn),
+			name:  endpointName,
+		}
+		t.endpoints[endpointName] = pool
+	}
+	pool.AddConn(conn)
+	log.Printf("[TUNNEL] Connection %s for endpoint '%s' registered to tunnel '%s'. Pool size: %d", conn.id, endpointName, t.name, pool.Size())
 }
 
 // UnregisterEndpoint removes an endpoint connection
-func (t *Tunnel) UnregisterEndpoint(endpointName string) {
+func (t *Tunnel) UnregisterEndpoint(endpointName string, connID string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	delete(t.endpoints, endpointName)
-	log.Printf("[TUNNEL] Endpoint '%s' unregistered from tunnel '%s'", endpointName, t.name)
+
+	pool, exists := t.endpoints[endpointName]
+	if !exists {
+		return
+	}
+	pool.RemoveConn(connID)
+	log.Printf("[TUNNEL] Connection %s for endpoint '%s' unregistered from tunnel '%s'. Pool size: %d", connID, endpointName, t.name, pool.Size())
+	if pool.Size() == 0 {
+		delete(t.endpoints, endpointName)
+		log.Printf("[TUNNEL] Endpoint pool for '%s' is now empty and has been removed.", endpointName)
+	}
 }
 
 // GetRandomEndpoint selects a random online endpoint from the tunnel
@@ -117,12 +143,67 @@ func (t *Tunnel) GetRandomEndpoint() *EndpointConn {
 		return nil
 	}
 
-	// Convert map to slice for random selection
-	endpoints := make([]*EndpointConn, 0, len(t.endpoints))
-	for _, ep := range t.endpoints {
-		endpoints = append(endpoints, ep)
+	// This part is a bit tricky. We want to select a random *pool* first,
+	// then get a connection from that pool. This maintains the original behavior
+	// of potentially balancing load across different endpoint *names*.
+	pools := make([]*EndpointPool, 0, len(t.endpoints))
+	for _, pool := range t.endpoints {
+		if pool.Size() > 0 {
+			pools = append(pools, pool)
+		}
 	}
-	return endpoints[mrand.Intn(len(endpoints))]
+	if len(pools) == 0 {
+		return nil
+	}
+
+	randomPool := pools[mrand.Intn(len(pools))]
+	return randomPool.GetConn() // Use round-robin from the selected pool
+}
+
+// AddConn adds a connection to the pool
+func (p *EndpointPool) AddConn(conn *EndpointConn) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.conns[conn.id] = conn
+}
+
+// RemoveConn removes a connection from the pool
+func (p *EndpointPool) RemoveConn(connID string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	delete(p.conns, connID)
+}
+
+// GetConn selects a connection from the pool using round-robin
+func (p *EndpointPool) GetConn() *EndpointConn {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if len(p.conns) == 0 {
+		return nil
+	}
+
+	// Convert map to slice to have a defined order for round-robin
+	conns := make([]*EndpointConn, 0, len(p.conns))
+	for _, c := range p.conns {
+		conns = append(conns, c)
+	}
+
+	if p.nextIndex >= len(conns) {
+		p.nextIndex = 0
+	}
+
+	conn := conns[p.nextIndex]
+	p.nextIndex++
+
+	return conn
+}
+
+// Size returns the number of connections in the pool
+func (p *EndpointPool) Size() int {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return len(p.conns)
 }
 
 // FindEndpoint searches for a specific endpoint by name across all tunnels.
@@ -132,9 +213,10 @@ func (tm *TunnelManager) FindEndpoint(endpointName string) (*EndpointConn, *Tunn
 
 	for _, tunnel := range tm.tunnels {
 		tunnel.mu.RLock()
-		if ep, exists := tunnel.endpoints[endpointName]; exists {
+		if pool, exists := tunnel.endpoints[endpointName]; exists && pool.Size() > 0 {
+			conn := pool.GetConn() // Use round-robin to get a specific connection
 			tunnel.mu.RUnlock()
-			return ep, tunnel
+			return conn, tunnel
 		}
 		tunnel.mu.RUnlock()
 	}
@@ -172,7 +254,9 @@ func (tm *TunnelManager) ServeWs(tunnel *Tunnel, w http.ResponseWriter, r *http.
 		return
 	}
 
+	connID := generateRequestID() // Reuse this function for a unique ID
 	conn := &EndpointConn{
+		id:              connID,
 		ws:              ws,
 		sendCh:          make(chan []byte, 256),
 		name:            endpointName,
@@ -187,7 +271,7 @@ func (tm *TunnelManager) ServeWs(tunnel *Tunnel, w http.ResponseWriter, r *http.
 
 func (c *EndpointConn) readPump(tunnel *Tunnel) {
 	defer func() {
-		tunnel.UnregisterEndpoint(c.name)
+		tunnel.UnregisterEndpoint(c.name, c.id)
 		c.ws.Close()
 	}()
 	c.ws.SetReadLimit(maxMessageSize)

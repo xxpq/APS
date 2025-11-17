@@ -53,10 +53,18 @@ var (
 	name           = flag.String("name", "default-endpoint", "unique name for this endpoint client")
 	tunnelName     = flag.String("tunnel", "", "name of the tunnel to connect to (must be defined in server config)")
 	tunnelPassword = flag.String("password", "", "tunnel password for encryption")
+	poolSize       = flag.Int("pool-size", 1, "number of parallel connections to establish to the tunnel server")
 	debug          = flag.Bool("debug", false, "enable debug logging")
 
 	activeRequests sync.Map // Stores map[string]context.CancelFunc
 )
+
+// sharedClient is a reusable HTTP client that enables connection pooling (keep-alive).
+var sharedClient = &http.Client{
+	CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		return http.ErrUseLastResponse
+	},
+}
 
 const (
 	reconnectDelay = 5 * time.Second
@@ -73,22 +81,38 @@ func main() {
 	interrupt := make(chan os.Signal, 1)
 	signal.Notify(interrupt, os.Interrupt, syscall.SIGTERM)
 
-	for {
-		select {
-		case <-interrupt:
-			log.Println("Interrupt received, shutting down.")
-			return
-		default:
-			runClientSession(interrupt)
-			log.Printf("Session ended. Reconnecting in %v...", reconnectDelay)
-			time.Sleep(reconnectDelay)
-		}
+	ctx, cancel := context.WithCancel(context.Background())
+	var wg sync.WaitGroup
+
+	for i := 0; i < *poolSize; i++ {
+		wg.Add(1)
+		go func(connNum int) {
+			defer wg.Done()
+			for {
+				select {
+				case <-ctx.Done():
+					log.Printf("[Conn %d] Context cancelled, shutting down.", connNum)
+					return
+				default:
+					runClientSession(ctx, connNum)
+					log.Printf("[Conn %d] Session ended. Reconnecting in %v...", connNum, reconnectDelay)
+					time.Sleep(reconnectDelay)
+				}
+			}
+		}(i + 1)
 	}
+
+	// Wait for interrupt signal
+	<-interrupt
+	log.Println("Interrupt received, shutting down all connections.")
+	cancel() // Signal all goroutines to stop
+	wg.Wait()  // Wait for all goroutines to finish
+	log.Println("All connections closed. Exiting.")
 }
 
-func runClientSession(interrupt chan os.Signal) {
+func runClientSession(ctx context.Context, connNum int) {
 	u := url.URL{Scheme: "ws", Host: *serverAddr, Path: "/.tunnel"}
-	log.Printf("Connecting to %s", u.String())
+	log.Printf("[Conn %d] Connecting to %s", connNum, u.String())
 
 	header := http.Header{}
 	header.Set("X-Endpoint-Name", *name)
@@ -100,14 +124,14 @@ func runClientSession(interrupt chan os.Signal) {
 		return
 	}
 	defer conn.Close()
-	log.Println("Successfully connected to tunnel server.")
+	log.Printf("[Conn %d] Successfully connected to tunnel server.", connNum)
 
 	// The server will send pings, and the client will automatically respond with pongs.
 	// We just need to handle the ping message to know the connection is alive.
 	// The gorilla/websocket library handles the pong response automatically.
 	conn.SetPingHandler(func(appData string) error {
 		if *debug {
-			log.Println("Ping received")
+			log.Printf("[Conn %d] Ping received", connNum)
 		}
 		// The library will automatically send a pong. We don't need to do anything here
 		// except perhaps update a read deadline if we were managing it manually.
@@ -125,9 +149,9 @@ func runClientSession(interrupt chan os.Signal) {
 			if err != nil {
 				// Check for clean close or actual error
 				if websocket.IsUnexpectedCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
-					log.Printf("Read error: %v", err)
+					log.Printf("[Conn %d] Read error: %v", connNum, err)
 				} else {
-					log.Println("Connection closed gracefully.")
+					log.Printf("[Conn %d] Connection closed gracefully.", connNum)
 				}
 				return
 			}
@@ -157,19 +181,19 @@ func runClientSession(interrupt chan os.Signal) {
 
 	select {
 	case <-done:
-		log.Println("Reader finished, connection is likely closed.")
-	case <-interrupt:
-		log.Println("Interrupt received, closing connection.")
+		log.Printf("[Conn %d] Reader finished, connection is likely closed.", connNum)
+	case <-ctx.Done():
+		log.Printf("[Conn %d] Context cancelled, closing connection.", connNum)
 		// Attempt a clean shutdown
 		err := conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
 		if err != nil {
-			log.Println("Write close error:", err)
+			log.Printf("[Conn %d] Write close error: %v", connNum, err)
 		}
 		// Wait for the reader to close or timeout
 		select {
 		case <-done:
 		case <-time.After(time.Second):
-			log.Println("Shutdown timeout, forcing close.")
+			log.Printf("[Conn %d] Shutdown timeout, forcing close.", connNum)
 		}
 	}
 }
@@ -227,12 +251,7 @@ func handleRequest(conn *websocket.Conn, requestID string, payload json.RawMessa
 
 	log.Printf("Forwarding request %s to %s", requestID, req.URL.String())
 
-	client := &http.Client{
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-	}
-	resp, err := client.Do(req)
+	resp, err := sharedClient.Do(req)
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
 			log.Printf("[CANCEL %s] Request was cancelled locally.", requestID)
