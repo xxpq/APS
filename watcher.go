@@ -74,7 +74,20 @@ func (w *ConfigWatcher) watch() {
 					log.Printf("Error reloading config: %v", err)
 				} else {
 					log.Printf("Config reloaded successfully, synchronizing servers...")
-					w.syncServers(oldServers, w.config.Servers)
+					
+					// Re-initialize ACME with the new config
+					InitACME(w.config)
+
+					// Check if ACME is needed with the new config
+					isACMEEnabled := false
+					for _, serverConfig := range w.config.Servers {
+						if certStr, ok := serverConfig.Cert.(string); ok && certStr == "acme" {
+							isACMEEnabled = true
+							break
+						}
+					}
+
+					w.syncServers(oldServers, w.config.Servers, isACMEEnabled)
 
 					// 重新计算每个 server 是否绑定了隧道；若绑定状态发生变化，则重启该 server
 					// 以便让 createServerHandler() 重新注册或移除 '/.tunnel' 端点
@@ -94,7 +107,7 @@ func (w *ConfigWatcher) watch() {
 							w.serverManager.Stop(name)
 							// 确保端口释放
 							time.Sleep(100 * time.Millisecond)
-							w.serverManager.Start(name, w.config.Servers[name])
+							w.serverManager.Start(name, w.config.Servers[name], isACMEEnabled)
 						}
 					}
 					w.lastTunnelBinding = newBinding
@@ -108,7 +121,7 @@ func (w *ConfigWatcher) watch() {
 	}
 }
 
-func (w *ConfigWatcher) syncServers(oldServers, newServers map[string]*ListenConfig) {
+func (w *ConfigWatcher) syncServers(oldServers, newServers map[string]*ListenConfig, isACMEEnabled bool) {
 	// Stop servers that are in the old config but not in the new one
 	for name := range oldServers {
 		if _, exists := newServers[name]; !exists {
@@ -122,7 +135,7 @@ func (w *ConfigWatcher) syncServers(oldServers, newServers map[string]*ListenCon
 		if oldConfig, exists := oldServers[name]; !exists {
 			// This is a new server
 			log.Printf("New server '%s' found in config, starting...", name)
-			w.serverManager.Start(name, newConfig)
+			w.serverManager.Start(name, newConfig, isACMEEnabled)
 		} else {
 			// Server exists, check if it was modified
 			if !reflect.DeepEqual(oldConfig, newConfig) {
@@ -130,7 +143,7 @@ func (w *ConfigWatcher) syncServers(oldServers, newServers map[string]*ListenCon
 				w.serverManager.Stop(name)
 				// A small delay might be useful to ensure the port is released
 				time.Sleep(100 * time.Millisecond)
-				w.serverManager.Start(name, newConfig)
+				w.serverManager.Start(name, newConfig, isACMEEnabled)
 			}
 		}
 	}
