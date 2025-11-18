@@ -17,11 +17,13 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
 
 	pb "aps/tunnelpb"
+
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
@@ -68,7 +70,12 @@ func main() {
 				log.Println("Context cancelled, shutting down.")
 				return
 			default:
-				runClientSession(ctx)
+				shouldReconnect := runClientSession(ctx)
+				if !shouldReconnect {
+					log.Printf("Permanent error detected, stopping reconnection attempts.")
+					cancel() // 通知主循环退出
+					return
+				}
 				log.Printf("Session ended. Reconnecting in %v...", reconnectDelay)
 				time.Sleep(reconnectDelay)
 			}
@@ -83,12 +90,13 @@ func main() {
 	log.Println("Exiting.")
 }
 
-func runClientSession(ctx context.Context) {
+// runClientSession 运行一个客户端会话，返回是否应该重连
+func runClientSession(ctx context.Context) bool {
 	log.Printf("Connecting to gRPC server at %s", *serverAddr)
 	conn, err := grpc.Dial(*serverAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		log.Printf("Failed to connect: %v", err)
-		return
+		return true // 连接失败可能是网络问题，应该重试
 	}
 	defer conn.Close()
 
@@ -107,12 +115,22 @@ func runClientSession(ctx context.Context) {
 	stream, err := client.Establish(ctx)
 	if err != nil {
 		log.Printf("Failed to establish stream: %v", err)
-		return
+		// 检查是否为永久性错误，如果是则不再重连
+		if isPermanentError(err) {
+			log.Printf("Permanent error detected, stopping reconnection attempts.")
+			return false
+		}
+		return true // 其他错误可能是暂时的，应该重试
 	}
 	log.Println("Successfully established gRPC stream.")
 
+	// 用于通知发生永久性错误的通道
+	permanentErrorChan := make(chan error, 1)
+	streamEnded := make(chan struct{})
+
 	// Goroutine to receive messages from the server
 	go func() {
+		defer close(streamEnded) // 确保流结束时会通知
 		for {
 			msg, err := stream.Recv()
 			if err == io.EOF {
@@ -121,14 +139,62 @@ func runClientSession(ctx context.Context) {
 			}
 			if err != nil {
 				log.Printf("Error receiving from stream: %v", err)
+				// 检查是否为永久性错误
+				if isPermanentError(err) {
+					log.Printf("Permanent error detected in receive loop, stopping reconnection attempts.")
+					select {
+					case permanentErrorChan <- err:
+						// 成功发送永久性错误
+					default:
+						// 通道已有值，避免阻塞
+					}
+				}
 				return
 			}
 			go handleServerMessage(stream, msg)
 		}
 	}()
 
-	<-stream.Context().Done()
-	log.Printf("Stream context done: %v", stream.Context().Err())
+	// 等待流结束或永久性错误
+	select {
+	case <-permanentErrorChan:
+		// log.Printf("Received permanent error from receive loop: %v", err)
+		os.Exit(1)
+		return false // 永久性错误，不应该重试
+	case <-streamEnded:
+		log.Printf("Stream ended.")
+		// 检查是否在流结束时还有永久性错误
+		select {
+		case err := <-permanentErrorChan:
+			log.Printf("Found permanent error after stream end: %v", err)
+			return false
+		default:
+			return true // 正常结束，应该重试
+		}
+	}
+}
+
+// isPermanentError 判断错误是否为永久性错误（如认证失败、隧道不存在等）
+func isPermanentError(err error) bool {
+	if err == nil {
+		return false
+	}
+	errStr := err.Error()
+	// 检查常见的永久性错误关键字
+	permanentErrors := []string{
+		"Unauthenticated",         // 认证失败
+		"invalid tunnel password", // 密码错误
+		"NotFound",                // 资源未找到（如隧道不存在）
+		"already exists",          // 名称冲突
+		"permission denied",       // 权限被拒绝
+	}
+
+	for _, permErr := range permanentErrors {
+		if strings.Contains(errStr, permErr) {
+			return true
+		}
+	}
+	return false
 }
 
 func handleServerMessage(stream pb.TunnelService_EstablishClient, msg *pb.ServerToEndpoint) {
