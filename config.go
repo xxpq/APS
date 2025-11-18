@@ -414,10 +414,10 @@ func (lc *ListenConfig) UnmarshalJSON(data []byte) error {
 
 	// Check the type of Cert
 	if certStr, ok := obj.Cert.(string); ok {
-		if certStr != "auto" {
-			return errors.New("cert string must be 'auto'")
+		if certStr != "auto" && certStr != "acme" {
+			return errors.New("cert string must be 'auto' or 'acme'")
 		}
-		lc.Cert = "auto"
+		lc.Cert = certStr
 	} else if certMap, ok := obj.Cert.(map[string]interface{}); ok {
 		files := CertFiles{}
 		if c, ok := certMap["cert"].(string); ok {

@@ -167,3 +167,33 @@ func replaceHostWithIP(originalURL string, ip string) (string, error) {
 
 	return parsedURL.String(), nil
 }
+
+// extractDomain 从 URL 中提取域名 (不含端口)
+func extractDomain(rawURL string) string {
+	// 尝试解析 URL
+	parsedURL, err := url.Parse(rawURL)
+	if err != nil {
+		// 如果解析失败，可能是一个不带协议的域名，例如 "example.com/*"
+		// 尝试直接从字符串中提取
+		parts := strings.Split(rawURL, "/")
+		if len(parts) > 0 {
+			hostParts := strings.Split(parts[0], ":")
+			return hostParts[0]
+		}
+		return ""
+	}
+
+	// 从解析后的 URL 中获取主机名 (包含端口)
+	host := parsedURL.Hostname()
+	return host
+}
+
+// containsString 检查字符串切片中是否包含指定的字符串
+func containsString(slice []string, str string) bool {
+	for _, item := range slice {
+		if item == str {
+			return true
+		}
+	}
+	return false
+}

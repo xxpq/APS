@@ -52,7 +52,7 @@ func NewServerManager(config *Config, configFile string, dataStore *DataStore, h
 	}
 }
 
-func (sm *ServerManager) Start(name string, serverConfig *ListenConfig) {
+func (sm *ServerManager) Start(name string, serverConfig *ListenConfig, isACMEEnabled bool) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
@@ -70,7 +70,7 @@ func (sm *ServerManager) Start(name string, serverConfig *ListenConfig) {
 		}
 	}
 
-	handler := createServerHandler(name, serverMappings[name], serverConfig, sm.config, sm.configFile, sm.dataStore, sm.harManager, sm.tunnelManager, sm.scriptRunner, sm.trafficShaper, sm.stats, sm.replayManager)
+	handler := createServerHandler(name, serverMappings[name], serverConfig, sm.config, sm.configFile, sm.dataStore, sm.harManager, sm.tunnelManager, sm.scriptRunner, sm.trafficShaper, sm.stats, sm.replayManager, isACMEEnabled)
 	server := startServer(name, serverConfig, handler)
 	if server != nil {
 		sm.servers[name] = server
@@ -132,6 +132,8 @@ func main() {
 		log.Fatalf("Failed to load config: %v", err)
 	}
 
+	InitACME(config)
+
 	dataStore, err := LoadDataStore(*dataFile)
 	if err != nil {
 		log.Fatalf("Failed to load data store: %v", err)
@@ -183,28 +185,57 @@ func main() {
 }
 
 func (sm *ServerManager) StartAll() {
+	sm.config.mu.RLock()
+	defer sm.config.mu.RUnlock()
+
+	// 检查是否有服务配置了ACME
+	needsACMEChallengeServer := false
+	for _, serverConfig := range sm.config.Servers {
+		if certStr, ok := serverConfig.Cert.(string); ok && certStr == "acme" {
+			needsACMEChallengeServer = true
+			break
+		}
+	}
+
+	// 如果需要ACME，确保有一个公共的80端口服务器
+	if needsACMEChallengeServer {
+		foundPort80 := false
+		for _, serverConfig := range sm.config.Servers {
+			if serverConfig.Port == 80 && (serverConfig.Public == nil || *serverConfig.Public) {
+				foundPort80 = true
+				break
+			}
+		}
+		if !foundPort80 {
+			log.Println("[ACME] No public server on port 80 found, creating one for ACME challenge.")
+			acmeServerName := "acme_challenge_server"
+			t := true
+			sm.config.Servers[acmeServerName] = &ListenConfig{
+				Port:   80,
+				Public: &t,
+			}
+		}
+	}
+
 	// 将 mappings 按 server name 分组
 	serverMappings := make(map[string][]*Mapping)
-	sm.config.mu.RLock()
 	for i := range sm.config.Mappings {
 		mapping := &sm.config.Mappings[i]
 		for _, serverName := range mapping.serverNames {
 			serverMappings[serverName] = append(serverMappings[serverName], mapping)
 		}
 	}
-	sm.config.mu.RUnlock()
 
 	// 为每个 server 创建并启动一个处理器
-	for name := range sm.config.Servers {
-		serverConfig := sm.config.Servers[name]
+	for name, serverConfig := range sm.config.Servers {
 		if serverConfig == nil {
 			continue
 		}
-		sm.Start(name, serverConfig)
+		sm.Start(name, serverConfig, needsACMEChallengeServer)
 	}
 }
 
-func createServerHandler(serverName string, mappings []*Mapping, serverConfig *ListenConfig, config *Config, configFile string, dataStore *DataStore, harManager *HarLoggerManager, tunnelManager *TunnelManager, scriptRunner *ScriptRunner, trafficShaper *TrafficShaper, stats *StatsCollector, replayManager *ReplayManager) http.Handler {
+func createServerHandler(serverName string, mappings []*Mapping, serverConfig *ListenConfig, config *Config, configFile string, dataStore *DataStore, harManager *HarLoggerManager, tunnelManager *TunnelManager, scriptRunner *ScriptRunner, trafficShaper *TrafficShaper, stats *StatsCollector, replayManager *ReplayManager, isACMEEnabled bool) http.Handler {
 	mux := http.NewServeMux()
 	proxy := NewMapRemoteProxy(config, dataStore, harManager, tunnelManager, scriptRunner, trafficShaper, stats, serverName)
 
@@ -229,7 +260,7 @@ func createServerHandler(serverName string, mappings []*Mapping, serverConfig *L
 	}
 
 	// 创建一个统一的处理器来处理所有请求
-	httpHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	var baseHandler http.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// 代理请求 (CONNECT)
 		if r.Method == http.MethodConnect {
 			proxy.ServeHTTP(w, r)
@@ -247,6 +278,11 @@ func createServerHandler(serverName string, mappings []*Mapping, serverConfig *L
 		proxy.ServeHTTP(w, r)
 	})
 
+	// 如果是80端口，并且全局启用了ACME，则包装处理器以处理ACME挑战
+	if serverConfig.Port == 80 && isACMEEnabled {
+		baseHandler = GetACMEHandler(baseHandler)
+	}
+
 	// 创建 gRPC 服务器
 	grpcServer := grpc.NewServer()
 	pb.RegisterTunnelServiceServer(grpcServer, &TunnelServiceServer{tunnelManager: tunnelManager})
@@ -261,7 +297,7 @@ func createServerHandler(serverName string, mappings []*Mapping, serverConfig *L
 		if isGrpcTunnel {
 			grpcServer.ServeHTTP(w, r)
 		} else {
-			httpHandler.ServeHTTP(w, r)
+			baseHandler.ServeHTTP(w, r)
 		}
 	})
 
@@ -297,6 +333,13 @@ func startServer(name string, config *ListenConfig, handler http.Handler) *http.
 				tlsConfig.GetCertificate = func(info *tls.ClientHelloInfo) (*tls.Certificate, error) {
 					return GenerateCertForHost(info.ServerName)
 				}
+			} else if config.Cert == "acme" {
+				acmeTLSConfig := GetACMETLSConfig()
+				if acmeTLSConfig == nil {
+					log.Printf("ACME manager not initialized for server '%s', cannot start HTTPS server.", name)
+					return
+				}
+				tlsConfig = acmeTLSConfig
 			}
 
 			listener, err := net.Listen("tcp", addr)

@@ -9,10 +9,13 @@ import (
 	"encoding/pem"
 	"log"
 	"math/big"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sync"
 	"time"
+
+	"golang.org/x/crypto/acme/autocert"
 )
 
 var (
@@ -21,10 +24,12 @@ var (
 	caCert    *x509.Certificate
 	caKey     *rsa.PrivateKey
 	caCertPEM []byte
+	acmeManager *autocert.Manager
 )
 
 const (
 	certDir      = ".cert"
+	acmeDir      = ".cert/acme"
 	caCertFile   = "Any_Proxy_Service.crt"
 	caKeyFile    = "Any_Proxy_Service.key"
 	caCommonName = "Any Proxy Service Root CA"
@@ -226,4 +231,58 @@ func GetCACertPEM() []byte {
 func fileExists(path string) bool {
 	_, err := os.Stat(path)
 	return !os.IsNotExist(err)
+}
+
+// InitACME initializes the ACME certificate manager.
+func InitACME(config *Config) {
+	// 从配置中收集所有需要ACME证书的域名
+	var acmeDomains []string
+	for _, mapping := range config.Mappings {
+		// 检查与此mapping关联的server是否配置了acme
+		for _, serverName := range mapping.serverNames {
+			if server, ok := config.Servers[serverName]; ok {
+				if certStr, ok := server.Cert.(string); ok && certStr == "acme" {
+					// 从 "from" URL 中提取域名
+					domain := extractDomain(mapping.GetFromURL())
+					if domain != "" && !containsString(acmeDomains, domain) {
+						acmeDomains = append(acmeDomains, domain)
+					}
+				}
+			}
+		}
+	}
+
+	if len(acmeDomains) == 0 {
+		log.Println("[ACME] No domains configured for ACME, skipping initialization.")
+		return
+	}
+
+	log.Printf("[ACME] Initializing for domains: %v", acmeDomains)
+
+	// 确保ACME缓存目录存在
+	if err := os.MkdirAll(acmeDir, 0755); err != nil {
+		log.Fatalf("[ACME] Failed to create cache directory: %v", err)
+	}
+
+	acmeManager = &autocert.Manager{
+		Cache:      autocert.DirCache(acmeDir),
+		Prompt:     autocert.AcceptTOS,
+		HostPolicy: autocert.HostWhitelist(acmeDomains...),
+	}
+}
+
+// GetACMETLSConfig returns a TLS config for ACME.
+func GetACMETLSConfig() *tls.Config {
+	if acmeManager == nil {
+		return nil
+	}
+	return acmeManager.TLSConfig()
+}
+
+// GetACMEHandler returns the HTTP handler for the ACME challenge.
+func GetACMEHandler(fallback http.Handler) http.Handler {
+	if acmeManager == nil {
+		return fallback
+	}
+	return acmeManager.HTTPHandler(fallback)
 }
