@@ -1,0 +1,31 @@
+{
+  "servers": {
+    "server1": {
+      "port": 8080,
+      "endpoints": ["test-endpoint-1", "test-endpoint-2"],
+      "panel": true
+    },
+    "server2": {
+      "port": 8081,
+      "tunnels": ["test-tunnel-1", "test-tunnel-2"],
+      "panel": true
+    }
+  },
+  "tunnels": {
+    "test-tunnel-1": {
+      "servers": ["localhost:50051"],
+      "password": "test123"
+    },
+    "test-tunnel-2": {
+      "servers": ["localhost:50052"],
+      "password": "test456"
+    }
+  },
+  "mappings": [
+    {
+      "from": "http://example.com/api",
+      "to": "http://backend.com/api",
+      "servers": ["server1"]
+    }
+  ]
+}

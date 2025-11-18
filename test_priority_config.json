@@ -1,0 +1,57 @@
+{
+  "servers": {
+    "server1": {
+      "port": 8080,
+      "endpoints": ["server-endpoint-1", "server-endpoint-2"],
+      "panel": true
+    }
+  },
+  "tunnels": {
+    "user-tunnel-1": {
+      "servers": ["localhost:50051"],
+      "password": "user123"
+    },
+    "user-tunnel-2": {
+      "servers": ["localhost:50052"],
+      "password": "user456"
+    },
+    "server-tunnel-1": {
+      "servers": ["localhost:50053"],
+      "password": "server123"
+    },
+    "mapping-tunnel-1": {
+      "servers": ["localhost:50054"],
+      "password": "mapping123"
+    }
+  },
+  "auth": {
+    "users": {
+      "testuser": {
+        "password": "testpass",
+        "endpoint": ["user-endpoint-1", "user-endpoint-2"],
+        "groups": ["testgroup"]
+      },
+      "userwithendpoint": {
+        "password": "pass123",
+        "endpoint": ["priority-user-endpoint"]
+      }
+    },
+    "groups": {
+      "testgroup": {
+        "users": ["testuser"],
+        "tunnel": ["group-tunnel-1"]
+      }
+    }
+  },
+  "mappings": [
+    {
+      "from": "http://example.com/api",
+      "to": "http://backend.com/api",
+      "servers": ["server1"],
+      "via": {
+        "endpoints": ["mapping-endpoint-1"],
+        "tunnels": ["mapping-tunnel-1"]
+      }
+    }
+  ]
+}

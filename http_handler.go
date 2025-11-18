@@ -64,11 +64,14 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	targetURL, matched, mapping := p.mapRequest(r)
 	originalURL := p.buildOriginalURL(r)
 
-	if !r.URL.IsAbs() && !matched {
-		isError = true
-		http.NotFound(w, r)
-		log.Printf("[%s] %s (NO MAPPING - 404 Not Found)", r.Method, originalURL)
-		return
+	// 获取server配置
+	serverConfig := p.config.Servers[p.serverName]
+	
+	// 检查server级别的Endpoints/Tunnels配置
+	var serverEndpointNames, serverTunnelNames []string
+	if serverConfig != nil {
+		serverEndpointNames = parseStringOrArray(serverConfig.Endpoints)
+		serverTunnelNames = parseStringOrArray(serverConfig.Tunnels)
 	}
 
 	authorized, user, username := p.checkAuth(r, mapping)
@@ -84,6 +87,44 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if user != nil {
 		userKey = username
+	}
+
+	// 获取用户和组级别的Endpoints/Tunnels配置（最高优先级）
+	var userEndpointNames, userTunnelNames []string
+	
+	if user != nil {
+		// 用户级别配置
+		userEndpointNames = parseStringOrArray(user.Endpoint)
+		userTunnelNames = parseStringOrArray(user.Tunnel)
+		
+		// 组级别配置（只有用户级别没有配置时，才使用组级别配置）
+		if len(userEndpointNames) == 0 && len(userTunnelNames) == 0 {
+			if p.config.Auth != nil && p.config.Auth.Groups != nil {
+				for _, groupName := range user.Groups {
+					if group, ok := p.config.Auth.Groups[groupName]; ok {
+						groupEndpoints := parseStringOrArray(group.Endpoint)
+						groupTunnels := parseStringOrArray(group.Tunnel)
+						if len(groupEndpoints) > 0 || len(groupTunnels) > 0 {
+							userEndpointNames = groupEndpoints
+							userTunnelNames = groupTunnels
+							break // 使用第一个有配置的组
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// 只有在未命中mapping且没有任何级别（user/group/server/mapping）的Endpoints/Tunnels配置时，才返回404
+	hasAnyConfig := len(userEndpointNames) > 0 || len(userTunnelNames) > 0 ||
+		len(serverEndpointNames) > 0 || len(serverTunnelNames) > 0 ||
+		(mapping != nil && (len(mapping.endpointNames) > 0 || len(mapping.tunnelNames) > 0))
+	
+	if !matched && !hasAnyConfig && !r.URL.IsAbs() {
+		isError = true
+		http.NotFound(w, r)
+		log.Printf("[%s] %s (NO MAPPING - 404 Not Found)", r.Method, originalURL)
+		return
 	}
 
 	// Populate keys for stats
@@ -109,7 +150,6 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	serverConfig := p.config.Servers[p.serverName]
 	policies := p.config.ResolvePolicies(serverConfig, mapping, user, username)
 
 	var tunnelConfig *TunnelConfig
@@ -205,6 +245,12 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		log.Printf("[%s] %s -> %s (MAPPED)", r.Method, originalURL, targetURL)
+	} else if len(userEndpointNames) > 0 || len(userTunnelNames) > 0 {
+		log.Printf("[%s] %s (NO MAPPING - FORWARDED TO USER-LEVEL ENDPOINT/TUNNEL)", r.Method, originalURL)
+	} else if len(serverEndpointNames) > 0 || len(serverTunnelNames) > 0 {
+		log.Printf("[%s] %s (NO MAPPING - FORWARDED TO SERVER-LEVEL ENDPOINT/TUNNEL)", r.Method, originalURL)
+	} else if mapping != nil && (len(mapping.endpointNames) > 0 || len(mapping.tunnelNames) > 0) {
+		log.Printf("[%s] %s (NO MAPPING - FORWARDED TO MAPPING-LEVEL ENDPOINT/TUNNEL)", r.Method, originalURL)
 	} else {
 		log.Printf("[%s] %s (NO MAPPING)", r.Method, originalURL)
 	}
@@ -329,8 +375,72 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	var tunnelName, endpointName string
 	isTunnelRequest := false
 
-	if mapping != nil && len(mapping.endpointNames) > 0 {
-		// Priority 1: via.endpoints is specified. `via.tunnels` is ignored.
+	// Priority 1: 用户级别的endpoints配置（最高优先级）
+	if len(userEndpointNames) > 0 {
+		isTunnelRequest = true
+		randomEndpoint := userEndpointNames[rand.Intn(len(userEndpointNames))]
+
+		foundTunnel, ok := p.tunnelManager.FindTunnelForEndpoint(randomEndpoint)
+		if !ok {
+			isError = true
+			http.Error(w, "User-level endpoint not found or not connected: "+randomEndpoint, http.StatusBadGateway)
+			log.Printf("[TUNNEL] User-level specified endpoint '%s' not found in any active tunnel", randomEndpoint)
+			return
+		}
+		tunnelName = foundTunnel
+		endpointName = randomEndpoint
+		tunnelKey = tunnelName // for stats
+		log.Printf("[TUNNEL] Using user-level endpoint '%s' via tunnel '%s'", endpointName, tunnelName)
+
+	} else if len(userTunnelNames) > 0 {
+		// Priority 2: 用户级别的tunnels配置
+		isTunnelRequest = true
+		foundTunnel, foundEndpoint, err := p.tunnelManager.GetRandomEndpointFromTunnels(userTunnelNames)
+		if err != nil {
+			isError = true
+			http.Error(w, "No available endpoint for user-level tunnels", http.StatusBadGateway)
+			log.Printf("[TUNNEL] %v", err)
+			return
+		}
+		tunnelName = foundTunnel
+		endpointName = foundEndpoint
+		tunnelKey = tunnelName // for stats
+		log.Printf("[TUNNEL] Using user-level tunnel '%s' to endpoint '%s'", tunnelName, endpointName)
+
+	} else if len(serverEndpointNames) > 0 {
+		// Priority 3: server级别的endpoints配置
+		isTunnelRequest = true
+		randomEndpoint := serverEndpointNames[rand.Intn(len(serverEndpointNames))]
+
+		foundTunnel, ok := p.tunnelManager.FindTunnelForEndpoint(randomEndpoint)
+		if !ok {
+			isError = true
+			http.Error(w, "Server-level endpoint not found or not connected: "+randomEndpoint, http.StatusBadGateway)
+			log.Printf("[TUNNEL] Server-level specified endpoint '%s' not found in any active tunnel", randomEndpoint)
+			return
+		}
+		tunnelName = foundTunnel
+		endpointName = randomEndpoint
+		tunnelKey = tunnelName // for stats
+		log.Printf("[TUNNEL] Using server-level endpoint '%s' via tunnel '%s'", endpointName, tunnelName)
+
+	} else if len(serverTunnelNames) > 0 {
+		// Priority 4: server级别的tunnels配置
+		isTunnelRequest = true
+		foundTunnel, foundEndpoint, err := p.tunnelManager.GetRandomEndpointFromTunnels(serverTunnelNames)
+		if err != nil {
+			isError = true
+			http.Error(w, "No available endpoint for server-level tunnels", http.StatusBadGateway)
+			log.Printf("[TUNNEL] %v", err)
+			return
+		}
+		tunnelName = foundTunnel
+		endpointName = foundEndpoint
+		tunnelKey = tunnelName // for stats
+		log.Printf("[TUNNEL] Using server-level tunnel '%s' to endpoint '%s'", tunnelName, endpointName)
+
+	} else if mapping != nil && len(mapping.endpointNames) > 0 {
+		// Priority 5: mapping级别的endpoints配置（fallback）
 		isTunnelRequest = true
 		randomEndpoint := mapping.endpointNames[rand.Intn(len(mapping.endpointNames))]
 
@@ -346,7 +456,7 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		tunnelKey = tunnelName // for stats
 
 	} else if mapping != nil && len(mapping.tunnelNames) > 0 {
-		// Priority 2: via.tunnels is specified.
+		// Priority 6: mapping级别的tunnels配置（fallback）
 		isTunnelRequest = true
 		foundTunnel, foundEndpoint, err := p.tunnelManager.GetRandomEndpointFromTunnels(mapping.tunnelNames)
 		if err != nil {
