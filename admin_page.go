@@ -295,7 +295,7 @@ var admin_page_content = `
                 <h4>在线 Endpoint</h4>
                 <div class="table-wrap mt-1">
                   <table class="bx--data-table carbon-table">
-                    <thead><tr><th>名称</th><th>远程地址</th><th>上线时间</th><th>最后传输</th><th>延迟</th><th>请求数</th><th>错误数</th><th>QPS</th><th>发送字节 (总/均/最小/最大)</th><th>接收字节 (总/均/最小/最大)</th><th>响应时间 (平均/最短/最长 ms)</th></tr></thead>
+                    <thead><tr><th>名称</th><th>远程地址</th><th>上线时间</th><th>最后传输</th><th>延迟</th><th>请求数</th><th>错误数</th><th>QPS (平均/最小/最大)</th><th>发送字节 (总/均/最小/最大)</th><th>接收字节 (总/均/最小/最大)</th><th>响应时间 (平均/最短/最长 ms)</th></tr></thead>
                     <tbody id="tunnel-endpoints-tbody"></tbody>
                   </table>
                 </div>
@@ -578,6 +578,15 @@ var admin_page_content = `
       return String(n);
     }
 
+    function fmtQPS(qps) {
+      if (!qps || typeof qps !== 'object') return "-";
+      const avg = qps.avg;
+      const min = qps.min;
+      const max = qps.max;
+      if (avg == null || min == null || max == null) return "-";
+      return fmtNum(avg) + " (min:" + fmtNum(min) + ", max:" + fmtNum(max) + ")";
+    }
+
     function renderRaw(stats) {
       const el = document.getElementById("stats-raw");
       el.textContent = JSON.stringify(stats, null, 2);
@@ -764,7 +773,7 @@ async function loadTunnelEndpoints(tunnelName) {
         "<td>" + (ep.lastActivity || "-") + "</td>" +
         "<td>" + (stats.requestCount ?? "-") + "</td>" +
         "<td>" + (stats.errors ?? "-") + "</td>" +
-        "<td>" + fmtNum(stats.qps) + "</td>" +
+        "<td>" + fmtQPS(stats.qps) + "</td>" +
         "<td>" + (bytesSent.total ?? "-") + " / " + fmtNum(bytesSent.avg) + " / " + (bytesSent.min ?? "-") + " / " + (bytesSent.max ?? "-") + "</td>" +
         "<td>" + (bytesRecv.total ?? "-") + " / " + fmtNum(bytesRecv.avg) + " / " + (bytesRecv.min ?? "-") + " / " + (bytesRecv.max ?? "-") + "</td>" +
         "<td>" + fmtNum(responseTime.avgMs) + " / " + (responseTime.minMs ?? "-") + " / " + (responseTime.maxMs ?? "-") + "</td>";
