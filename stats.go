@@ -25,6 +25,14 @@ type TimeMetric struct {
 	Max   int64
 }
 
+// QPSMetric holds aggregated values for QPS (Queries Per Second) metrics.
+type QPSMetric struct {
+	Total float64 // 总QPS值
+	Avg   float64 // 平均QPS值
+	Min   float64 // 最小QPS值
+	Max   float64 // 最大QPS值
+}
+
 // Metrics holds all metrics for a specific entity (like a rule, user, etc.).
 type Metrics struct {
 	RequestCount uint64
@@ -32,6 +40,7 @@ type Metrics struct {
 	BytesSent    NumericMetric
 	BytesRecv    NumericMetric
 	ResponseTime TimeMetric
+	QPS          QPSMetric // QPS统计信息
 
 	firstRequestTime time.Time
 	lastRequestTime  time.Time
@@ -73,6 +82,7 @@ func (sc *StatsCollector) getMetrics(m *sync.Map, key string) *Metrics {
 		ResponseTime: TimeMetric{Min: -1},
 		BytesSent:    NumericMetric{Min: ^uint64(0)},
 		BytesRecv:    NumericMetric{Min: ^uint64(0)},
+		QPS:          QPSMetric{Min: -1}, // QPS初始值设为-1表示未初始化
 	})
 	return metrics.(*Metrics)
 }
@@ -183,12 +193,47 @@ func (sc *StatsCollector) updateMetricsForDim(m *sync.Map, key string, data Reco
 		metrics.ResponseTime.Max = responseTimeNs
 	}
 
-	// QPS timing
+	// QPS timing and statistics
 	now := time.Now()
 	if metrics.firstRequestTime.IsZero() {
 		metrics.firstRequestTime = now
 	}
 	metrics.lastRequestTime = now
+	
+	// 获取当前请求计数
+	currentRequestCount := atomic.LoadUint64(&metrics.RequestCount)
+	
+	// 计算当前QPS值
+	var currentQPS float64
+	if !metrics.firstRequestTime.IsZero() && !metrics.lastRequestTime.IsZero() {
+		duration := metrics.lastRequestTime.Sub(metrics.firstRequestTime).Seconds()
+		if duration > 1 {
+			currentQPS = float64(currentRequestCount) / duration
+		} else {
+			currentQPS = float64(currentRequestCount)
+		}
+	}
+	
+	// 更新QPS统计信息
+	metrics.QPS.Total = currentQPS
+	if metrics.QPS.Min == -1 {
+		// 第一次初始化，所有值都设为当前QPS
+		metrics.QPS.Min = currentQPS
+		metrics.QPS.Max = currentQPS
+		metrics.QPS.Avg = currentQPS
+	} else {
+		// 更新min/max值
+		if currentQPS < metrics.QPS.Min {
+			metrics.QPS.Min = currentQPS
+		}
+		if currentQPS > metrics.QPS.Max {
+			metrics.QPS.Max = currentQPS
+		}
+		// 计算QPS平均值（基于总请求数和时间窗口）
+		if currentRequestCount > 0 {
+			metrics.QPS.Avg = currentQPS // 在当前时间窗口内，avg就是当前QPS值
+		}
+	}
 }
 
 // Public facing structs for JSON marshaling
@@ -206,13 +251,19 @@ type PublicTimeMetric struct {
 	MaxMs   int64   `json:"maxMs"`
 }
 
+type PublicQPSMetric struct {
+	Avg float64 `json:"avg"`
+	Min float64 `json:"min"`
+	Max float64 `json:"max"`
+}
+
 type PublicMetrics struct {
 	RequestCount uint64              `json:"requestCount"`
 	Errors       uint64              `json:"errors"`
 	BytesSent    PublicNumericMetric `json:"bytesSent"`
 	BytesRecv    PublicNumericMetric `json:"bytesRecv"`
 	ResponseTime PublicTimeMetric    `json:"responseTime"`
-	QPS          float64             `json:"qps"`
+	QPS          PublicQPSMetric     `json:"qps"`
 }
 
 type PublicStats struct {
@@ -274,7 +325,7 @@ func (sc *StatsCollector) buildPublicMetricsMap(m *sync.Map, mask bool, ts time.
 		totalBytesRecv := atomic.LoadUint64(&metrics.BytesRecv.Total)
 		totalResponseTime := atomic.LoadInt64(&metrics.ResponseTime.Total)
 
-		var avgBytesSent, avgBytesRecv, qps float64
+		var avgBytesSent, avgBytesRecv float64
 		var avgResponseTimeMs float64
 		if requestCount > 0 {
 			avgBytesSent = float64(totalBytesSent) / float64(requestCount)
@@ -282,12 +333,34 @@ func (sc *StatsCollector) buildPublicMetricsMap(m *sync.Map, mask bool, ts time.
 			avgResponseTimeMs = float64(totalResponseTime) / float64(requestCount) / 1e6
 		}
 
+		// 构建QPS统计信息（只保留avg、min、max）
+		var qpsMetric PublicQPSMetric
 		if !metrics.firstRequestTime.IsZero() && !metrics.lastRequestTime.IsZero() {
 			duration := metrics.lastRequestTime.Sub(metrics.firstRequestTime).Seconds()
+			var currentQPS float64
 			if duration > 1 {
-				qps = float64(requestCount) / duration
+				currentQPS = float64(requestCount) / duration
 			} else {
-				qps = float64(requestCount)
+				currentQPS = float64(requestCount)
+			}
+			
+			qpsMetric = PublicQPSMetric{
+				Avg: metrics.QPS.Avg,   // 使用内部记录的平均值
+				Min: metrics.QPS.Min,   // 使用内部记录的最小值
+				Max: metrics.QPS.Max,   // 使用内部记录的最大值
+			}
+			
+			// 如果内部min值还是-1（未初始化），则设置为当前值
+			if metrics.QPS.Min == -1 {
+				qpsMetric.Min = currentQPS
+				qpsMetric.Avg = currentQPS
+				qpsMetric.Max = currentQPS
+			}
+		} else {
+			qpsMetric = PublicQPSMetric{
+				Avg: 0,
+				Min: 0,
+				Max: 0,
 			}
 		}
 
@@ -309,7 +382,7 @@ func (sc *StatsCollector) buildPublicMetricsMap(m *sync.Map, mask bool, ts time.
 		publicMap[maskedKey] = &PublicMetrics{
 			RequestCount: requestCount,
 			Errors:       atomic.LoadUint64(&metrics.Errors),
-			QPS:          qps,
+			QPS:          qpsMetric,
 			BytesSent: PublicNumericMetric{
 				Total: totalBytesSent,
 				Avg:   avgBytesSent,

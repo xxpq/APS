@@ -266,10 +266,25 @@ func (h *AdminHandlers) handleTunnelEndpoints(w http.ResponseWriter, r *http.Req
 				// Calculate QPS
 				if !stats.firstRequestTime.IsZero() && !stats.lastRequestTime.IsZero() {
 					duration := stats.lastRequestTime.Sub(stats.firstRequestTime).Seconds()
+					var currentQPS float64
 					if duration > 1 {
-						publicStats.QPS = float64(publicStats.RequestCount) / duration
+						currentQPS = float64(publicStats.RequestCount) / duration
 					} else {
-						publicStats.QPS = float64(publicStats.RequestCount)
+						currentQPS = float64(publicStats.RequestCount)
+					}
+					
+					// 使用内部记录的QPS统计信息，只保留avg、min、max
+					publicStats.QPS = PublicQPSMetric{
+						Avg: stats.QPS.Avg,   // 使用内部记录的平均值
+						Min: stats.QPS.Min,   // 使用内部记录的最小值
+						Max: stats.QPS.Max,   // 使用内部记录的最大值
+					}
+					
+					// 如果内部min值还是-1（未初始化），则设置为当前值
+					if stats.QPS.Min == -1 {
+						publicStats.QPS.Min = currentQPS
+						publicStats.QPS.Avg = currentQPS
+						publicStats.QPS.Max = currentQPS
 					}
 				}
 				stats.mutex.Unlock()
