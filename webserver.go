@@ -212,72 +212,93 @@ func (h *AdminHandlers) handleTunnelEndpoints(w http.ResponseWriter, r *http.Req
 
 	response := struct {
 		Endpoints []PublicEndpointInfo `json:"endpoints"`
+		Tunnel    string               `json:"tunnel"`
 	}{
 		Endpoints: make([]PublicEndpointInfo, 0),
+		Tunnel:    tunnelName,
 	}
 
 	tunnel.mu.RLock()
+	log.Printf("[DEBUG] handleTunnelEndpoints: Processing tunnel '%s', found %d endpoint pools", tunnelName, len(tunnel.streams))
 	for endpointName, pool := range tunnel.streams {
+		log.Printf("[DEBUG] handleTunnelEndpoints: Processing endpoint '%s', pool has %d streams", endpointName, len(pool.streams))
 		pool.mu.RLock()
 		for _, stream := range pool.streams {
 			stream.Mu.Lock()
-			stats := stream.Stats
-			stats.mutex.Lock()
-			// Create a copy of metrics to avoid holding the lock during JSON marshal
-			requestCount := atomic.LoadUint64(&stats.RequestCount)
-			publicStats := &PublicMetrics{
-				RequestCount: requestCount,
-				Errors:       atomic.LoadUint64(&stats.Errors),
-				BytesSent: PublicNumericMetric{
-					Total: atomic.LoadUint64(&stats.BytesSent.Total),
-					Avg:   0, // Will be calculated if needed
-					Min:   stats.BytesSent.Min,
-					Max:   stats.BytesSent.Max,
-				},
-				BytesRecv: PublicNumericMetric{
-					Total: atomic.LoadUint64(&stats.BytesRecv.Total),
-					Avg:   0, // Will be calculated if needed
-					Min:   stats.BytesRecv.Min,
-					Max:   stats.BytesRecv.Max,
-				},
-				ResponseTime: PublicTimeMetric{
-					TotalMs: float64(atomic.LoadInt64(&stats.ResponseTime.Total)) / 1e6,
-					AvgMs:   0, // Will be calculated if needed
-					MinMs:   stats.ResponseTime.Min / 1e6,
-					MaxMs:   stats.ResponseTime.Max / 1e6,
-				},
-			}
-			// Calculate averages
-			if publicStats.RequestCount > 0 {
-				publicStats.BytesSent.Avg = float64(publicStats.BytesSent.Total) / float64(publicStats.RequestCount)
-				publicStats.BytesRecv.Avg = float64(publicStats.BytesRecv.Total) / float64(publicStats.RequestCount)
-				publicStats.ResponseTime.AvgMs = float64(atomic.LoadInt64(&stats.ResponseTime.Total)) / float64(publicStats.RequestCount) / 1e6
-			}
-			// Calculate QPS
-			if !stats.firstRequestTime.IsZero() && !stats.lastRequestTime.IsZero() {
-				duration := stats.lastRequestTime.Sub(stats.firstRequestTime).Seconds()
-				if duration > 1 {
-					publicStats.QPS = float64(publicStats.RequestCount) / duration
-				} else {
-					publicStats.QPS = float64(publicStats.RequestCount)
+			log.Printf("[DEBUG] handleTunnelEndpoints: Processing stream for endpoint '%s', RemoteAddr: '%s', OnlineTime: '%v', LastActivityTime: '%v'",
+				endpointName, stream.RemoteAddr, stream.OnlineTime, stream.LastActivityTime)
+			
+			// Safely handle stats - always try to get stats if available
+			var publicStats *PublicMetrics
+			if stream.Stats != nil {
+				stats := stream.Stats
+				stats.mutex.Lock()
+				// Create a copy of metrics to avoid holding the lock during JSON marshal
+				requestCount := atomic.LoadUint64(&stats.RequestCount)
+				publicStats = &PublicMetrics{
+					RequestCount: requestCount,
+					Errors:       atomic.LoadUint64(&stats.Errors),
+					BytesSent: PublicNumericMetric{
+						Total: atomic.LoadUint64(&stats.BytesSent.Total),
+						Avg:   0, // Will be calculated if needed
+						Min:   stats.BytesSent.Min,
+						Max:   stats.BytesSent.Max,
+					},
+					BytesRecv: PublicNumericMetric{
+						Total: atomic.LoadUint64(&stats.BytesRecv.Total),
+						Avg:   0, // Will be calculated if needed
+						Min:   stats.BytesRecv.Min,
+						Max:   stats.BytesRecv.Max,
+					},
+					ResponseTime: PublicTimeMetric{
+						TotalMs: float64(atomic.LoadInt64(&stats.ResponseTime.Total)) / 1e6,
+						AvgMs:   0, // Will be calculated if needed
+						MinMs:   stats.ResponseTime.Min / 1e6,
+						MaxMs:   stats.ResponseTime.Max / 1e6,
+					},
 				}
+				// Calculate averages
+				if publicStats.RequestCount > 0 {
+					publicStats.BytesSent.Avg = float64(publicStats.BytesSent.Total) / float64(publicStats.RequestCount)
+					publicStats.BytesRecv.Avg = float64(publicStats.BytesRecv.Total) / float64(publicStats.RequestCount)
+					publicStats.ResponseTime.AvgMs = float64(atomic.LoadInt64(&stats.ResponseTime.Total)) / float64(publicStats.RequestCount) / 1e6
+				}
+				// Calculate QPS
+				if !stats.firstRequestTime.IsZero() && !stats.lastRequestTime.IsZero() {
+					duration := stats.lastRequestTime.Sub(stats.firstRequestTime).Seconds()
+					if duration > 1 {
+						publicStats.QPS = float64(publicStats.RequestCount) / duration
+					} else {
+						publicStats.QPS = float64(publicStats.RequestCount)
+					}
+				}
+				stats.mutex.Unlock()
 			}
-			stats.mutex.Unlock()
 
-			// Measure latency for this endpoint
-			latency, latencyErr := h.tunnelManager.MeasureEndpointLatency(tunnelName, endpointName)
-			latencyStr := "-"
-			if latencyErr == nil {
-				latencyStr = latency.Round(time.Millisecond).String()
+			// Remove latency measurement to avoid API hanging - latency detection causes channel congestion
+			latencyStr := "-" // Always show "-" for latency to avoid performance issues
+
+			// 显示标准时间格式而不是相对时间
+			onlineTimeStr := "-"
+			if !stream.OnlineTime.IsZero() {
+				onlineTimeStr = stream.OnlineTime.Format("2006-01-02 15:04:05")
 			}
+			
+			lastActivityStr := "-"
+			if !stream.LastActivityTime.IsZero() {
+				lastActivityStr = stream.LastActivityTime.Format("2006-01-02 15:04:05")
+			}
+
+			log.Printf("[DEBUG] handleTunnelEndpoints: Adding endpoint '%s' with RemoteAddr: '%s', OnlineTime: '%s', LastActivity: '%s', Latency: '%s' (measurement disabled)",
+				endpointName, stream.RemoteAddr, onlineTimeStr, lastActivityStr, latencyStr)
 
 			response.Endpoints = append(response.Endpoints, PublicEndpointInfo{
 				Name:         endpointName,
 				Online:       true, // We only iterate over online streams
 				RemoteAddr:   stream.RemoteAddr,
-				OnlineTime:   formatDuration(stream.OnlineTime),
-				LastActivity: formatDuration(stream.LastActivityTime),
-				Latency:      latencyStr,
+				OnlineTime:   onlineTimeStr,      // 标准时间格式
+				LastActivity: lastActivityStr,    // 标准时间格式
+				Latency:      latencyStr, // Always "-" to avoid performance issues
 				Stats:        publicStats,
 			})
 			stream.Mu.Unlock()
@@ -286,6 +307,8 @@ func (h *AdminHandlers) handleTunnelEndpoints(w http.ResponseWriter, r *http.Req
 		pool.mu.RUnlock()
 	}
 	tunnel.mu.RUnlock()
+	
+	log.Printf("[DEBUG] handleTunnelEndpoints: Final response has %d endpoints", len(response.Endpoints))
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(response)

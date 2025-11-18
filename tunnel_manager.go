@@ -72,7 +72,7 @@ func NewTunnelManager(config *Config) *TunnelManager {
 }
 
 // RegisterEndpointStream validates a new stream and adds it to the appropriate pool.
-func (tm *TunnelManager) RegisterEndpointStream(tunnelName, endpointName, password string, stream pb.TunnelService_EstablishServer) (*EndpointStream, error) {
+func (tm *TunnelManager) RegisterEndpointStream(tunnelName, endpointName, password string, stream pb.TunnelService_EstablishServer, remoteAddr string) (*EndpointStream, error) {
 	tm.mu.RLock()
 	tunnel, exists := tm.tunnels[tunnelName]
 	tm.mu.RUnlock()
@@ -88,6 +88,10 @@ func (tm *TunnelManager) RegisterEndpointStream(tunnelName, endpointName, passwo
 		ID:              generateRequestID(),
 		Stream:          stream,
 		PendingRequests: make(map[string]chan *pb.Response),
+		// 设置连接时的基本信息
+		RemoteAddr:       remoteAddr, // 使用传入的远程地址
+		OnlineTime:       time.Now(),
+		LastActivityTime: time.Now(),
 	}
 
 	tunnel.mu.Lock()
@@ -143,6 +147,8 @@ func (tm *TunnelManager) HandleIncomingMessage(msg *pb.EndpointToServer) {
 						ch <- resp
 						delete(stream.PendingRequests, resp.Id)
 					}
+					// 更新最后活动时间 - 每次消息传输时刷新
+					stream.LastActivityTime = time.Now()
 					stream.Mu.Unlock()
 				}
 				pool.mu.RUnlock()

@@ -92,8 +92,8 @@ go build .
 - `dump`: (可选) `string`。HAR 文件路径，用于记录通过此服务器的所有流量。
 - `public`: (可选) `boolean`。默认 `true`。为 `true` 时监听 `0.0.0.0:port`，为 `false` 时仅监听 `127.0.0.1:port`。
 - `panel`: (可选) `boolean`。默认 `false`。为 `true` 时注册管理端路由 `/.api/*` 与 `/.admin/`；为 `false` 时不注册这些路由（`/.replay` 始终可用）。
-- `endpoint`: (可选) `string` 或 `array` of `string`。服务级默认端点标签，用于标识或未来的默认路由参考。当前版本的请求转发以规则级 `via.tunnels`/`via.endpoints` 为准，`servers.endpoint` 不参与路由决策。
-- `tunnel`: (可选) `string` 或 `array` of `string`。服务级默认隧道标签。当前版本的请求转发以规则级 `via.tunnels` 为准；隧道接入是否允许由 `tunnels.<name>.servers` 指定，服务在被指定后会开放 `/.tunnel` 供端点客户端连接。
+- `endpoint`: (可选) `string` 或 `array` of `string`。服务级端点配置，用于请求转发。当请求未命中mapping规则时，如果server配置了endpoints，请求将被转发到这些端点。
+- `tunnel`: (可选) `string` 或 `array` of `string`。服务级隧道配置，用于请求转发。当请求未命中mapping规则时，如果server配置了tunnels，请求将通过这些隧道转发。
 - `ConnectionPolicies` & `TrafficPolicies`: (可选) 为此服务器上的所有连接设置默认策略。
 
 **示例:**
@@ -271,11 +271,14 @@ go run ./endpoint/main.go -server 127.0.0.1:3000 -tunnel my-secure-tunnel -name 
 
 - `via.tunnels`: 选择一个或多个隧道名称，系统将从目标隧道中随机挑选在线端点转发请求；若隧道内无在线端点则回退为直连。
 - `via.endpoints`: 直接按名称选择一个或多个具体端点（跨隧道全局查找），随机挑选在线实例；若目标端点离线则回退为直连。
+- **Server级别配置**：除了映射规则中的`via`配置，还可以在`servers`级别配置`endpoint`和`tunnel`字段：
+  - 当请求未命中任何mapping规则时，如果server配置了`endpoints`或`tunnels`，请求仍会被转发到相应的端点
+  - 这提供了更灵活的路由能力，即使在没有匹配规则的情况下也能将请求转发到指定端点
 - 使用步骤：
 
   1) 在配置中定义 `tunnels` 并将其绑定到一个或多个监听 `servers`（详见本文下方 `tunnels` 小节）。
   2) 在目标机器上运行端点客户端，使其以某个 `-name` 挂到指定 `-tunnel` 下。
-  3) 在映射规则中使用 `via.tunnels` 或 `via.endpoints` 字段进行路由。
+  3) 在映射规则中使用 `via.tunnels` 或 `via.endpoints` 字段进行路由，或在server级别配置`endpoint`/`tunnel`字段。
 - 端点客户端启动示例：
 
 ```bash
@@ -302,6 +305,20 @@ go run ./endpoint/main.go -server 127.0.0.1:3000 -tunnel my-secure-tunnel -name 
   "to": "https://remote-app.com/*",
   "via": {
     "endpoints": ["app-instance-1", "app-instance-2"]
+  }
+}
+```
+
+- Server级别端点配置示例（未命中mapping时仍然转发）：
+
+```json
+{
+  "servers": {
+    "main-gateway": {
+      "port": 443,
+      "cert": "auto",
+      "endpoints": ["fallback-instance-1", "fallback-instance-2"]
+    }
   }
 }
 ```
@@ -384,6 +401,19 @@ go run ./endpoint/main.go -server 127.0.0.1:3000 -tunnel my-secure-tunnel -name 
 
 例如，如果服务器限制 `1mbps`，用户限制 `500kbps`，则最终速率为 `500kbps`。
 
+**端点/隧道配置优先级**:
+当请求需要转发到端点或隧道时，优先级顺序为：用户 -> 组 -> 服务器 -> 映射规则（作为fallback）
+
+具体规则：
+- **用户级别**：用户在 `auth.users.<user>.endpoint` 或 `auth.users.<user>.tunnel` 中指定的配置具有最高优先级
+- **组级别**：当用户级别没有配置时，使用用户所属组的 `auth.groups.<group>.endpoint` 或 `auth.groups.<group>.tunnel` 配置
+- **服务器级别**：当用户和组级别都没有配置时，使用 `servers.<server>.endpoint` 或 `servers.<server>.tunnel` 配置
+- **映射规则级别**：当以上级别都没有配置时，作为fallback使用映射规则中的 `via.endpoints` 或 `via.tunnels` 配置
+
+**未命中mapping的处理**：
+- 如果请求未命中任何mapping规则，但有任何级别（用户/组/服务器）的Endpoints/Tunnels配置，请求仍会被转发到相应的端点
+- 只有在既未命中mapping规则，也没有任何级别的Endpoints/Tunnels配置时，才会返回404错误
+
 **示例:**
 
 ```json
@@ -392,20 +422,32 @@ go run ./endpoint/main.go -server 127.0.0.1:3000 -tunnel my-secure-tunnel -name 
     "john": {
       "password": "password123",
       "groups": ["developers"],
-      "trafficQuota": "10gb"
+      "trafficQuota": "10gb",
+      "endpoint": ["john-instance-1", "john-instance-2"]
     },
     "guest": {
       "password": "guest",
       "rateLimit": "100kbps"
+    },
+    "special-user": {
+      "password": "special123",
+      "tunnel": ["user-tunnel-1", "user-tunnel-2"]
     }
   },
   "groups": {
     "developers": {
-      "rateLimit": "10mbps"
+      "rateLimit": "10mbps",
+      "tunnel": ["group-tunnel-1"]
     }
   }
 }
 ```
+
+**用户/组端点配置优先级示例：**
+- 用户`john`有自己的`endpoint`配置，将优先使用用户级别的端点
+- 用户`special-user`有自己的`tunnel`配置，将优先使用用户级别的隧道
+- 用户`john`也属于`developers`组，但由于用户级别已有配置，组级别的`tunnel`配置不会被使用
+- 用户`guest`没有用户级别的配置，如果属于某个有`endpoint`或`tunnel`配置的组，将使用组级别的配置
 
 ### `scripting`
 

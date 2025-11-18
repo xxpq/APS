@@ -9,6 +9,7 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
 
 	pb "aps/tunnelpb"
@@ -78,8 +79,18 @@ func (s *TunnelServer) Establish(stream pb.TunnelService_EstablishServer) error 
 		return status.Errorf(codes.InvalidArgument, "The first message must be a RegistrationRequest")
 	}
 
+	// 获取客户端远程地址
+	remoteAddr := "unknown"
+	if peer, ok := peer.FromContext(stream.Context()); ok {
+		if addr, ok := peer.Addr.(*net.TCPAddr); ok {
+			remoteAddr = addr.String()
+		} else {
+			remoteAddr = peer.Addr.String()
+		}
+	}
+
 	// 2. Authenticate and register the endpoint stream.
-	endpointStream, err := s.tunnelManager.RegisterEndpointStream(reg.TunnelName, reg.EndpointName, reg.Password, stream)
+	endpointStream, err := s.tunnelManager.RegisterEndpointStream(reg.TunnelName, reg.EndpointName, reg.Password, stream, remoteAddr)
 	if err != nil {
 		return status.Errorf(codes.Unauthenticated, "Failed to register endpoint: %v", err)
 	}

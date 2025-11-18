@@ -7,6 +7,7 @@ import (
 	pb "aps/tunnelpb"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
 )
 
@@ -52,7 +53,13 @@ func (s *TunnelServiceServer) Establish(stream pb.TunnelService_EstablishServer)
 
 	log.Printf("[GRPC] New stream attempt for tunnel '%s', endpoint '%s'", tunnelName, endpointName)
 
-	endpointStream, err := s.tunnelManager.RegisterEndpointStream(tunnelName, endpointName, password, stream)
+	// 获取客户端远程地址
+	remoteAddr := "unknown"
+	if peer, ok := peer.FromContext(stream.Context()); ok {
+		remoteAddr = peer.Addr.String()
+	}
+
+	endpointStream, err := s.tunnelManager.RegisterEndpointStream(tunnelName, endpointName, password, stream, remoteAddr)
 	if err != nil {
 		log.Printf("[GRPC] Failed to register stream for endpoint '%s': %v", endpointName, err)
 		return status.Errorf(codes.Unauthenticated, "failed to register stream: %v", err)
