@@ -171,6 +171,7 @@ type EndpointConfig struct {
 	GRPC        *GRPCConfig            `json:"grpc,omitempty"`
 	WebSocket   *WebSocketConfig       `json:"websocket,omitempty"`
 	Script      string                 `json:"script,omitempty"`
+	IPs         interface{}            `json:"ips,omitempty"`         // 支持 string 或 []string，指定目标IP地址
 }
 
 // GetHeader 获取 header 值，如果是数组则随机选择一个
@@ -239,6 +240,14 @@ func (ec *EndpointConfig) GetAllHeaders() (map[string]string, []string) {
 	}
 
 	return result, toRemove
+}
+
+// GetIPs 获取 IPs 配置，支持单个字符串或字符串数组
+func (ec *EndpointConfig) GetIPs() []string {
+	if ec.IPs == nil {
+		return nil
+	}
+	return parseStringOrArray(ec.IPs)
 }
 
 // GetQueryString 获取要修改的查询参数

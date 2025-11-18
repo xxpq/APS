@@ -274,7 +274,29 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		requestBody = bytes.NewBuffer(modifiedBody)
 	}
 
-	proxyReq, err := http.NewRequest(r.Method, targetURL, requestBody)
+	// 处理IPS参数：如果mapping配置了ips，则随机选择一个IP并替换目标地址
+	var actualTargetURL = targetURL
+	var selectedIP string
+	if matched && mapping != nil {
+		toConfig := mapping.GetToConfig()
+		if toConfig != nil {
+			ips := toConfig.GetIPs()
+			if len(ips) > 0 {
+				selectedIP = pickRandomIP(ips)
+				if selectedIP != "" {
+					newURL, err := replaceHostWithIP(targetURL, selectedIP)
+					if err != nil {
+						log.Printf("[IPS] Error replacing host with IP: %v", err)
+					} else {
+						actualTargetURL = newURL
+						log.Printf("[IPS] Selected IP %s for target %s, new URL: %s", selectedIP, targetURL, actualTargetURL)
+					}
+				}
+			}
+		}
+	}
+
+	proxyReq, err := http.NewRequest(r.Method, actualTargetURL, requestBody)
 	if err != nil {
 		isError = true
 		http.Error(w, "Failed to create proxy request", http.StatusInternalServerError)
@@ -299,8 +321,18 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 
 	copyHeaders(proxyReq.Header, r.Header)
 	targetParsed, _ := url.Parse(targetURL)
-	proxyReq.Host = targetParsed.Host
-	proxyReq.Header.Set("Host", targetParsed.Host)
+	
+	// 如果使用了IPS参数，保持原始主机名作为Host头
+	if selectedIP != "" {
+		originalParsed, _ := url.Parse(targetURL)
+		proxyReq.Host = originalParsed.Host
+		proxyReq.Header.Set("Host", originalParsed.Host)
+		log.Printf("[IPS] Preserving original Host header: %s", originalParsed.Host)
+	} else {
+		proxyReq.Host = targetParsed.Host
+		proxyReq.Header.Set("Host", targetParsed.Host)
+	}
+	
 	proxyReq.Header.Set("X-Forwarded-For", getClientIP(r))
 	proxyReq.Header.Set("X-Forwarded-Host", r.Host)
 	proxyReq.Header.Set("X-Forwarded-Proto", getScheme(r))

@@ -1,7 +1,9 @@
 package main
 
 import (
+	"math/rand"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -124,4 +126,44 @@ func (p *MapRemoteProxy) buildOriginalURL(r *http.Request) string {
 	}
 
 	return originalURL
+}
+
+// pickRandomIP 从IP列表中随机选择一个IP地址
+func pickRandomIP(ips []string) string {
+	if len(ips) == 0 {
+		return ""
+	}
+	if len(ips) == 1 {
+		return ips[0]
+	}
+	return ips[rand.Intn(len(ips))]
+}
+
+// replaceHostWithIP 将URL中的主机名替换为指定的IP地址
+func replaceHostWithIP(originalURL string, ip string) (string, error) {
+	parsedURL, err := url.Parse(originalURL)
+	if err != nil {
+		return "", err
+	}
+
+	// 保留原始主机名作为Host头，只替换连接目标
+	originalHost := parsedURL.Host
+	if strings.Contains(originalHost, ":") {
+		// 如果原始主机包含端口，保留端口
+		hostParts := strings.Split(originalHost, ":")
+		if len(hostParts) == 2 {
+			parsedURL.Host = ip + ":" + hostParts[1]
+		} else {
+			parsedURL.Host = ip
+		}
+	} else {
+		// 如果没有端口，根据协议添加默认端口
+		if parsedURL.Scheme == "https" {
+			parsedURL.Host = ip + ":443"
+		} else {
+			parsedURL.Host = ip + ":80"
+		}
+	}
+
+	return parsedURL.String(), nil
 }

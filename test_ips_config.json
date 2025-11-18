@@ -1,0 +1,28 @@
+{
+  "servers": {
+    "default": {
+      "port": 9090,
+      "public": true
+    }
+  },
+  "mappings": [
+    {
+      "from": "http://test.example.com/*",
+      "to": {
+        "url": "http://backend.example.com/*",
+        "ips": ["192.168.1.100", "192.168.1.101"]
+      }
+    },
+    {
+      "from": "http://singleip.example.com/*",
+      "to": {
+        "url": "http://backend2.example.com/*",
+        "ips": "10.0.0.50"
+      }
+    },
+    {
+      "from": "http://normal.example.com/*",
+      "to": "http://normal.backend.com/*"
+    }
+  ]
+}
