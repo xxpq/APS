@@ -1,0 +1,35 @@
+{
+  "servers": {
+    "tunnel_server": {
+      "port": 9090,
+      "cert": "auto",
+      "panel": true,
+      "endpoints": ["test-endpoint-1", "test-endpoint-2"],
+      "tunnels": ["test-tunnel"]
+    }
+  },
+  "tunnels": {
+    "test-tunnel": {
+      "servers": ["tunnel_server"],
+      "password": "test-password"
+    }
+  },
+  "auth": {
+    "users": {
+      "admin": {
+        "password": "admin123",
+        "admin": true
+      }
+    }
+  },
+  "mappings": [
+    {
+      "servers": "tunnel_server",
+      "from": "https://test.example.com/*",
+      "to": "https://backend.example.com/*",
+      "via": {
+        "tunnels": ["test-tunnel"]
+      }
+    }
+  ]
+}

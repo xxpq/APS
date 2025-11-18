@@ -21,9 +21,10 @@ import (
 
 // TunnelManager manages all active tunnel connections from endpoints
 type TunnelManager struct {
-	mu      sync.RWMutex
-	tunnels map[string]*Tunnel // tunnelName -> Tunnel
-	config  *Config
+	mu             sync.RWMutex
+	tunnels        map[string]*Tunnel // tunnelName -> Tunnel
+	config         *Config
+	statsCollector *StatsCollector    // 统一的统计收集器
 }
 
 // Tunnel represents a named tunnel with multiple endpoint connections
@@ -54,10 +55,11 @@ type EndpointStream struct {
 	Stats           *Metrics
 }
 
-func NewTunnelManager(config *Config) *TunnelManager {
+func NewTunnelManager(config *Config, statsCollector *StatsCollector) *TunnelManager {
 	tm := &TunnelManager{
-		tunnels: make(map[string]*Tunnel),
-		config:  config,
+		tunnels:        make(map[string]*Tunnel),
+		config:         config,
+		statsCollector: statsCollector,
 	}
 	if config.Tunnels != nil {
 		for name, tConfig := range config.Tunnels {
@@ -69,6 +71,13 @@ func NewTunnelManager(config *Config) *TunnelManager {
 		}
 	}
 	return tm
+}
+
+// SetStatsCollector 设置统计收集器（用于延迟初始化）
+func (tm *TunnelManager) SetStatsCollector(statsCollector *StatsCollector) {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	tm.statsCollector = statsCollector
 }
 
 // RegisterEndpointStream validates a new stream and adds it to the appropriate pool.
@@ -92,6 +101,12 @@ func (tm *TunnelManager) RegisterEndpointStream(tunnelName, endpointName, passwo
 		RemoteAddr:       remoteAddr, // 使用传入的远程地址
 		OnlineTime:       time.Now(),
 		LastActivityTime: time.Now(),
+		// 初始化统计信息 - 修复初始值设置
+		Stats: &Metrics{
+			ResponseTime: TimeMetric{Min: -1},  // -1 表示未初始化
+			BytesSent:    NumericMetric{Min: 0}, // 正确的初始值
+			BytesRecv:    NumericMetric{Min: 0}, // 正确的初始值
+		},
 	}
 
 	tunnel.mu.Lock()
@@ -302,6 +317,7 @@ func (tm *TunnelManager) GetEndpointsInfo(tunnelName string) map[string]*Endpoin
 }
 
 // SendRequest sends a request to an endpoint and waits for a response.
+// 同时将统计数据记录到统一的StatsCollector系统中，实现集中式管理
 func (tm *TunnelManager) SendRequest(ctx context.Context, tunnelName, endpointName string, reqPayload *RequestPayload) ([]byte, error) {
 	tm.mu.RLock()
 	tunnel, exists := tm.tunnels[tunnelName]
@@ -355,8 +371,14 @@ func (tm *TunnelManager) SendRequest(ctx context.Context, tunnelName, endpointNa
 		return nil, status.Errorf(codes.Aborted, "failed to send request to endpoint: %v", err)
 	}
 
+	// 记录请求开始时间，用于计算响应时间
+	startTime := time.Now()
+	
 	select {
 	case resp := <-respCh:
+		// 计算响应时间
+		responseTime := time.Since(startTime)
+		
 		if resp.GetError() != "" {
 			return nil, errors.New(resp.GetError())
 		}
@@ -364,6 +386,69 @@ func (tm *TunnelManager) SendRequest(ctx context.Context, tunnelName, endpointNa
 		if err != nil {
 			return nil, status.Errorf(codes.Internal, "failed to decrypt response: %v", err)
 		}
+		
+		// 同时更新端点本地统计和统一的StatsCollector系统
+		if stream.Stats != nil {
+			stream.Stats.mutex.Lock()
+			stream.Stats.RequestCount++
+			stream.Stats.BytesSent.Total += uint64(len(reqPayload.Data))
+			stream.Stats.BytesRecv.Total += uint64(len(decryptedData))
+			
+			// 更新响应时间统计
+			responseTimeNs := responseTime.Nanoseconds()
+			stream.Stats.ResponseTime.Total += responseTimeNs
+			if stream.Stats.ResponseTime.Min == -1 || responseTimeNs < stream.Stats.ResponseTime.Min {
+				stream.Stats.ResponseTime.Min = responseTimeNs
+			}
+			if responseTimeNs > stream.Stats.ResponseTime.Max {
+				stream.Stats.ResponseTime.Max = responseTimeNs
+			}
+			
+			// 更新QPS时间记录
+			now := time.Now()
+			if stream.Stats.firstRequestTime.IsZero() {
+				stream.Stats.firstRequestTime = now
+			}
+			stream.Stats.lastRequestTime = now
+			
+			// 更新min/max值 - 需要互斥锁保护
+			bytesSent := uint64(len(reqPayload.Data))
+			bytesRecv := uint64(len(decryptedData))
+			
+			if stream.Stats.BytesSent.Min == 0 || bytesSent < stream.Stats.BytesSent.Min {
+				stream.Stats.BytesSent.Min = bytesSent
+			}
+			if bytesSent > stream.Stats.BytesSent.Max {
+				stream.Stats.BytesSent.Max = bytesSent
+			}
+			
+			if stream.Stats.BytesRecv.Min == 0 || bytesRecv < stream.Stats.BytesRecv.Min {
+				stream.Stats.BytesRecv.Min = bytesRecv
+			}
+			if bytesRecv > stream.Stats.BytesRecv.Max {
+				stream.Stats.BytesRecv.Max = bytesRecv
+			}
+			
+			stream.Stats.mutex.Unlock()
+		}
+		
+		// 同时记录到统一的StatsCollector系统 - 实现集中式管理
+		// 格式：tunnelName.endpointName，体现层级关系
+		endpointStatsKey := fmt.Sprintf("%s.%s", tunnelName, endpointName)
+		if tm.statsCollector != nil {
+			tm.statsCollector.Record(RecordData{
+				RuleKey:      "", // 端点级别不需要rule key
+				UserKey:      "", // 端点级别不需要user key
+				ServerKey:    "", // 端点级别不需要server key
+				TunnelKey:    endpointStatsKey, // 使用组合键体现层级关系
+				ProxyKey:     "",
+				BytesSent:    uint64(len(reqPayload.Data)),
+				BytesRecv:    uint64(len(decryptedData)),
+				ResponseTime: responseTime, // 记录实际的响应时间
+				IsError:      false,
+			})
+		}
+		
 		return decryptedData, nil
 	case <-ctx.Done():
 		// Notify endpoint of cancellation

@@ -140,10 +140,13 @@ func main() {
 	harManager := NewHarLoggerManager(config)
 	defer harManager.Shutdown()
 
-	tunnelManager := NewTunnelManager(config)
+	tunnelManager := NewTunnelManager(config, nil) // 先创建tunnelManager，statsCollector稍后再传入
 	scriptRunner := NewScriptRunner(config.Scripting)
 	trafficShaper := NewTrafficShaper(dataStore.QuotaUsage)
 	statsCollector := NewStatsCollector(config)
+	
+	// 设置tunnelManager的statsCollector，实现端点统计的集中式管理
+	tunnelManager.SetStatsCollector(statsCollector)
 	replayManager := NewReplayManager(config)
 
 	serverManager := NewServerManager(config, *configFile, dataStore, harManager, tunnelManager, scriptRunner, trafficShaper, statsCollector, replayManager)

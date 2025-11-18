@@ -145,20 +145,32 @@ func (sc *StatsCollector) updateMetricsForDim(m *sync.Map, key string, data Reco
 
 	// Bytes Sent
 	atomic.AddUint64(&metrics.BytesSent.Total, data.BytesSent)
-	if data.BytesSent < metrics.BytesSent.Min {
+	// 修复：第一次记录时正确初始化min/max值
+	if metrics.BytesSent.Min == ^uint64(0) {
 		metrics.BytesSent.Min = data.BytesSent
-	}
-	if data.BytesSent > metrics.BytesSent.Max {
 		metrics.BytesSent.Max = data.BytesSent
+	} else {
+		if data.BytesSent < metrics.BytesSent.Min {
+			metrics.BytesSent.Min = data.BytesSent
+		}
+		if data.BytesSent > metrics.BytesSent.Max {
+			metrics.BytesSent.Max = data.BytesSent
+		}
 	}
 
 	// Bytes Recv
 	atomic.AddUint64(&metrics.BytesRecv.Total, data.BytesRecv)
-	if data.BytesRecv < metrics.BytesRecv.Min {
+	// 修复：第一次记录时正确初始化min/max值
+	if metrics.BytesRecv.Min == ^uint64(0) {
 		metrics.BytesRecv.Min = data.BytesRecv
-	}
-	if data.BytesRecv > metrics.BytesRecv.Max {
 		metrics.BytesRecv.Max = data.BytesRecv
+	} else {
+		if data.BytesRecv < metrics.BytesRecv.Min {
+			metrics.BytesRecv.Min = data.BytesRecv
+		}
+		if data.BytesRecv > metrics.BytesRecv.Max {
+			metrics.BytesRecv.Max = data.BytesRecv
+		}
 	}
 
 	// Response Time
