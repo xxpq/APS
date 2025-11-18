@@ -83,21 +83,21 @@ func (s *TunnelServer) Establish(stream pb.TunnelService_EstablishServer) error 
 	if err != nil {
 		return status.Errorf(codes.Unauthenticated, "Failed to register endpoint: %v", err)
 	}
-	defer s.tunnelManager.UnregisterEndpointStream(reg.TunnelName, reg.EndpointName, endpointStream.id)
+	defer s.tunnelManager.UnregisterEndpointStream(reg.TunnelName, reg.EndpointName, endpointStream.ID)
 
-	log.Printf("[GRPC] Endpoint '%s' connected to tunnel '%s' with stream ID %s", reg.EndpointName, reg.TunnelName, endpointStream.id)
+	log.Printf("[GRPC] Endpoint '%s' connected to tunnel '%s' with stream ID %s", reg.EndpointName, reg.TunnelName, endpointStream.ID)
 
 	// 3. Enter a loop to process incoming messages from the endpoint.
 	for {
 		in, err := stream.Recv()
 		if err == io.EOF {
 			// Client closed the stream cleanly.
-			log.Printf("[GRPC] Stream %s for endpoint '%s' closed by client.", endpointStream.id, reg.EndpointName)
+			log.Printf("[GRPC] Stream %s for endpoint '%s' closed by client.", endpointStream.ID, reg.EndpointName)
 			return nil
 		}
 		if err != nil {
 			// An error occurred.
-			log.Printf("[GRPC] Error receiving from stream %s for endpoint '%s': %v", endpointStream.id, reg.EndpointName, err)
+			log.Printf("[GRPC] Error receiving from stream %s for endpoint '%s': %v", endpointStream.ID, reg.EndpointName, err)
 			return err
 		}
 

@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -51,6 +52,14 @@ func (s *SessionStore) Delete(token string) {
 	s.mu.Lock()
 	delete(s.sessions, token)
 	s.mu.Unlock()
+}
+
+// Helper function to format time duration for UI
+func formatDuration(t time.Time) string {
+	if t.IsZero() {
+		return "-"
+	}
+	return time.Since(t).Round(time.Second).String()
 }
 
 var AdminSessions = &SessionStore{sessions: make(map[string]Session)}
@@ -163,6 +172,123 @@ func (h *AdminHandlers) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "success", "token": token})
+}
+
+// handleTunnelEndpoints returns detailed information about endpoints for a specific tunnel.
+func (h *AdminHandlers) handleTunnelEndpoints(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	tunnelName := r.URL.Query().Get("tunnel")
+	if tunnelName == "" {
+		http.Error(w, "Missing tunnel query parameter", http.StatusBadRequest)
+		return
+	}
+
+	if h.tunnelManager == nil {
+		http.Error(w, "Tunnel manager not initialized", http.StatusInternalServerError)
+		return
+	}
+
+	h.tunnelManager.mu.RLock()
+	tunnel, exists := h.tunnelManager.tunnels[tunnelName]
+	h.tunnelManager.mu.RUnlock()
+
+	if !exists {
+		http.Error(w, "Tunnel not found", http.StatusNotFound)
+		return
+	}
+
+	type PublicEndpointInfo struct {
+		Name         string         `json:"name"`
+		Online       bool           `json:"online"`
+		RemoteAddr   string         `json:"remoteAddr"`
+		OnlineTime   string         `json:"onlineTime"`
+		LastActivity string         `json:"lastActivity"`
+		Latency      string         `json:"latency"`
+		Stats        *PublicMetrics `json:"stats"`
+	}
+
+	response := struct {
+		Endpoints []PublicEndpointInfo `json:"endpoints"`
+	}{
+		Endpoints: make([]PublicEndpointInfo, 0),
+	}
+
+	tunnel.mu.RLock()
+	for endpointName, pool := range tunnel.streams {
+		pool.mu.RLock()
+		for _, stream := range pool.streams {
+			stream.Mu.Lock()
+			stats := stream.Stats
+			stats.mutex.Lock()
+			// Create a copy of metrics to avoid holding the lock during JSON marshal
+			requestCount := atomic.LoadUint64(&stats.RequestCount)
+			publicStats := &PublicMetrics{
+				RequestCount: requestCount,
+				Errors:       atomic.LoadUint64(&stats.Errors),
+				BytesSent: PublicNumericMetric{
+					Total: atomic.LoadUint64(&stats.BytesSent.Total),
+					Avg:   0, // Will be calculated if needed
+					Min:   stats.BytesSent.Min,
+					Max:   stats.BytesSent.Max,
+				},
+				BytesRecv: PublicNumericMetric{
+					Total: atomic.LoadUint64(&stats.BytesRecv.Total),
+					Avg:   0, // Will be calculated if needed
+					Min:   stats.BytesRecv.Min,
+					Max:   stats.BytesRecv.Max,
+				},
+				ResponseTime: PublicTimeMetric{
+					TotalMs: float64(atomic.LoadInt64(&stats.ResponseTime.Total)) / 1e6,
+					AvgMs:   0, // Will be calculated if needed
+					MinMs:   stats.ResponseTime.Min / 1e6,
+					MaxMs:   stats.ResponseTime.Max / 1e6,
+				},
+			}
+			// Calculate averages
+			if publicStats.RequestCount > 0 {
+				publicStats.BytesSent.Avg = float64(publicStats.BytesSent.Total) / float64(publicStats.RequestCount)
+				publicStats.BytesRecv.Avg = float64(publicStats.BytesRecv.Total) / float64(publicStats.RequestCount)
+				publicStats.ResponseTime.AvgMs = float64(atomic.LoadInt64(&stats.ResponseTime.Total)) / float64(publicStats.RequestCount) / 1e6
+			}
+			// Calculate QPS
+			if !stats.firstRequestTime.IsZero() && !stats.lastRequestTime.IsZero() {
+				duration := stats.lastRequestTime.Sub(stats.firstRequestTime).Seconds()
+				if duration > 1 {
+					publicStats.QPS = float64(publicStats.RequestCount) / duration
+				} else {
+					publicStats.QPS = float64(publicStats.RequestCount)
+				}
+			}
+			stats.mutex.Unlock()
+
+			// Measure latency for this endpoint
+			latency, latencyErr := h.tunnelManager.MeasureEndpointLatency(tunnelName, endpointName)
+			latencyStr := "-"
+			if latencyErr == nil {
+				latencyStr = latency.Round(time.Millisecond).String()
+			}
+
+			response.Endpoints = append(response.Endpoints, PublicEndpointInfo{
+				Name:         endpointName,
+				Online:       true, // We only iterate over online streams
+				RemoteAddr:   stream.RemoteAddr,
+				OnlineTime:   formatDuration(stream.OnlineTime),
+				LastActivity: formatDuration(stream.LastActivityTime),
+				Latency:      latencyStr,
+				Stats:        publicStats,
+			})
+			stream.Mu.Unlock()
+			break // Only show info for one stream per endpoint name for simplicity
+		}
+		pool.mu.RUnlock()
+	}
+	tunnel.mu.RUnlock()
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(response)
 }
 
 func (h *AdminHandlers) handleConfig(w http.ResponseWriter, r *http.Request) {
@@ -489,63 +615,6 @@ func (h *AdminHandlers) handleTunnels(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// ===== 隧道在线 endpoint 查询 =====
-func (h *AdminHandlers) handleTunnelEndpoints(w http.ResponseWriter, r *http.Request) {
-	if !h.isAdminToken(extractToken(r)) {
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
-		return
-	}
-	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	tunnelName := r.URL.Query().Get("tunnel")
-	if tunnelName == "" {
-		http.Error(w, "tunnel parameter is required", http.StatusBadRequest)
-		return
-	}
-
-	if h.tunnelManager == nil {
-		http.Error(w, "Tunnel manager not initialized", http.StatusInternalServerError)
-		return
-	}
-
-	h.tunnelManager.mu.RLock()
-	tunnel, exists := h.tunnelManager.tunnels[tunnelName]
-	h.tunnelManager.mu.RUnlock()
-
-	if !exists {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"tunnel":    tunnelName,
-			"endpoints": []interface{}{},
-		})
-		return
-	}
-
-	tunnel.mu.RLock()
-	defer tunnel.mu.RUnlock()
-
-	endpoints := make([]map[string]interface{}, 0)
-	for poolName, pool := range tunnel.streams {
-		pool.mu.RLock()
-		for streamId := range pool.streams {
-			endpoints = append(endpoints, map[string]interface{}{
-				"name":     poolName,
-				"streamId": streamId,
-				"online":   true,
-			})
-		}
-		pool.mu.RUnlock()
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"tunnel":    tunnelName,
-		"endpoints": endpoints,
-	})
-}
 
 // ===== 服务器管理 =====
 func (h *AdminHandlers) handleServers(w http.ResponseWriter, r *http.Request) {

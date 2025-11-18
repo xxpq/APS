@@ -295,7 +295,7 @@ var admin_page_content = `
                 <h4>在线 Endpoint</h4>
                 <div class="table-wrap mt-1">
                   <table class="bx--data-table carbon-table">
-                    <thead><tr><th>名称</th><th>远程地址</th><th>状态</th></tr></thead>
+                    <thead><tr><th>名称</th><th>远程地址</th><th>上线时间</th><th>最后传输</th><th>延迟</th><th>请求数</th><th>错误数</th><th>QPS</th><th>发送字节 (总/均/最小/最大)</th><th>接收字节 (总/均/最小/最大)</th><th>响应时间 (平均/最短/最长 ms)</th></tr></thead>
                     <tbody id="tunnel-endpoints-tbody"></tbody>
                   </table>
                 </div>
@@ -754,12 +754,25 @@ async function loadTunnelEndpoints(tunnelName) {
     (data.endpoints || []).forEach(function(ep){
       var tr = document.createElement("tr");
       var status = ep.online ? '<span class="pill" style="background:#a7f0ba;color:#0e6027;">在线</span>' : '<span class="pill">离线</span>';
-      tr.innerHTML = "<td>" + ep.name + "</td><td>" + (ep.remoteAddr || "-") + "</td><td>" + status + "</td>";
+      var stats = ep.stats || {};
+      var bytesSent = stats.bytesSent || {};
+      var bytesRecv = stats.bytesRecv || {};
+      var responseTime = stats.responseTime || {};
+      tr.innerHTML = "<td>" + (ep.name || "-") + "</td>" +
+        "<td>" + (ep.remoteAddr || "-") + "</td>" +
+        "<td>" + (ep.onlineTime || "-") + "</td>" +
+        "<td>" + (ep.lastActivity || "-") + "</td>" +
+        "<td>" + (stats.requestCount ?? "-") + "</td>" +
+        "<td>" + (stats.errors ?? "-") + "</td>" +
+        "<td>" + fmtNum(stats.qps) + "</td>" +
+        "<td>" + (bytesSent.total ?? "-") + " / " + fmtNum(bytesSent.avg) + " / " + (bytesSent.min ?? "-") + " / " + (bytesSent.max ?? "-") + "</td>" +
+        "<td>" + (bytesRecv.total ?? "-") + " / " + fmtNum(bytesRecv.avg) + " / " + (bytesRecv.min ?? "-") + " / " + (bytesRecv.max ?? "-") + "</td>" +
+        "<td>" + fmtNum(responseTime.avgMs) + " / " + (responseTime.minMs ?? "-") + " / " + (responseTime.maxMs ?? "-") + "</td>";
       tbody.appendChild(tr);
     });
   } catch (e) {
     var tr = document.createElement("tr");
-    tr.innerHTML = '<td colspan="4">加载失败: ' + (e.message || e) + '</td>';
+    tr.innerHTML = '<td colspan="12">加载失败: ' + (e.message || e) + '</td>';
     tbody.appendChild(tr);
   }
 }

@@ -12,6 +12,7 @@ import (
 	"log"
 	"math/rand"
 	"sync"
+	"time"
 
 	pb "aps/tunnelpb"
 	"google.golang.org/grpc/codes"
@@ -43,10 +44,14 @@ type StreamPool struct {
 
 // EndpointStream represents a single gRPC bidirectional stream from an endpoint client
 type EndpointStream struct {
-	id              string
-	stream          pb.TunnelService_EstablishServer
-	mu              sync.Mutex
-	pendingRequests map[string]chan *pb.Response
+	ID              string
+	Stream          pb.TunnelService_EstablishServer
+	Mu              sync.Mutex
+	PendingRequests map[string]chan *pb.Response
+	RemoteAddr      string
+	OnlineTime      time.Time
+	LastActivityTime time.Time
+	Stats           *Metrics
 }
 
 func NewTunnelManager(config *Config) *TunnelManager {
@@ -80,9 +85,9 @@ func (tm *TunnelManager) RegisterEndpointStream(tunnelName, endpointName, passwo
 	}
 
 	endpointStream := &EndpointStream{
-		id:              generateRequestID(),
-		stream:          stream,
-		pendingRequests: make(map[string]chan *pb.Response),
+		ID:              generateRequestID(),
+		Stream:          stream,
+		PendingRequests: make(map[string]chan *pb.Response),
 	}
 
 	tunnel.mu.Lock()
@@ -133,12 +138,12 @@ func (tm *TunnelManager) HandleIncomingMessage(msg *pb.EndpointToServer) {
 			for _, pool := range tunnel.streams {
 				pool.mu.RLock()
 				for _, stream := range pool.streams {
-					stream.mu.Lock()
-					if ch, ok := stream.pendingRequests[resp.Id]; ok {
+					stream.Mu.Lock()
+					if ch, ok := stream.PendingRequests[resp.Id]; ok {
 						ch <- resp
-						delete(stream.pendingRequests, resp.Id)
+						delete(stream.PendingRequests, resp.Id)
 					}
-					stream.mu.Unlock()
+					stream.Mu.Unlock()
 				}
 				pool.mu.RUnlock()
 			}
@@ -212,6 +217,84 @@ func (tm *TunnelManager) GetRandomEndpointFromTunnels(tunnelNames []string) (str
 	return "", "", fmt.Errorf("no available endpoints in any of the specified tunnels: %v", tunnelNames)
 }
 
+// EndpointInfo holds basic info and a reference to the stats for an endpoint.
+// This is an internal structure to pass data out of the manager.
+type EndpointInfo struct {
+	Name             string
+	RemoteAddr       string
+	OnlineTime       time.Time
+	LastActivityTime time.Time
+	Stats            *Metrics
+}
+
+// MeasureEndpointLatency sends a lightweight ping request to measure RTT for a specific endpoint.
+func (tm *TunnelManager) MeasureEndpointLatency(tunnelName, endpointName string) (time.Duration, error) {
+	tm.mu.RLock()
+	tunnel, exists := tm.tunnels[tunnelName]
+	tm.mu.RUnlock()
+	if !exists {
+		return 0, fmt.Errorf("tunnel '%s' not found", tunnelName)
+	}
+
+	tunnel.mu.RLock()
+	pool, exists := tunnel.streams[endpointName]
+	if !exists || pool.Size() == 0 {
+		tunnel.mu.RUnlock()
+		return 0, fmt.Errorf("endpoint '%s' is not connected to tunnel '%s'", endpointName, tunnelName)
+	}
+	stream := pool.GetStream()
+	tunnel.mu.RUnlock()
+
+	if stream == nil {
+		return 0, fmt.Errorf("no available stream for endpoint '%s'", endpointName)
+	}
+
+	// Use a simple ping payload
+	pingPayload := &RequestPayload{
+		URL:  "aps://ping",
+		Data: []byte("ping"),
+	}
+
+	start := time.Now()
+	_, err := tm.SendRequest(context.Background(), tunnelName, endpointName, pingPayload)
+	if err != nil {
+		return 0, err
+	}
+	return time.Since(start), nil
+}
+
+// GetEndpointsInfo returns a snapshot of basic info and stats for all endpoints in a tunnel.
+func (tm *TunnelManager) GetEndpointsInfo(tunnelName string) map[string]*EndpointInfo {
+	tm.mu.RLock()
+	tunnel, exists := tm.tunnels[tunnelName]
+	tm.mu.RUnlock()
+	if !exists {
+		return nil
+	}
+
+	info := make(map[string]*EndpointInfo)
+
+	tunnel.mu.RLock()
+	for endpointName, pool := range tunnel.streams {
+		pool.mu.RLock()
+		for _, stream := range pool.streams {
+			stream.Mu.Lock()
+			info[endpointName] = &EndpointInfo{
+				Name:             endpointName,
+				RemoteAddr:       stream.RemoteAddr,
+				OnlineTime:       stream.OnlineTime,
+				LastActivityTime: stream.LastActivityTime,
+				Stats:            stream.Stats,
+			}
+			stream.Mu.Unlock()
+			break // Only show info for one stream per endpoint name for simplicity
+		}
+		pool.mu.RUnlock()
+	}
+	tunnel.mu.RUnlock()
+	return info
+}
+
 // SendRequest sends a request to an endpoint and waits for a response.
 func (tm *TunnelManager) SendRequest(ctx context.Context, tunnelName, endpointName string, reqPayload *RequestPayload) ([]byte, error) {
 	tm.mu.RLock()
@@ -252,17 +335,17 @@ func (tm *TunnelManager) SendRequest(ctx context.Context, tunnelName, endpointNa
 	}
 
 	respCh := make(chan *pb.Response, 1)
-	stream.mu.Lock()
-	stream.pendingRequests[requestID] = respCh
-	stream.mu.Unlock()
+	stream.Mu.Lock()
+	stream.PendingRequests[requestID] = respCh
+	stream.Mu.Unlock()
 
 	defer func() {
-		stream.mu.Lock()
-		delete(stream.pendingRequests, requestID)
-		stream.mu.Unlock()
+		stream.Mu.Lock()
+		delete(stream.PendingRequests, requestID)
+		stream.Mu.Unlock()
 	}()
 
-	if err := stream.stream.Send(req); err != nil {
+	if err := stream.Stream.Send(req); err != nil {
 		return nil, status.Errorf(codes.Aborted, "failed to send request to endpoint: %v", err)
 	}
 
@@ -282,7 +365,7 @@ func (tm *TunnelManager) SendRequest(ctx context.Context, tunnelName, endpointNa
 			Id:      requestID,
 			Payload: &pb.ServerToEndpoint_Cancel{Cancel: &pb.Cancel{}},
 		}
-		_ = stream.stream.Send(cancelMsg) // Best effort send
+		_ = stream.Stream.Send(cancelMsg) // Best effort send
 		return nil, ctx.Err()
 	}
 }
@@ -291,7 +374,7 @@ func (tm *TunnelManager) SendRequest(ctx context.Context, tunnelName, endpointNa
 func (p *StreamPool) AddStream(stream *EndpointStream) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.streams[stream.id] = stream
+	p.streams[stream.ID] = stream
 }
 
 // RemoveStream removes a stream from the pool
