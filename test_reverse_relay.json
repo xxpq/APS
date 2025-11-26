@@ -1,0 +1,29 @@
+{
+  "server": {
+    "address": "localhost:8080",
+    "tls": {
+      "enabled": false
+    }
+  },
+  "relay": {
+    "enabled": true,
+    "mode": "reverse-wait",
+    "endpoints": [
+      {
+        "name": "E1",
+        "address": "localhost:18082",
+        "mode": "reverse",
+        "priority": 1,
+        "latency": 50,
+        "available": true
+      }
+    ]
+  },
+  "endpoints": {
+    "E2": {
+      "address": "localhost:18081",
+      "mode": "reverse-wait",
+      "priority": 1
+    }
+  }
+}

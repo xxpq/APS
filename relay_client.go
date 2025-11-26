@@ -286,6 +286,50 @@ func (rc *RelayClient) RequestRoute(target string) error {
 	return rc.SendMessage(message)
 }
 
+// ConnectToReverseRelay 连接到反向中继（E1主动连接E2）
+func (rc *RelayClient) ConnectToReverseRelay(ctx context.Context, endpoint *RelayEndpoint) error {
+	rc.mu.Lock()
+	defer rc.mu.Unlock()
+
+	if rc.isConnected {
+		return fmt.Errorf("already connected to relay")
+	}
+
+	log.Printf("[RelayClient] Connecting to reverse relay: %s at %s", endpoint.Name, endpoint.Address)
+
+	// 建立gRPC连接
+	conn, err := grpc.Dial(endpoint.Address, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		return fmt.Errorf("failed to connect to reverse relay %s: %v", endpoint.Name, err)
+	}
+
+	rc.conn = conn
+	rc.client = pb.NewRelayServiceClient(conn)
+
+	// 建立反向中继流（使用特殊的metadata标识这是反向连接）
+	md := metadata.New(map[string]string{
+		"client-name": rc.name,
+		"connection-type": "reverse", // 标识这是反向连接
+	})
+
+	streamCtx := metadata.NewOutgoingContext(ctx, md)
+	stream, err := rc.client.EstablishRelay(streamCtx)
+	if err != nil {
+		conn.Close()
+		return fmt.Errorf("failed to establish reverse relay stream: %v", err)
+	}
+
+	rc.stream = stream
+	rc.isConnected = true
+
+	// 启动消息处理协程
+	go rc.handleIncomingMessages()
+	go rc.handleOutgoingMessages()
+
+	log.Printf("[RelayClient] Successfully connected to reverse relay: %s", endpoint.Name)
+	return nil
+}
+
 // updateRouteInfo 更新路由信息
 func (rc *RelayClient) updateRouteInfo(routeResponse *RelayRouteResponse) {
 	// 这里可以实现路由信息的存储和更新逻辑

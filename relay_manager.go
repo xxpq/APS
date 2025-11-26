@@ -13,9 +13,11 @@ import (
 type RelayMode string
 
 const (
-	RelayModeDirect  RelayMode = "direct"  // 直连模式
-	RelayModeRelay   RelayMode = "relay"   // 中继模式
-	RelayModeHybrid  RelayMode = "hybrid"  // 混合模式（自动切换）
+	RelayModeDirect      RelayMode = "direct"      // 直连模式
+	RelayModeRelay       RelayMode = "relay"       // 中继模式
+	RelayModeHybrid      RelayMode = "hybrid"      // 混合模式（自动切换）
+	RelayModeReverse     RelayMode = "reverse"     // 反向中继模式（E1主动连接E2）
+	RelayModeReverseWait RelayMode = "reverse-wait" // 反向中继等待模式（E2等待E1连接）
 )
 
 // RelayEndpoint 中继端点信息
@@ -129,6 +131,10 @@ func (rm *RelayManager) ConnectToServer(ctx context.Context) error {
 		return rm.connectViaRelay(ctx)
 	case RelayModeHybrid:
 		return rm.connectHybrid(ctx)
+	case RelayModeReverse:
+		return rm.connectReverse(ctx)
+	case RelayModeReverseWait:
+		return rm.connectReverseWait(ctx)
 	default:
 		return fmt.Errorf("invalid relay mode: %s", rm.mode)
 	}
@@ -190,6 +196,87 @@ func (rm *RelayManager) connectHybrid(ctx context.Context) error {
 	// 直连失败，尝试中继
 	log.Printf("[RelayManager] Direct connection failed, falling back to relay mode")
 	return rm.connectViaRelay(ctx)
+}
+
+// connectReverse 反向中继模式（E1主动连接E2）
+func (rm *RelayManager) connectReverse(ctx context.Context) error {
+	log.Printf("[RelayManager] Attempting reverse relay connection (E1 connecting to E2)")
+	
+	// 获取可用的反向中继端点（E2端点）
+	availableEndpoints := make([]*RelayEndpoint, 0)
+	for _, endpoint := range rm.relayEndpoints {
+		if endpoint.Available && endpoint.Mode == RelayModeReverseWait {
+			availableEndpoints = append(availableEndpoints, endpoint)
+		}
+	}
+	
+	if len(availableEndpoints) == 0 {
+		return fmt.Errorf("no available reverse-wait endpoints found")
+	}
+	
+	// 选择最优的E2端点（按优先级）
+	bestEndpoint := availableEndpoints[0]
+	for _, endpoint := range availableEndpoints {
+		if endpoint.Priority < bestEndpoint.Priority {
+			bestEndpoint = endpoint
+		}
+	}
+	
+	log.Printf("[RelayManager] Selected reverse endpoint: %s at %s", bestEndpoint.Name, bestEndpoint.Address)
+	
+	// 建立反向连接（E1主动连接E2）
+	if err := rm.relayClient.ConnectToReverseRelay(ctx, bestEndpoint); err != nil {
+		rm.updateStats(RelayModeReverse, false)
+		return fmt.Errorf("failed to establish reverse relay connection: %v", err)
+	}
+	
+	// 创建反向路由
+	rm.activeRoute = &RelayRoute{
+		Path:         []string{rm.selfName, bestEndpoint.Name, "S"},
+		HopCount:     2,
+		TotalLatency: bestEndpoint.Latency,
+		Reliability:  0.8,
+	}
+	
+	rm.updateStats(RelayModeReverse, true)
+	log.Printf("[RelayManager] Reverse relay connection established successfully")
+	return nil
+}
+
+// connectReverseWait 反向中继等待模式（E2等待E1连接）
+func (rm *RelayManager) connectReverseWait(ctx context.Context) error {
+	log.Printf("[RelayManager] Starting reverse relay wait mode (E2 waiting for E1 connections)")
+	
+	// 启动反向中继服务器，等待E1连接
+	if rm.relayServer == nil {
+		rm.relayServer = NewRelayServer(rm.selfName)
+		// 反向模式不需要特殊的StartReverseMode，使用普通的Start即可
+		if err := rm.relayServer.Start(ctx); err != nil {
+			return fmt.Errorf("failed to start reverse relay server: %v", err)
+		}
+	}
+	
+	// 等待E1连接建立
+	endpointID := "E1" // 假设E1的ID
+	client, err := rm.relayServer.WaitForReverseConnection(ctx, endpointID)
+	if err != nil {
+		rm.updateStats(RelayModeReverseWait, false)
+		return fmt.Errorf("failed to establish reverse connection: %v", err)
+	}
+	
+	log.Printf("[RelayManager] Established reverse connection with %s", client.EndpointID)
+	
+	// 创建反向路由（E2 -> E1 -> S）
+	rm.activeRoute = &RelayRoute{
+		Path:         []string{rm.selfName, "E1", "S"},
+		HopCount:     2,
+		TotalLatency: 50, // 假设延迟
+		Reliability:  0.8,
+	}
+	
+	rm.updateStats(RelayModeReverseWait, true)
+	log.Printf("[RelayManager] Reverse relay wait mode established successfully")
+	return nil
 }
 
 // getOptimalRoute 获取最优路由

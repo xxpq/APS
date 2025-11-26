@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -18,20 +19,26 @@ import (
 // RelayServer 中继服务器
 type RelayServer struct {
 	pb.UnimplementedRelayServiceServer
-	name        string
-	address     string
-	listener    net.Listener
-	grpcServer  *grpc.Server
-	clients     map[string]*RelayClientConnection
-	mu          sync.RWMutex
-	ctx         context.Context
-	cancel      context.CancelFunc
+	name              string
+	address           string
+	listener          net.Listener
+	grpcServer        *grpc.Server
+	clients           map[string]*RelayClientConnection
+	reverseClients    map[string]*RelayClientConnection // 反向连接客户端
+	mu                sync.RWMutex
+	ctx               context.Context
+	cancel            context.CancelFunc
+	isReverseMode     bool
+	reverseConnection chan *RelayClientConnection // 反向连接通知通道
 }
 
 // RelayClientConnection 中继客户端连接
 type RelayClientConnection struct {
 	Name       string
 	Stream     pb.RelayService_EstablishRelayServer
+	Conn       net.Conn       // 用于反向连接的原始连接
+	EndpointID string         // 端点ID
+	Type       string         // 连接类型: "normal" 或 "reverse"
 	LastActive time.Time
 	mu         sync.Mutex
 }
@@ -40,11 +47,13 @@ type RelayClientConnection struct {
 func NewRelayServer(name string) *RelayServer {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &RelayServer{
-		name:    name,
-		address: fmt.Sprintf("0.0.0.0:%d", 18081), // 默认中继端口
-		clients: make(map[string]*RelayClientConnection),
-		ctx:     ctx,
-		cancel:  cancel,
+		name:              name,
+		address:           fmt.Sprintf("0.0.0.0:%d", 18081), // 默认中继端口
+		clients:           make(map[string]*RelayClientConnection),
+		reverseClients:    make(map[string]*RelayClientConnection),
+		ctx:               ctx,
+		cancel:            cancel,
+		reverseConnection: make(chan *RelayClientConnection, 1),
 	}
 }
 
@@ -82,6 +91,96 @@ func (rs *RelayServer) Stop() {
 	
 	if rs.listener != nil {
 		rs.listener.Close()
+	}
+}
+
+// WaitForReverseConnection 等待反向连接
+func (rs *RelayServer) WaitForReverseConnection(ctx context.Context, endpointID string) (*RelayClientConnection, error) {
+	rs.mu.Lock()
+	if client, exists := rs.reverseClients[endpointID]; exists {
+		rs.mu.Unlock()
+		return client, nil
+	}
+	rs.mu.Unlock()
+
+	select {
+	case client := <-rs.reverseConnection:
+		if client != nil && client.EndpointID == endpointID {
+			return client, nil
+		}
+		// 如果不是目标端点，放回通道
+		select {
+		case rs.reverseConnection <- client:
+		default:
+		}
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-rs.ctx.Done():
+		return nil, errors.New("server stopped")
+	}
+
+	// 再次检查
+	rs.mu.Lock()
+	if client, exists := rs.reverseClients[endpointID]; exists {
+		rs.mu.Unlock()
+		return client, nil
+	}
+	rs.mu.Unlock()
+
+	return nil, errors.New("connection not found")
+}
+
+// handleReverseConnection 处理反向连接
+func (rs *RelayServer) handleReverseConnection(conn net.Conn, endpointID string) {
+	client := &RelayClientConnection{
+		Conn:       conn,
+		EndpointID: endpointID,
+		Type:       "reverse",
+		Name:       endpointID,
+	}
+
+	rs.mu.Lock()
+	rs.reverseClients[endpointID] = client
+	rs.mu.Unlock()
+
+	// 通知等待的客户端
+	select {
+	case rs.reverseConnection <- client:
+	default:
+		// 通道已满，丢弃最旧的连接
+		select {
+		case <-rs.reverseConnection:
+			rs.reverseConnection <- client
+		default:
+		}
+	}
+
+	log.Printf("反向连接已建立: %s", endpointID)
+
+	// 保持连接直到断开
+	buffer := make([]byte, 4096)
+	for {
+		select {
+		case <-rs.ctx.Done():
+			return
+		default:
+			conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+			n, err := conn.Read(buffer)
+			if err != nil {
+				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+					continue
+				}
+				log.Printf("反向连接断开: %s, 错误: %v", endpointID, err)
+				rs.mu.Lock()
+				delete(rs.reverseClients, endpointID)
+				rs.mu.Unlock()
+				return
+			}
+			if n > 0 {
+				// 处理心跳或其他数据
+				log.Printf("收到反向连接数据: %s, 长度: %d", endpointID, n)
+			}
+		}
 	}
 }
 
