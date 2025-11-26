@@ -12,12 +12,12 @@ import (
 
 // TunnelRoundTripper implements http.RoundTripper to send requests via a tunnel
 type TunnelRoundTripper struct {
-	tunnelManager *TunnelManager
+	tunnelManager TunnelManagerInterface
 	next          http.RoundTripper // The default transport
 }
 
 // NewTunnelRoundTripper creates a new TunnelRoundTripper
-func NewTunnelRoundTripper(tm *TunnelManager, defaultTransport http.RoundTripper) *TunnelRoundTripper {
+func NewTunnelRoundTripper(tm TunnelManagerInterface, defaultTransport http.RoundTripper) *TunnelRoundTripper {
 	return &TunnelRoundTripper{
 		tunnelManager: tm,
 		next:          defaultTransport,

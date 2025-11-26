@@ -1,0 +1,55 @@
+{
+  "servers": {
+    "default": {
+      "port": 8090,
+      "public": true,
+      "panel": true
+    }
+  },
+  "tunnels": {
+    "dev": {
+      "servers": ["default"],
+      "password": "test"
+    },
+    "sucdri": {
+      "servers": ["default"],
+      "password": "shcj"
+    }
+  },
+  "auth": {
+    "users": {
+      "admin": {
+        "password": "admin",
+        "admin": true
+      }
+    },
+    "groups": null
+  },
+  "mappings": [
+    {
+      "from": "http://8.159.132.172:8090/geoserver/*",
+      "to": {
+        "headers": {
+          "access-control-allow-origin": "http://10.1.24.223:8083",
+          "content-security-policy": null,
+          "cross-origin-opener-policy": null,
+          "cross-origin-resource-policy": null,
+          "x-frame-options": null
+        },
+        "url": "http://10.1.24.223:8089/geoserver/*"
+      },
+      "via": {
+        "endpoints": "test_dev"
+      }
+    },
+    {
+      "from": {
+        "url": "http://8.159.132.172:8090/v1/chat/*",
+        "headers": {
+          "Authorization": "Bearer eyJhbGciOiJSUzI1NiIsInR5cCIgOiAiSldUIiwia2lkIiA6ICJteWZFenA3ODNLaV9KQ3g4Vm5jM1hfaXg2alpyYjZDZjVPTWtHWk1QSTNzIn0.eyJleHAiOjE3Nzg2MzYzMzgsImlhdCI6MTc0NzcxMDUyOSwiYXV0aF90aW1lIjoxNzQ3MTAwMzM4LCJqdGkiOiI3OWYwYjNmMS1lN2YxLTQ2NWEtOWVhNi0zYjZhMjRmMjZlMDYiLCJpc3MiOiJodHRwczovL2NvcGlsb3QudGVuY2VudC5jb20vYXV0aC9yZWFsbXMvY29waWxvdCIsImF1ZCI6ImFjY291bnQiLCJzdWIiOiIyYTZhNDhlMC0yN2U1LTRmYjUtODY1OS05MDQ2OWRjMjJhMTgiLCJ0eXAiOiJCZWFyZXIiLCJhenAiOiJjb25zb2xlIiwic2lkIjoiMWRjN2JlOGQtNzYzNS00ZTQyLTkyNGItOTk4ZDUyNGM5YjdjIiwiYWNyIjoiMCIsImFsbG93ZWQtb3JpZ2lucyI6WyIqIl0sInJlYWxtX2FjY2VzcyI6eyJyb2xlcyI6WyJkZWZhdWx0LXJvbGVzIiwib2ZmbGluZV9hY2Nlc3MiLCJ1bWFfYXV0aG9yaXphdGlvbiJdfSwicmVzb3VyY2VfYWNjZXNzIjp7ImFjY291bnQiOnsicm9sZXMiOlsibWFuYWdlLWFjY291bnQiLCJtYW5hZ2UtYWNjb3VudC1saW5rcyIsInZpZXctcHJvZmlsZSJdfX0sInNjb3BlIjoib3BlbmlkIHByb2ZpbGUgb2ZmbGluZV9hY2Nlc3MgZW1haWwiLCJlbWFpbF92ZXJpZmllZCI6ZmFsc2UsIm5pY2tuYW1lIjoiXHVEODNEXHVEQzdF6a2U5rOV5oqr6aOOXHVEODNEXHVEQzdFIiwicHJlZmVycmVkX3VzZXJuYW1lIjoiM2Q4NjdmNjMtMzVmMS00MTcxLWFkYWUtNDcxODk5YTUyOGU4LeW4puW5heW6pueahOmUpSJ9.mlrt3YlGEIklAl246ZaH65JAR6QzWcwFUvnEyXkHBuLkzzoucxBc7_hpXOxhIS36HtiDdiCA02E0iRgZArFpBXVXbkanlOX-XYgLU-q0xBCFvsHjTRMv1VoIRTWnMoohOCtRxhsTGL0JUUn41t010ND-0Hx2hczrJ8_N767Ca0yOYVKyDV78kzsZIPQSpP8J-UumikXs8dBXkdojihVojTn65LJ5fZ0GxhIBcSqvI6ZDJ3pD3cw0Snbl5HqLfoWduhLfdCHj1mOnAyiHjOSLa0dUYa6azRw30yjC4kL3CLoze6C7T-tqejYYqKc0CsBHcp_s8OIlweC-ehsnGlfZug"
+        }
+      },
+      "to": "https://copilot.tencent.com/v2/chat/*"
+    }
+  ]
+}

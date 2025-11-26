@@ -566,3 +566,38 @@ type RequestPayload struct {
 	URL  string
 	Data []byte
 }
+
+// Cleanup 清理隧道管理器资源
+func (tm *TunnelManager) Cleanup() {
+	log.Println("[TUNNEL] Cleaning up tunnel manager")
+	// 这里可以添加清理逻辑，如关闭所有连接等
+}
+
+// GetPoolStats 获取连接池统计信息
+func (tm *TunnelManager) GetPoolStats() map[string]interface{} {
+	tm.mu.RLock()
+	defer tm.mu.RUnlock()
+
+	stats := make(map[string]interface{})
+	stats["type"] = "grpc"
+	stats["tunnels"] = len(tm.tunnels)
+	
+	tunnelStats := make(map[string]interface{})
+	for name, tunnel := range tm.tunnels {
+		tunnel.mu.RLock()
+		endpointCount := len(tunnel.streams)
+		streamCount := 0
+		for _, pool := range tunnel.streams {
+			streamCount += pool.Size()
+		}
+		tunnel.mu.RUnlock()
+		
+		tunnelStats[name] = map[string]interface{}{
+			"endpoints": endpointCount,
+			"streams":   streamCount,
+		}
+	}
+	stats["tunnel_details"] = tunnelStats
+	
+	return stats
+}

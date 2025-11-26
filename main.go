@@ -30,14 +30,14 @@ type ServerManager struct {
 	configFile    string
 	dataStore     *DataStore
 	harManager    *HarLoggerManager
-	tunnelManager *TunnelManager
+	tunnelManager TunnelManagerInterface
 	scriptRunner  *ScriptRunner
 	trafficShaper *TrafficShaper
 	stats         *StatsCollector
 	replayManager *ReplayManager
 }
 
-func NewServerManager(config *Config, configFile string, dataStore *DataStore, harManager *HarLoggerManager, tunnelManager *TunnelManager, scriptRunner *ScriptRunner, trafficShaper *TrafficShaper, stats *StatsCollector, replayManager *ReplayManager) *ServerManager {
+func NewServerManager(config *Config, configFile string, dataStore *DataStore, harManager *HarLoggerManager, tunnelManager TunnelManagerInterface, scriptRunner *ScriptRunner, trafficShaper *TrafficShaper, stats *StatsCollector, replayManager *ReplayManager) *ServerManager {
 	return &ServerManager{
 		servers:       make(map[string]*http.Server),
 		config:        config,
@@ -142,7 +142,7 @@ func main() {
 	harManager := NewHarLoggerManager(config)
 	defer harManager.Shutdown()
 
-	tunnelManager := NewTunnelManager(config, nil) // 先创建tunnelManager，statsCollector稍后再传入
+	tunnelManager := NewHybridTunnelManager(config, nil) // 使用混合隧道管理器
 	scriptRunner := NewScriptRunner(config.Scripting)
 	trafficShaper := NewTrafficShaper(dataStore.QuotaUsage)
 	statsCollector := NewStatsCollector(config)
@@ -235,7 +235,7 @@ func (sm *ServerManager) StartAll() {
 	}
 }
 
-func createServerHandler(serverName string, mappings []*Mapping, serverConfig *ListenConfig, config *Config, configFile string, dataStore *DataStore, harManager *HarLoggerManager, tunnelManager *TunnelManager, scriptRunner *ScriptRunner, trafficShaper *TrafficShaper, stats *StatsCollector, replayManager *ReplayManager, isACMEEnabled bool) http.Handler {
+func createServerHandler(serverName string, mappings []*Mapping, serverConfig *ListenConfig, config *Config, configFile string, dataStore *DataStore, harManager *HarLoggerManager, tunnelManager TunnelManagerInterface, scriptRunner *ScriptRunner, trafficShaper *TrafficShaper, stats *StatsCollector, replayManager *ReplayManager, isACMEEnabled bool) http.Handler {
 	mux := http.NewServeMux()
 	proxy := NewMapRemoteProxy(config, dataStore, harManager, tunnelManager, scriptRunner, trafficShaper, stats, serverName)
 
@@ -255,7 +255,11 @@ func createServerHandler(serverName string, mappings []*Mapping, serverConfig *L
 
 		// 注册管理面板处理器
 		adminHandlers := NewAdminHandlers(config, configFile)
-		adminHandlers.SetTunnelManager(tunnelManager)
+		if hybridTM, ok := tunnelManager.(*HybridTunnelManager); ok {
+			adminHandlers.SetTunnelManager(hybridTM.grpcManager)
+		} else if tm, ok := tunnelManager.(*TunnelManager); ok {
+			adminHandlers.SetTunnelManager(tm)
+		}
 		adminHandlers.RegisterHandlers(mux)
 	}
 
@@ -285,7 +289,19 @@ func createServerHandler(serverName string, mappings []*Mapping, serverConfig *L
 
 	// 创建 gRPC 服务器
 	grpcServer := grpc.NewServer()
-	pb.RegisterTunnelServiceServer(grpcServer, &TunnelServiceServer{tunnelManager: tunnelManager})
+	
+	// 根据隧道管理器类型注册不同的服务
+	if hybridTM, ok := tunnelManager.(*HybridTunnelManager); ok {
+		pb.RegisterTunnelServiceServer(grpcServer, &TunnelServiceServer{tunnelManager: hybridTM.grpcManager})
+		
+		// 注册WebSocket处理器
+		mux.HandleFunc("/.tunnel", func(w http.ResponseWriter, r *http.Request) {
+			hybridTM.wsManager.HandleWebSocketUpgrade(w, r)
+		})
+		log.Println("WebSocket tunnel endpoint registered at '/.tunnel'")
+	} else if tm, ok := tunnelManager.(*TunnelManager); ok {
+		pb.RegisterTunnelServiceServer(grpcServer, &TunnelServiceServer{tunnelManager: tm})
+	}
 
 	// 创建一个分流处理器，根据请求头判断流量导向 gRPC 隧道或 HTTP 处理器
 	grpcOrHttpHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

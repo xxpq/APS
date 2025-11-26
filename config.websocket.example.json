@@ -1,0 +1,42 @@
+{
+  "servers": {
+    "main": {
+      "port": 8080,
+      "panel": true
+    }
+  },
+  "tunnels": {
+    "tunnel1": {
+      "servers": ["main"],
+      "password": "test123",
+      "websocket_pool": {
+        "enabled": true,
+        "pool_size": 5,
+        "max_pool_size": 10,
+        "idle_timeout": 300,
+        "max_lifetime": 1800,
+        "fallback_enabled": true,
+        "fallback_threshold": 3
+      }
+    },
+    "tunnel2": {
+      "servers": ["main"],
+      "password": "test456",
+      "websocket_pool": {
+        "enabled": true,
+        "pool_size": 3,
+        "idle_timeout": 600,
+        "fallback_enabled": true
+      }
+    }
+  },
+  "mappings": [
+    {
+      "from": "http://example.com",
+      "to": "http://localhost:3000",
+      "via": {
+        "tunnels": ["tunnel1"]
+      }
+    }
+  ]
+}
