@@ -37,8 +37,11 @@ var (
 	tunnelPassword = flag.String("password", "", "tunnel password for encryption")
 	debug          = flag.Bool("debug", false, "enable debug logging")
 	transportMode  = flag.String("transport", "mix", "transport mode: grpc, ws, or mix (default: mix)")
+	relayMode      = flag.String("relay-mode", "direct", "relay mode: direct, relay, or hybrid (default: direct)")
+	relayEndpoints = flag.String("relays", "", "comma-separated list of relay endpoints (e.g., 'relay1:18081,relay2:18081')")
 
 	activeRequests sync.Map // Stores map[string]context.CancelFunc
+	relayManager   *RelayManager
 )
 
 var sharedClient = &http.Client{
@@ -58,6 +61,35 @@ func main() {
 
 	if *tunnelName == "" {
 		log.Fatal("-tunnel flag is required")
+	}
+
+	// 初始化中继管理器
+	if *relayMode != "direct" {
+		relayManager = NewRelayManager(*name, *serverAddr, RelayMode(*relayMode))
+		
+		// 解析中继端点
+		if *relayEndpoints != "" {
+			relays := strings.Split(*relayEndpoints, ",")
+			for _, relay := range relays {
+				relay = strings.TrimSpace(relay)
+				if relay != "" {
+					endpoint := &RelayEndpoint{
+						Name:      relay,
+						Address:   relay,
+						Mode:      RelayModeRelay,
+						Priority:  1,
+						Available: true,
+						LastCheck: time.Now(),
+					}
+					relayManager.AddRelayEndpoint(endpoint)
+				}
+			}
+		}
+
+		ctx := context.Background()
+		if err := relayManager.Initialize(ctx); err != nil {
+			log.Printf("Failed to initialize relay manager: %v", err)
+		}
 	}
 
 	interrupt := make(chan os.Signal, 1)
@@ -87,6 +119,12 @@ func main() {
 	<-interrupt
 	log.Println("Interrupt received, shutting down.")
 	cancel()
+	
+	// 关闭中继管理器
+	if relayManager != nil {
+		relayManager.Shutdown()
+	}
+	
 	// Give time for the session to close gracefully
 	time.Sleep(1 * time.Second)
 	log.Println("Exiting.")
@@ -94,6 +132,16 @@ func main() {
 
 // runClientSession 运行一个客户端会话，返回是否应该重连
 func runClientSession(ctx context.Context) bool {
+	// 如果使用中继模式，先尝试中继连接
+	if *relayMode != "direct" && relayManager != nil {
+		if err := relayManager.ConnectToServer(ctx); err == nil {
+			log.Printf("Connected via relay mode: %s", *relayMode)
+			return runRelayClientSession(ctx)
+		}
+		log.Printf("Relay connection failed, falling back to direct connection")
+	}
+
+	// 使用原有的传输模式
 	switch *transportMode {
 	case "grpc":
 		return runGRPCSession(ctx)
@@ -220,30 +268,66 @@ func runWebSocketSession(ctx context.Context) bool {
 	// Goroutine to receive messages from the server
 	go func() {
 		defer close(streamEnded)
+		
+		// 设置ping ticker来检测连接状态
+		pingTicker := time.NewTicker(30 * time.Second)
+		defer pingTicker.Stop()
+		
 		for {
 			select {
 			case <-ctx.Done():
 				log.Println("Context cancelled, stopping WebSocket receive loop.")
 				return
+			case <-pingTicker.C:
+				// 定期发送ping消息来检测连接状态
+				if !wsClient.IsConnected() {
+					log.Printf("WebSocket connection detected as disconnected, stopping receive loop.")
+					return
+				}
+				// 尝试发送ping消息
+				if err := wsClient.Send([]byte("ping")); err != nil {
+					log.Printf("WebSocket ping failed, connection likely broken: %v", err)
+					return
+				}
 			default:
-				// 接收WebSocket消息
-				message, err := wsClient.Receive()
-				if err != nil {
+				// 接收WebSocket消息（带超时）
+				messageChan := make(chan []byte, 1)
+				errChan := make(chan error, 1)
+				
+				go func() {
+					message, err := wsClient.Receive()
+					if err != nil {
+						errChan <- err
+						return
+					}
+					messageChan <- message
+				}()
+				
+				select {
+				case message := <-messageChan:
+					// 解析消息
+					var msg pb.ServerToEndpoint
+					if err := proto.Unmarshal(message, &msg); err != nil {
+						log.Printf("Error unmarshaling WebSocket message: %v", err)
+						continue
+					}
+					
+					go handleServerMessageWebSocket(wsClient, &msg)
+					
+				case err := <-errChan:
 					if err.Error() == "context cancelled" {
 						return
 					}
 					log.Printf("Error receiving from WebSocket: %v", err)
 					return
+					
+				case <-time.After(5 * time.Second):
+					// 接收超时，检查连接状态
+					if !wsClient.IsConnected() {
+						log.Printf("WebSocket connection timeout and not connected, stopping receive loop.")
+						return
+					}
 				}
-				
-				// 解析消息
-				var msg pb.ServerToEndpoint
-				if err := proto.Unmarshal(message, &msg); err != nil {
-					log.Printf("Error unmarshaling WebSocket message: %v", err)
-					continue
-				}
-				
-				go handleServerMessageWebSocket(wsClient, &msg)
 			}
 		}
 	}()
@@ -579,4 +663,72 @@ func decrypt(data []byte, password string) ([]byte, error) {
 	}
 	nonce, ciphertext := data[:nonceSize], data[nonceSize:]
 	return gcm.Open(nil, nonce, ciphertext, nil)
+}
+
+// runRelayClientSession 运行中继客户端会话
+func runRelayClientSession(ctx context.Context) bool {
+	log.Printf("Starting relay client session")
+
+	// 使用relayClient的流进行通信
+	stream := relayManager.relayClient.GetStream()
+	if stream == nil {
+		log.Printf("No relay stream available")
+		return true
+	}
+
+	// 用于通知发生永久性错误的通道
+	permanentErrorChan := make(chan error, 1)
+	streamEnded := make(chan struct{})
+
+	// Goroutine to receive messages from the relay
+	go func() {
+		defer close(streamEnded)
+		for {
+			select {
+			case <-ctx.Done():
+				log.Println("Context cancelled, stopping relay receive loop.")
+				return
+			default:
+				msg, err := stream.Recv()
+				if err == io.EOF {
+					log.Println("Relay server closed the stream.")
+					return
+				}
+				if err != nil {
+					log.Printf("Error receiving from relay stream: %v", err)
+					// 检查是否为永久性错误
+					if isPermanentError(err) {
+						log.Printf("Permanent error detected in relay receive loop, stopping reconnection attempts.")
+						select {
+						case permanentErrorChan <- err:
+							// 成功发送永久性错误
+						default:
+							// 通道已有值，避免阻塞
+						}
+					}
+					return
+				}
+				go handleServerMessage(stream, msg)
+			}
+		}
+	}()
+
+	// 等待流结束或永久性错误
+	select {
+	case <-permanentErrorChan:
+		return false // 永久性错误，不应该重试
+	case <-streamEnded:
+		log.Printf("Relay stream ended.")
+		// 检查是否在流结束时还有永久性错误
+		select {
+		case err := <-permanentErrorChan:
+			log.Printf("Found permanent error after relay stream end: %v", err)
+			return false
+		default:
+			return true // 正常结束，应该重试
+		}
+	case <-ctx.Done():
+		log.Printf("Context cancelled, closing relay connection.")
+		return false
+	}
 }

@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -175,32 +174,14 @@ func (htm *HybridTunnelManager) sendWebSocketRequest(ctx context.Context, tunnel
 	// 获取或创建WebSocket连接池
 	pool := htm.wsManager.GetOrCreatePool(tunnelName, endpointName, tunnelConfig.Password, "")
 	
-	// 准备请求数据
-	requestData, err := json.Marshal(reqPayload)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal request payload: %v", err)
-	}
-
 	// 通过WebSocket发送请求
-	respData, err := pool.SendRequest(ctx, requestData)
+	respData, err := pool.SendRequest(ctx, reqPayload)
 	if err != nil {
 		return nil, fmt.Errorf("WebSocket request failed: %v", err)
 	}
 
-	// 解析响应
-	var responsePayload struct {
-		Data  []byte `json:"data,omitempty"`
-		Error string `json:"error,omitempty"`
-	}
-	if err := json.Unmarshal(respData, &responsePayload); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal response: %v", err)
-	}
-
-	if responsePayload.Error != "" {
-		return nil, errors.New(responsePayload.Error)
-	}
-
-	return responsePayload.Data, nil
+	// WebSocket pool returns raw data directly, not JSON
+	return respData, nil
 }
 
 // GetRandomEndpointFromTunnels 从隧道中获取随机端点
@@ -227,22 +208,52 @@ func (htm *HybridTunnelManager) FindTunnelForEndpoint(endpointName string) (stri
 		}
 	}
 
-	// 这里可以添加WebSocket端点的查找逻辑
-	return "", false
-}
-
-// GetEndpointsInfo 获取端点信息
-func (htm *HybridTunnelManager) GetEndpointsInfo(tunnelName string) map[string]*EndpointInfo {
-	// 首先尝试gRPC
-	if htm.grpcManager != nil {
-		if info := htm.grpcManager.GetEndpointsInfo(tunnelName); info != nil {
-			return info
+	// 尝试WebSocket
+		if htm.wsManager != nil {
+			if tunnelName, exists := htm.wsManager.FindTunnelForEndpoint(endpointName); exists {
+				return tunnelName, true
+			}
 		}
+	
+		return "", false
 	}
-
-	// 这里可以添加WebSocket端点信息的获取逻辑
-	return nil
-}
+	
+	// GetEndpointsInfo 获取端点信息
+	func (htm *HybridTunnelManager) GetEndpointsInfo(tunnelName string) map[string]*EndpointInfo {
+		var grpcInfo, wsInfo map[string]*EndpointInfo
+	
+		// 获取gRPC信息
+		if htm.grpcManager != nil {
+			grpcInfo = htm.grpcManager.GetEndpointsInfo(tunnelName)
+		}
+	
+		// 获取WebSocket信息
+		if htm.wsManager != nil {
+			wsInfo = htm.wsManager.GetEndpointsInfo(tunnelName)
+		}
+	
+		// 合并结果
+		if grpcInfo == nil && wsInfo == nil {
+			return nil
+		}
+	
+		result := make(map[string]*EndpointInfo)
+		if grpcInfo != nil {
+			for k, v := range grpcInfo {
+				result[k] = v
+			}
+		}
+		if wsInfo != nil {
+			for k, v := range wsInfo {
+				// 如果重名，gRPC优先
+				if _, exists := result[k]; !exists {
+					result[k] = v
+				}
+			}
+		}
+	
+		return result
+	}
 
 // MeasureEndpointLatency 测量端点延迟
 func (htm *HybridTunnelManager) MeasureEndpointLatency(tunnelName, endpointName string) (time.Duration, error) {
@@ -259,17 +270,12 @@ func (htm *HybridTunnelManager) MeasureEndpointLatency(tunnelName, endpointName 
 		
 		// 使用轻量级ping请求测量延迟
 		pingPayload := &RequestPayload{
-			URL:  "aps://ping",
-			Data: []byte("ping"),
+		URL:  "aps://ping",
+		Data: []byte("ping"),
 		}
-
-		requestData, err := json.Marshal(pingPayload)
-		if err != nil {
-			return 0, err
-		}
-
+		
 		start := time.Now()
-		_, err = pool.SendRequest(context.Background(), requestData)
+		_, err := pool.SendRequest(context.Background(), pingPayload)
 		if err != nil {
 			return 0, err
 		}

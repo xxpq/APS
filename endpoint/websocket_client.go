@@ -56,23 +56,24 @@ func (c *WebSocketClient) Connect() error {
 	}
 
 	// 构建WebSocket URL
-	wsURL := fmt.Sprintf("ws://%s/ws", c.serverURL)
+	path := "/.tunnel"
+	wsURL := fmt.Sprintf("ws://%s%s", c.serverURL, path)
 	if strings.HasPrefix(c.serverURL, "https://") {
-		wsURL = fmt.Sprintf("wss://%s/ws", strings.TrimPrefix(c.serverURL, "https://"))
+		wsURL = fmt.Sprintf("wss://%s%s", strings.TrimPrefix(c.serverURL, "https://"), path)
 	} else if strings.HasPrefix(c.serverURL, "http://") {
-		wsURL = fmt.Sprintf("ws://%s/ws", strings.TrimPrefix(c.serverURL, "http://"))
+		wsURL = fmt.Sprintf("ws://%s%s", strings.TrimPrefix(c.serverURL, "http://"), path)
 	}
 
 	// 设置请求头
 	headers := http.Header{}
-	headers.Set("tunnel-name", c.tunnelName)
-	headers.Set("endpoint-name", c.endpointName)
-	headers.Set("password", c.tunnelPassword)
-	headers.Set("x-aps-tunnel", endpointVersion)
+	headers.Set("X-Tunnel-Name", c.tunnelName)
+	headers.Set("X-Endpoint-Name", c.endpointName)
+	headers.Set("X-Tunnel-Password", c.tunnelPassword)
+	headers.Set("X-Aps-Tunnel", endpointVersion)
 
 	// 创建WebSocket连接
 	dialer := websocket.Dialer{
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		TLSClientConfig:  &tls.Config{InsecureSkipVerify: true},
 		HandshakeTimeout: 10 * time.Second,
 	}
 
@@ -107,7 +108,7 @@ func (c *WebSocketClient) Disconnect() {
 
 	c.cancel()
 	close(c.sendChan)
-	
+
 	if c.conn != nil {
 		c.conn.Close()
 	}
@@ -134,6 +135,10 @@ func (c *WebSocketClient) readLoop() {
 				if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
 					log.Printf("WebSocket read error: %v", err)
 				}
+				// Mark connection as disconnected
+				c.mu.Lock()
+				c.isConnected = false
+				c.mu.Unlock()
 				return
 			}
 
@@ -168,6 +173,10 @@ func (c *WebSocketClient) writeLoop() {
 
 			if err := c.conn.WriteMessage(websocket.BinaryMessage, message); err != nil {
 				log.Printf("WebSocket write error: %v", err)
+				// Mark connection as disconnected
+				c.mu.Lock()
+				c.isConnected = false
+				c.mu.Unlock()
 				return
 			}
 

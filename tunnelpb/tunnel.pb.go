@@ -21,6 +21,62 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
+// RelayMessageType defines the type of relay message
+type RelayMessageType int32
+
+const (
+	RelayMessageType_RELAY_DATA     RelayMessageType = 0
+	RelayMessageType_RELAY_CONTROL  RelayMessageType = 1
+	RelayMessageType_ROUTE_REQUEST  RelayMessageType = 2
+	RelayMessageType_ROUTE_RESPONSE RelayMessageType = 3
+	RelayMessageType_HEARTBEAT      RelayMessageType = 4
+)
+
+// Enum value maps for RelayMessageType.
+var (
+	RelayMessageType_name = map[int32]string{
+		0: "RELAY_DATA",
+		1: "RELAY_CONTROL",
+		2: "ROUTE_REQUEST",
+		3: "ROUTE_RESPONSE",
+		4: "HEARTBEAT",
+	}
+	RelayMessageType_value = map[string]int32{
+		"RELAY_DATA":     0,
+		"RELAY_CONTROL":  1,
+		"ROUTE_REQUEST":  2,
+		"ROUTE_RESPONSE": 3,
+		"HEARTBEAT":      4,
+	}
+)
+
+func (x RelayMessageType) Enum() *RelayMessageType {
+	p := new(RelayMessageType)
+	*p = x
+	return p
+}
+
+func (x RelayMessageType) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (RelayMessageType) Descriptor() protoreflect.EnumDescriptor {
+	return file_tunnelpb_tunnel_proto_enumTypes[0].Descriptor()
+}
+
+func (RelayMessageType) Type() protoreflect.EnumType {
+	return &file_tunnelpb_tunnel_proto_enumTypes[0]
+}
+
+func (x RelayMessageType) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use RelayMessageType.Descriptor instead.
+func (RelayMessageType) EnumDescriptor() ([]byte, []int) {
+	return file_tunnelpb_tunnel_proto_rawDescGZIP(), []int{0}
+}
+
 // ServerToEndpoint is a wrapper for messages sent from the Server (APS) to the Endpoint client.
 type ServerToEndpoint struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -521,6 +577,473 @@ func (x *Heartbeat) GetTimestamp() int64 {
 	return 0
 }
 
+// RelayMessage defines messages for relay communication
+type RelayMessage struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Type          RelayMessageType       `protobuf:"varint,1,opt,name=type,proto3,enum=tunnel.RelayMessageType" json:"type,omitempty"`
+	SourceClient  string                 `protobuf:"bytes,2,opt,name=source_client,json=sourceClient,proto3" json:"source_client,omitempty"`
+	TargetClient  string                 `protobuf:"bytes,3,opt,name=target_client,json=targetClient,proto3" json:"target_client,omitempty"`
+	Data          []byte                 `protobuf:"bytes,4,opt,name=data,proto3" json:"data,omitempty"`
+	Timestamp     int64                  `protobuf:"varint,5,opt,name=timestamp,proto3" json:"timestamp,omitempty"`
+	Metadata      map[string]string      `protobuf:"bytes,6,rep,name=metadata,proto3" json:"metadata,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RelayMessage) Reset() {
+	*x = RelayMessage{}
+	mi := &file_tunnelpb_tunnel_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RelayMessage) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RelayMessage) ProtoMessage() {}
+
+func (x *RelayMessage) ProtoReflect() protoreflect.Message {
+	mi := &file_tunnelpb_tunnel_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RelayMessage.ProtoReflect.Descriptor instead.
+func (*RelayMessage) Descriptor() ([]byte, []int) {
+	return file_tunnelpb_tunnel_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *RelayMessage) GetType() RelayMessageType {
+	if x != nil {
+		return x.Type
+	}
+	return RelayMessageType_RELAY_DATA
+}
+
+func (x *RelayMessage) GetSourceClient() string {
+	if x != nil {
+		return x.SourceClient
+	}
+	return ""
+}
+
+func (x *RelayMessage) GetTargetClient() string {
+	if x != nil {
+		return x.TargetClient
+	}
+	return ""
+}
+
+func (x *RelayMessage) GetData() []byte {
+	if x != nil {
+		return x.Data
+	}
+	return nil
+}
+
+func (x *RelayMessage) GetTimestamp() int64 {
+	if x != nil {
+		return x.Timestamp
+	}
+	return 0
+}
+
+func (x *RelayMessage) GetMetadata() map[string]string {
+	if x != nil {
+		return x.Metadata
+	}
+	return nil
+}
+
+// RouteInfo contains routing information for relay connections
+type RouteInfo struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Source        string                 `protobuf:"bytes,1,opt,name=source,proto3" json:"source,omitempty"`
+	Target        string                 `protobuf:"bytes,2,opt,name=target,proto3" json:"target,omitempty"`
+	Path          []string               `protobuf:"bytes,3,rep,name=path,proto3" json:"path,omitempty"`
+	HopCount      int32                  `protobuf:"varint,4,opt,name=hop_count,json=hopCount,proto3" json:"hop_count,omitempty"`
+	TotalLatency  int64                  `protobuf:"varint,5,opt,name=total_latency,json=totalLatency,proto3" json:"total_latency,omitempty"`
+	Reliability   float64                `protobuf:"fixed64,6,opt,name=reliability,proto3" json:"reliability,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RouteInfo) Reset() {
+	*x = RouteInfo{}
+	mi := &file_tunnelpb_tunnel_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RouteInfo) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RouteInfo) ProtoMessage() {}
+
+func (x *RouteInfo) ProtoReflect() protoreflect.Message {
+	mi := &file_tunnelpb_tunnel_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RouteInfo.ProtoReflect.Descriptor instead.
+func (*RouteInfo) Descriptor() ([]byte, []int) {
+	return file_tunnelpb_tunnel_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *RouteInfo) GetSource() string {
+	if x != nil {
+		return x.Source
+	}
+	return ""
+}
+
+func (x *RouteInfo) GetTarget() string {
+	if x != nil {
+		return x.Target
+	}
+	return ""
+}
+
+func (x *RouteInfo) GetPath() []string {
+	if x != nil {
+		return x.Path
+	}
+	return nil
+}
+
+func (x *RouteInfo) GetHopCount() int32 {
+	if x != nil {
+		return x.HopCount
+	}
+	return 0
+}
+
+func (x *RouteInfo) GetTotalLatency() int64 {
+	if x != nil {
+		return x.TotalLatency
+	}
+	return 0
+}
+
+func (x *RouteInfo) GetReliability() float64 {
+	if x != nil {
+		return x.Reliability
+	}
+	return 0
+}
+
+// RouteRequest requests route calculation
+type RouteRequest struct {
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	Source          string                 `protobuf:"bytes,1,opt,name=source,proto3" json:"source,omitempty"`
+	Target          string                 `protobuf:"bytes,2,opt,name=target,proto3" json:"target,omitempty"`
+	AvailableRelays []string               `protobuf:"bytes,3,rep,name=available_relays,json=availableRelays,proto3" json:"available_relays,omitempty"`
+	Constraints     *RouteConstraints      `protobuf:"bytes,4,opt,name=constraints,proto3" json:"constraints,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *RouteRequest) Reset() {
+	*x = RouteRequest{}
+	mi := &file_tunnelpb_tunnel_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RouteRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RouteRequest) ProtoMessage() {}
+
+func (x *RouteRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_tunnelpb_tunnel_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RouteRequest.ProtoReflect.Descriptor instead.
+func (*RouteRequest) Descriptor() ([]byte, []int) {
+	return file_tunnelpb_tunnel_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *RouteRequest) GetSource() string {
+	if x != nil {
+		return x.Source
+	}
+	return ""
+}
+
+func (x *RouteRequest) GetTarget() string {
+	if x != nil {
+		return x.Target
+	}
+	return ""
+}
+
+func (x *RouteRequest) GetAvailableRelays() []string {
+	if x != nil {
+		return x.AvailableRelays
+	}
+	return nil
+}
+
+func (x *RouteRequest) GetConstraints() *RouteConstraints {
+	if x != nil {
+		return x.Constraints
+	}
+	return nil
+}
+
+// RouteConstraints defines routing constraints
+type RouteConstraints struct {
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	MaxHops        int32                  `protobuf:"varint,1,opt,name=max_hops,json=maxHops,proto3" json:"max_hops,omitempty"`
+	MaxLatency     int64                  `protobuf:"varint,2,opt,name=max_latency,json=maxLatency,proto3" json:"max_latency,omitempty"`
+	MinReliability float64                `protobuf:"fixed64,3,opt,name=min_reliability,json=minReliability,proto3" json:"min_reliability,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *RouteConstraints) Reset() {
+	*x = RouteConstraints{}
+	mi := &file_tunnelpb_tunnel_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RouteConstraints) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RouteConstraints) ProtoMessage() {}
+
+func (x *RouteConstraints) ProtoReflect() protoreflect.Message {
+	mi := &file_tunnelpb_tunnel_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RouteConstraints.ProtoReflect.Descriptor instead.
+func (*RouteConstraints) Descriptor() ([]byte, []int) {
+	return file_tunnelpb_tunnel_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *RouteConstraints) GetMaxHops() int32 {
+	if x != nil {
+		return x.MaxHops
+	}
+	return 0
+}
+
+func (x *RouteConstraints) GetMaxLatency() int64 {
+	if x != nil {
+		return x.MaxLatency
+	}
+	return 0
+}
+
+func (x *RouteConstraints) GetMinReliability() float64 {
+	if x != nil {
+		return x.MinReliability
+	}
+	return 0
+}
+
+// RouteResponse contains calculated routes
+type RouteResponse struct {
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	Routes         []*RouteInfo           `protobuf:"bytes,1,rep,name=routes,proto3" json:"routes,omitempty"`
+	Recommendation string                 `protobuf:"bytes,2,opt,name=recommendation,proto3" json:"recommendation,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *RouteResponse) Reset() {
+	*x = RouteResponse{}
+	mi := &file_tunnelpb_tunnel_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RouteResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RouteResponse) ProtoMessage() {}
+
+func (x *RouteResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_tunnelpb_tunnel_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RouteResponse.ProtoReflect.Descriptor instead.
+func (*RouteResponse) Descriptor() ([]byte, []int) {
+	return file_tunnelpb_tunnel_proto_rawDescGZIP(), []int{11}
+}
+
+func (x *RouteResponse) GetRoutes() []*RouteInfo {
+	if x != nil {
+		return x.Routes
+	}
+	return nil
+}
+
+func (x *RouteResponse) GetRecommendation() string {
+	if x != nil {
+		return x.Recommendation
+	}
+	return ""
+}
+
+// RouteUpdate updates route information
+type RouteUpdate struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Endpoint      string                 `protobuf:"bytes,1,opt,name=endpoint,proto3" json:"endpoint,omitempty"`
+	Routes        []*RouteInfo           `protobuf:"bytes,2,rep,name=routes,proto3" json:"routes,omitempty"`
+	Timestamp     int64                  `protobuf:"varint,3,opt,name=timestamp,proto3" json:"timestamp,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RouteUpdate) Reset() {
+	*x = RouteUpdate{}
+	mi := &file_tunnelpb_tunnel_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RouteUpdate) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RouteUpdate) ProtoMessage() {}
+
+func (x *RouteUpdate) ProtoReflect() protoreflect.Message {
+	mi := &file_tunnelpb_tunnel_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RouteUpdate.ProtoReflect.Descriptor instead.
+func (*RouteUpdate) Descriptor() ([]byte, []int) {
+	return file_tunnelpb_tunnel_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *RouteUpdate) GetEndpoint() string {
+	if x != nil {
+		return x.Endpoint
+	}
+	return ""
+}
+
+func (x *RouteUpdate) GetRoutes() []*RouteInfo {
+	if x != nil {
+		return x.Routes
+	}
+	return nil
+}
+
+func (x *RouteUpdate) GetTimestamp() int64 {
+	if x != nil {
+		return x.Timestamp
+	}
+	return 0
+}
+
+// RouteUpdateResponse confirms route update
+type RouteUpdateResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Success       bool                   `protobuf:"varint,1,opt,name=success,proto3" json:"success,omitempty"`
+	Message       string                 `protobuf:"bytes,2,opt,name=message,proto3" json:"message,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RouteUpdateResponse) Reset() {
+	*x = RouteUpdateResponse{}
+	mi := &file_tunnelpb_tunnel_proto_msgTypes[13]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RouteUpdateResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RouteUpdateResponse) ProtoMessage() {}
+
+func (x *RouteUpdateResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_tunnelpb_tunnel_proto_msgTypes[13]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RouteUpdateResponse.ProtoReflect.Descriptor instead.
+func (*RouteUpdateResponse) Descriptor() ([]byte, []int) {
+	return file_tunnelpb_tunnel_proto_rawDescGZIP(), []int{13}
+}
+
+func (x *RouteUpdateResponse) GetSuccess() bool {
+	if x != nil {
+		return x.Success
+	}
+	return false
+}
+
+func (x *RouteUpdateResponse) GetMessage() string {
+	if x != nil {
+		return x.Message
+	}
+	return ""
+}
+
 var File_tunnelpb_tunnel_proto protoreflect.FileDescriptor
 
 const file_tunnelpb_tunnel_proto_rawDesc = "" +
@@ -552,9 +1075,58 @@ const file_tunnelpb_tunnel_proto_rawDesc = "" +
 	"\acontent\"\b\n" +
 	"\x06Cancel\")\n" +
 	"\tHeartbeat\x12\x1c\n" +
-	"\ttimestamp\x18\x01 \x01(\x03R\ttimestamp2T\n" +
+	"\ttimestamp\x18\x01 \x01(\x03R\ttimestamp\"\xb5\x02\n" +
+	"\fRelayMessage\x12,\n" +
+	"\x04type\x18\x01 \x01(\x0e2\x18.tunnel.RelayMessageTypeR\x04type\x12#\n" +
+	"\rsource_client\x18\x02 \x01(\tR\fsourceClient\x12#\n" +
+	"\rtarget_client\x18\x03 \x01(\tR\ftargetClient\x12\x12\n" +
+	"\x04data\x18\x04 \x01(\fR\x04data\x12\x1c\n" +
+	"\ttimestamp\x18\x05 \x01(\x03R\ttimestamp\x12>\n" +
+	"\bmetadata\x18\x06 \x03(\v2\".tunnel.RelayMessage.MetadataEntryR\bmetadata\x1a;\n" +
+	"\rMetadataEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xb3\x01\n" +
+	"\tRouteInfo\x12\x16\n" +
+	"\x06source\x18\x01 \x01(\tR\x06source\x12\x16\n" +
+	"\x06target\x18\x02 \x01(\tR\x06target\x12\x12\n" +
+	"\x04path\x18\x03 \x03(\tR\x04path\x12\x1b\n" +
+	"\thop_count\x18\x04 \x01(\x05R\bhopCount\x12#\n" +
+	"\rtotal_latency\x18\x05 \x01(\x03R\ftotalLatency\x12 \n" +
+	"\vreliability\x18\x06 \x01(\x01R\vreliability\"\xa5\x01\n" +
+	"\fRouteRequest\x12\x16\n" +
+	"\x06source\x18\x01 \x01(\tR\x06source\x12\x16\n" +
+	"\x06target\x18\x02 \x01(\tR\x06target\x12)\n" +
+	"\x10available_relays\x18\x03 \x03(\tR\x0favailableRelays\x12:\n" +
+	"\vconstraints\x18\x04 \x01(\v2\x18.tunnel.RouteConstraintsR\vconstraints\"w\n" +
+	"\x10RouteConstraints\x12\x19\n" +
+	"\bmax_hops\x18\x01 \x01(\x05R\amaxHops\x12\x1f\n" +
+	"\vmax_latency\x18\x02 \x01(\x03R\n" +
+	"maxLatency\x12'\n" +
+	"\x0fmin_reliability\x18\x03 \x01(\x01R\x0eminReliability\"b\n" +
+	"\rRouteResponse\x12)\n" +
+	"\x06routes\x18\x01 \x03(\v2\x11.tunnel.RouteInfoR\x06routes\x12&\n" +
+	"\x0erecommendation\x18\x02 \x01(\tR\x0erecommendation\"r\n" +
+	"\vRouteUpdate\x12\x1a\n" +
+	"\bendpoint\x18\x01 \x01(\tR\bendpoint\x12)\n" +
+	"\x06routes\x18\x02 \x03(\v2\x11.tunnel.RouteInfoR\x06routes\x12\x1c\n" +
+	"\ttimestamp\x18\x03 \x01(\x03R\ttimestamp\"I\n" +
+	"\x13RouteUpdateResponse\x12\x18\n" +
+	"\asuccess\x18\x01 \x01(\bR\asuccess\x12\x18\n" +
+	"\amessage\x18\x02 \x01(\tR\amessage*k\n" +
+	"\x10RelayMessageType\x12\x0e\n" +
+	"\n" +
+	"RELAY_DATA\x10\x00\x12\x11\n" +
+	"\rRELAY_CONTROL\x10\x01\x12\x11\n" +
+	"\rROUTE_REQUEST\x10\x02\x12\x12\n" +
+	"\x0eROUTE_RESPONSE\x10\x03\x12\r\n" +
+	"\tHEARTBEAT\x10\x042T\n" +
 	"\rTunnelService\x12C\n" +
-	"\tEstablish\x12\x18.tunnel.EndpointToServer\x1a\x18.tunnel.ServerToEndpoint(\x010\x01B\fZ\n" +
+	"\tEstablish\x12\x18.tunnel.EndpointToServer\x1a\x18.tunnel.ServerToEndpoint(\x010\x012P\n" +
+	"\fRelayService\x12@\n" +
+	"\x0eEstablishRelay\x12\x14.tunnel.RelayMessage\x1a\x14.tunnel.RelayMessage(\x010\x012\x95\x01\n" +
+	"\x0eRoutingService\x12>\n" +
+	"\x0fCalculateRoutes\x12\x14.tunnel.RouteRequest\x1a\x15.tunnel.RouteResponse\x12C\n" +
+	"\x0fUpdateRouteInfo\x12\x13.tunnel.RouteUpdate\x1a\x1b.tunnel.RouteUpdateResponseB\fZ\n" +
 	"./tunnelpbb\x06proto3"
 
 var (
@@ -569,30 +1141,51 @@ func file_tunnelpb_tunnel_proto_rawDescGZIP() []byte {
 	return file_tunnelpb_tunnel_proto_rawDescData
 }
 
-var file_tunnelpb_tunnel_proto_msgTypes = make([]protoimpl.MessageInfo, 7)
+var file_tunnelpb_tunnel_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
+var file_tunnelpb_tunnel_proto_msgTypes = make([]protoimpl.MessageInfo, 15)
 var file_tunnelpb_tunnel_proto_goTypes = []any{
-	(*ServerToEndpoint)(nil),    // 0: tunnel.ServerToEndpoint
-	(*EndpointToServer)(nil),    // 1: tunnel.EndpointToServer
-	(*RegistrationRequest)(nil), // 2: tunnel.RegistrationRequest
-	(*Request)(nil),             // 3: tunnel.Request
-	(*Response)(nil),            // 4: tunnel.Response
-	(*Cancel)(nil),              // 5: tunnel.Cancel
-	(*Heartbeat)(nil),           // 6: tunnel.Heartbeat
+	(RelayMessageType)(0),       // 0: tunnel.RelayMessageType
+	(*ServerToEndpoint)(nil),    // 1: tunnel.ServerToEndpoint
+	(*EndpointToServer)(nil),    // 2: tunnel.EndpointToServer
+	(*RegistrationRequest)(nil), // 3: tunnel.RegistrationRequest
+	(*Request)(nil),             // 4: tunnel.Request
+	(*Response)(nil),            // 5: tunnel.Response
+	(*Cancel)(nil),              // 6: tunnel.Cancel
+	(*Heartbeat)(nil),           // 7: tunnel.Heartbeat
+	(*RelayMessage)(nil),        // 8: tunnel.RelayMessage
+	(*RouteInfo)(nil),           // 9: tunnel.RouteInfo
+	(*RouteRequest)(nil),        // 10: tunnel.RouteRequest
+	(*RouteConstraints)(nil),    // 11: tunnel.RouteConstraints
+	(*RouteResponse)(nil),       // 12: tunnel.RouteResponse
+	(*RouteUpdate)(nil),         // 13: tunnel.RouteUpdate
+	(*RouteUpdateResponse)(nil), // 14: tunnel.RouteUpdateResponse
+	nil,                         // 15: tunnel.RelayMessage.MetadataEntry
 }
 var file_tunnelpb_tunnel_proto_depIdxs = []int32{
-	3, // 0: tunnel.ServerToEndpoint.request:type_name -> tunnel.Request
-	5, // 1: tunnel.ServerToEndpoint.cancel:type_name -> tunnel.Cancel
-	6, // 2: tunnel.ServerToEndpoint.heartbeat:type_name -> tunnel.Heartbeat
-	2, // 3: tunnel.EndpointToServer.registration:type_name -> tunnel.RegistrationRequest
-	4, // 4: tunnel.EndpointToServer.response:type_name -> tunnel.Response
-	6, // 5: tunnel.EndpointToServer.heartbeat:type_name -> tunnel.Heartbeat
-	1, // 6: tunnel.TunnelService.Establish:input_type -> tunnel.EndpointToServer
-	0, // 7: tunnel.TunnelService.Establish:output_type -> tunnel.ServerToEndpoint
-	7, // [7:8] is the sub-list for method output_type
-	6, // [6:7] is the sub-list for method input_type
-	6, // [6:6] is the sub-list for extension type_name
-	6, // [6:6] is the sub-list for extension extendee
-	0, // [0:6] is the sub-list for field type_name
+	4,  // 0: tunnel.ServerToEndpoint.request:type_name -> tunnel.Request
+	6,  // 1: tunnel.ServerToEndpoint.cancel:type_name -> tunnel.Cancel
+	7,  // 2: tunnel.ServerToEndpoint.heartbeat:type_name -> tunnel.Heartbeat
+	3,  // 3: tunnel.EndpointToServer.registration:type_name -> tunnel.RegistrationRequest
+	5,  // 4: tunnel.EndpointToServer.response:type_name -> tunnel.Response
+	7,  // 5: tunnel.EndpointToServer.heartbeat:type_name -> tunnel.Heartbeat
+	0,  // 6: tunnel.RelayMessage.type:type_name -> tunnel.RelayMessageType
+	15, // 7: tunnel.RelayMessage.metadata:type_name -> tunnel.RelayMessage.MetadataEntry
+	11, // 8: tunnel.RouteRequest.constraints:type_name -> tunnel.RouteConstraints
+	9,  // 9: tunnel.RouteResponse.routes:type_name -> tunnel.RouteInfo
+	9,  // 10: tunnel.RouteUpdate.routes:type_name -> tunnel.RouteInfo
+	2,  // 11: tunnel.TunnelService.Establish:input_type -> tunnel.EndpointToServer
+	8,  // 12: tunnel.RelayService.EstablishRelay:input_type -> tunnel.RelayMessage
+	10, // 13: tunnel.RoutingService.CalculateRoutes:input_type -> tunnel.RouteRequest
+	13, // 14: tunnel.RoutingService.UpdateRouteInfo:input_type -> tunnel.RouteUpdate
+	1,  // 15: tunnel.TunnelService.Establish:output_type -> tunnel.ServerToEndpoint
+	8,  // 16: tunnel.RelayService.EstablishRelay:output_type -> tunnel.RelayMessage
+	12, // 17: tunnel.RoutingService.CalculateRoutes:output_type -> tunnel.RouteResponse
+	14, // 18: tunnel.RoutingService.UpdateRouteInfo:output_type -> tunnel.RouteUpdateResponse
+	15, // [15:19] is the sub-list for method output_type
+	11, // [11:15] is the sub-list for method input_type
+	11, // [11:11] is the sub-list for extension type_name
+	11, // [11:11] is the sub-list for extension extendee
+	0,  // [0:11] is the sub-list for field type_name
 }
 
 func init() { file_tunnelpb_tunnel_proto_init() }
@@ -619,13 +1212,14 @@ func file_tunnelpb_tunnel_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_tunnelpb_tunnel_proto_rawDesc), len(file_tunnelpb_tunnel_proto_rawDesc)),
-			NumEnums:      0,
-			NumMessages:   7,
+			NumEnums:      1,
+			NumMessages:   15,
 			NumExtensions: 0,
-			NumServices:   1,
+			NumServices:   3,
 		},
 		GoTypes:           file_tunnelpb_tunnel_proto_goTypes,
 		DependencyIndexes: file_tunnelpb_tunnel_proto_depIdxs,
+		EnumInfos:         file_tunnelpb_tunnel_proto_enumTypes,
 		MessageInfos:      file_tunnelpb_tunnel_proto_msgTypes,
 	}.Build()
 	File_tunnelpb_tunnel_proto = out.File

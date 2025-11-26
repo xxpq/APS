@@ -69,3 +69,80 @@ message Cancel {
 message Heartbeat {
   int64 timestamp = 1;
 }
+
+// RelayService provides relay functionality for multi-hop connections
+service RelayService {
+  // EstablishRelay creates a persistent bidirectional relay stream
+  rpc EstablishRelay(stream RelayMessage) returns (stream RelayMessage);
+}
+
+// RelayMessage defines messages for relay communication
+message RelayMessage {
+  RelayMessageType type = 1;
+  string source_client = 2;
+  string target_client = 3;
+  bytes data = 4;
+  int64 timestamp = 5;
+  map<string, string> metadata = 6;
+}
+
+// RelayMessageType defines the type of relay message
+enum RelayMessageType {
+  RELAY_DATA = 0;
+  RELAY_CONTROL = 1;
+  ROUTE_REQUEST = 2;
+  ROUTE_RESPONSE = 3;
+  HEARTBEAT = 4;
+}
+
+// RouteInfo contains routing information for relay connections
+message RouteInfo {
+  string source = 1;
+  string target = 2;
+  repeated string path = 3;
+  int32 hop_count = 4;
+  int64 total_latency = 5;
+  double reliability = 6;
+}
+
+// RoutingService provides route optimization services
+service RoutingService {
+  // CalculateRoutes calculates optimal routes between endpoints
+  rpc CalculateRoutes(RouteRequest) returns (RouteResponse);
+  // UpdateRouteInfo updates route information
+  rpc UpdateRouteInfo(RouteUpdate) returns (RouteUpdateResponse);
+}
+
+// RouteRequest requests route calculation
+message RouteRequest {
+  string source = 1;
+  string target = 2;
+  repeated string available_relays = 3;
+  RouteConstraints constraints = 4;
+}
+
+// RouteConstraints defines routing constraints
+message RouteConstraints {
+  int32 max_hops = 1;
+  int64 max_latency = 2;
+  double min_reliability = 3;
+}
+
+// RouteResponse contains calculated routes
+message RouteResponse {
+  repeated RouteInfo routes = 1;
+  string recommendation = 2;
+}
+
+// RouteUpdate updates route information
+message RouteUpdate {
+  string endpoint = 1;
+  repeated RouteInfo routes = 2;
+  int64 timestamp = 3;
+}
+
+// RouteUpdateResponse confirms route update
+message RouteUpdateResponse {
+  bool success = 1;
+  string message = 2;
+}

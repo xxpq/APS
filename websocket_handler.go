@@ -49,6 +49,12 @@ func (p *MapRemoteProxy) handleWebSocket(w http.ResponseWriter, r *http.Request)
 		})
 	}()
 
+	// Check if this is a tunnel WebSocket connection
+	if r.URL.Path == "/.tunnel" {
+		p.handleTunnelWebSocket(w, r)
+		return
+	}
+
 	// Auth check
 	_, user, username := p.checkAuth(r, nil) // Mapping will be checked later
 	if user != nil {
@@ -224,4 +230,32 @@ func processWebSocketMessage(msg []byte, direction string, rules []WebSocketMess
 	}
 
 	return modifiedMsg, drop
+}
+
+// handleTunnelWebSocket handles WebSocket connections for tunnel communication
+func (p *MapRemoteProxy) handleTunnelWebSocket(w http.ResponseWriter, r *http.Request) {
+	log.Printf("[WS] Handling tunnel WebSocket connection")
+
+	// Get tunnel and endpoint information from headers
+	tunnelName := r.Header.Get("X-Tunnel-Name")
+	endpointName := r.Header.Get("X-Endpoint-Name")
+	// tunnelPassword := r.Header.Get("X-Tunnel-Password") // Not used here, but passed to wsManager
+	apsVersion := r.Header.Get("X-Aps-Tunnel")
+
+	if tunnelName == "" || endpointName == "" {
+		log.Printf("[WS] Missing required headers for tunnel connection")
+		http.Error(w, "Missing required headers", http.StatusBadRequest)
+		return
+	}
+
+	log.Printf("[WS] Tunnel connection request: tunnel=%s, endpoint=%s, version=%s", tunnelName, endpointName, apsVersion)
+
+	// Check if we have a hybrid tunnel manager that can handle WebSocket connections
+	if hybridTM, ok := p.tunnelManager.(*HybridTunnelManager); ok && hybridTM.wsManager != nil {
+		// Delegate to the WebSocket pool manager
+		hybridTM.wsManager.HandleWebSocketUpgrade(w, r)
+	} else {
+		log.Printf("[WS] WebSocket manager not available for tunnel connection")
+		http.Error(w, "WebSocket tunnel not available", http.StatusServiceUnavailable)
+	}
 }

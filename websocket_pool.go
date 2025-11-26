@@ -1,526 +1,525 @@
 package main
 
 import (
-	"context"
-	"crypto/rand"
-	"encoding/json"
-	"errors"
-	"fmt"
-	"log"
-	"net/http"
-	"sync"
-	"time"
+"context"
+"errors"
+"fmt"
+"log"
+"net/http"
+"sync"
+"time"
 
-	"github.com/gorilla/websocket"
+pb "aps/tunnelpb"
+
+"github.com/gorilla/websocket"
+"google.golang.org/protobuf/proto"
 )
 
 const (
-	// WebSocket连接池配置
-	DefaultPoolSize        = 3          // 默认连接池大小
-	MaxPoolSize           = 10         // 最大连接池大小
-	DefaultIdleTimeout    = 5 * time.Minute // 默认连接闲置超时时间
-	DefaultMaxLifetime    = 30 * time.Minute // 默认连接最大生命周期
-	PingPeriod            = 30 * time.Second // ping周期
-	PongWait              = 60 * time.Second // pong等待时间
+// WebSocket连接池配置
+DefaultPoolSize    = 3                // 默认连接池大小
+MaxPoolSize        = 10               // 最大连接池大小
+DefaultIdleTimeout = 5 * time.Minute  // 默认连接闲置超时时间
+DefaultMaxLifetime = 30 * time.Minute // 默认连接最大生命周期
+PingPeriod         = 30 * time.Second // ping周期
+PongWait           = 60 * time.Second // pong等待时间
 )
 
 // WebSocketConnection 表示一个WebSocket连接
 type WebSocketConnection struct {
-	ID               string
-	Conn             *websocket.Conn
-	TunnelName       string
-	EndpointName     string
-	Status           ConnectionStatus
-	LastUsedTime     time.Time
-	CreatedTime      time.Time
-	mu               sync.Mutex
-	inUse            bool
-	sendCh           chan []byte
-	pendingRequests  map[string]chan *WebSocketResponse
+ID              string
+Conn            *websocket.Conn
+TunnelName      string
+EndpointName    string
+Status          ConnectionStatus
+LastUsedTime    time.Time
+CreatedTime     time.Time
+mu              sync.Mutex
+inUse           bool
+sendCh          chan []byte
+pendingRequests map[string]chan *pb.Response
 }
 
 type ConnectionStatus int
 
 const (
-	StatusIdle ConnectionStatus = iota
-	StatusInUse
-	StatusClosed
+StatusIdle ConnectionStatus = iota
+StatusInUse
+StatusClosed
 )
-
-type WebSocketResponse struct {
-	Data  []byte
-	Error string
-}
 
 // WebSocketPool 管理WebSocket连接池
 type WebSocketPool struct {
-	mu           sync.RWMutex
-	connections  []*WebSocketConnection
-	tunnelName   string
-	endpointName string
-	password     string
-	serverAddr   string
-	maxSize      int
-	activeCount  int
-	idleTimeout  time.Duration
-	maxLifetime  time.Duration
+mu           sync.RWMutex
+connections  []*WebSocketConnection
+tunnelName   string
+endpointName string
+password     string
+serverAddr   string
+maxSize      int
+activeCount  int
+idleTimeout  time.Duration
+maxLifetime  time.Duration
 }
 
 // WebSocketPoolManager 管理所有的WebSocket连接池
 type WebSocketPoolManager struct {
-	mu              sync.RWMutex
-	pools           map[string]*WebSocketPool // key: tunnelName.endpointName
-	config          *Config
-	statsCollector  *StatsCollector
-	upgrader        websocket.Upgrader
+mu             sync.RWMutex
+pools          map[string]*WebSocketPool // key: tunnelName.endpointName
+config         *Config
+statsCollector *StatsCollector
+upgrader       websocket.Upgrader
 }
 
 // NewWebSocketPoolManager 创建WebSocket连接池管理器
 func NewWebSocketPoolManager(config *Config, statsCollector *StatsCollector) *WebSocketPoolManager {
-	return &WebSocketPoolManager{
-		pools:          make(map[string]*WebSocketPool),
-		config:         config,
-		statsCollector: statsCollector,
-		upgrader: websocket.Upgrader{
-			CheckOrigin: func(r *http.Request) bool {
-				return true // 允许所有来源
-			},
-		},
-	}
+return &WebSocketPoolManager{
+pools:          make(map[string]*WebSocketPool),
+config:         config,
+statsCollector: statsCollector,
+upgrader: websocket.Upgrader{
+CheckOrigin: func(r *http.Request) bool {
+return true // 允许所有来源
+},
+},
+}
 }
 
 // GetOrCreatePool 获取或创建连接池
 func (wspm *WebSocketPoolManager) GetOrCreatePool(tunnelName, endpointName, password, serverAddr string) *WebSocketPool {
-	key := fmt.Sprintf("%s.%s", tunnelName, endpointName)
-	
-	wspm.mu.RLock()
-	if pool, exists := wspm.pools[key]; exists {
-		wspm.mu.RUnlock()
-		return pool
-	}
-	wspm.mu.RUnlock()
+key := fmt.Sprintf("%s.%s", tunnelName, endpointName)
 
-	wspm.mu.Lock()
-	defer wspm.mu.Unlock()
+wspm.mu.RLock()
+if pool, exists := wspm.pools[key]; exists {
+wspm.mu.RUnlock()
+return pool
+}
+wspm.mu.RUnlock()
 
-	// 双重检查
-	if pool, exists := wspm.pools[key]; exists {
-		return pool
-	}
+wspm.mu.Lock()
+defer wspm.mu.Unlock()
 
-	// 获取隧道配置来确定连接池参数
-	poolSize := DefaultPoolSize
-	idleTimeout := DefaultIdleTimeout
-	maxLifetime := DefaultMaxLifetime
-	
-	if wspm.config != nil && wspm.config.Tunnels != nil {
-		if tunnelConfig, exists := wspm.config.Tunnels[tunnelName]; exists {
-			if tunnelConfig.WebSocketPool != nil {
-				wsConfig := tunnelConfig.WebSocketPool
-				if wsConfig.PoolSize > 0 {
-					poolSize = wsConfig.PoolSize
-				}
-				if wsConfig.IdleTimeout > 0 {
-					idleTimeout = time.Duration(wsConfig.IdleTimeout) * time.Second
-				}
-				if wsConfig.MaxLifetime > 0 {
-					maxLifetime = time.Duration(wsConfig.MaxLifetime) * time.Second
-				}
-			}
-		}
-	}
+// 双重检查
+if pool, exists := wspm.pools[key]; exists {
+return pool
+}
 
-	// 创建新连接池
-	pool := &WebSocketPool{
-		connections:  make([]*WebSocketConnection, 0),
-		tunnelName:   tunnelName,
-		endpointName: endpointName,
-		password:     password,
-		serverAddr:   serverAddr,
-		maxSize:      poolSize,
-		idleTimeout:  idleTimeout,
-		maxLifetime:  maxLifetime,
-	}
+// 获取隧道配置来确定连接池参数
+poolSize := DefaultPoolSize
+idleTimeout := DefaultIdleTimeout
+maxLifetime := DefaultMaxLifetime
 
-	wspm.pools[key] = pool
-	
-	// 启动连接池维护goroutine
-	go pool.maintainPool()
-	
-	log.Printf("[WS-POOL] Created new pool for %s.%s with size %d, idle timeout %v, max lifetime %v", 
-		tunnelName, endpointName, poolSize, idleTimeout, maxLifetime)
-	
-	return pool
+if wspm.config != nil && wspm.config.Tunnels != nil {
+if tunnelConfig, exists := wspm.config.Tunnels[tunnelName]; exists {
+if tunnelConfig.WebSocketPool != nil {
+wsConfig := tunnelConfig.WebSocketPool
+if wsConfig.PoolSize > 0 {
+poolSize = wsConfig.PoolSize
+}
+if wsConfig.IdleTimeout > 0 {
+idleTimeout = time.Duration(wsConfig.IdleTimeout) * time.Second
+}
+if wsConfig.MaxLifetime > 0 {
+maxLifetime = time.Duration(wsConfig.MaxLifetime) * time.Second
+}
+}
+}
+}
+
+// 创建新连接池
+pool := &WebSocketPool{
+connections:  make([]*WebSocketConnection, 0),
+tunnelName:   tunnelName,
+endpointName: endpointName,
+password:     password,
+serverAddr:   serverAddr,
+maxSize:      poolSize,
+idleTimeout:  idleTimeout,
+maxLifetime:  maxLifetime,
+}
+
+wspm.pools[key] = pool
+
+// 启动连接池维护goroutine
+go pool.maintainPool()
+
+log.Printf("[WS-POOL] Created new pool for %s.%s with size %d, idle timeout %v, max lifetime %v",
+tunnelName, endpointName, poolSize, idleTimeout, maxLifetime)
+
+return pool
 }
 
 // GetConnection 从连接池获取一个可用连接
 func (pool *WebSocketPool) GetConnection() (*WebSocketConnection, error) {
-	pool.mu.Lock()
-	defer pool.mu.Unlock()
+pool.mu.Lock()
+defer pool.mu.Unlock()
 
-	// 查找空闲连接
-	for _, conn := range pool.connections {
-		conn.mu.Lock()
-		if conn.Status == StatusIdle && !conn.inUse {
-			conn.inUse = true
-			conn.Status = StatusInUse
-			conn.LastUsedTime = time.Now()
-			conn.mu.Unlock()
-			
-			pool.activeCount++
-			log.Printf("[WS-POOL] Connection %s acquired from pool %s.%s (active: %d)", 
-				conn.ID, pool.tunnelName, pool.endpointName, pool.activeCount)
-			return conn, nil
-		}
-		conn.mu.Unlock()
-	}
+// 查找空闲连接
+for _, conn := range pool.connections {
+conn.mu.Lock()
+if conn.Status == StatusIdle && !conn.inUse {
+conn.inUse = true
+conn.Status = StatusInUse
+conn.LastUsedTime = time.Now()
+conn.mu.Unlock()
 
-	// 如果没有空闲连接且未达到最大数量，创建新连接
-	if len(pool.connections) < pool.maxSize {
-		conn, err := pool.createConnection()
-		if err != nil {
-			return nil, err
-		}
-		
-		conn.inUse = true
-		conn.Status = StatusInUse
-		conn.LastUsedTime = time.Now()
-		pool.activeCount++
-		
-		log.Printf("[WS-POOL] New connection %s created for pool %s.%s (active: %d)", 
-			conn.ID, pool.tunnelName, pool.endpointName, pool.activeCount)
-		return conn, nil
-	}
+pool.activeCount++
+log.Printf("[WS-POOL] Connection %s acquired from pool %s.%s (active: %d)",
+conn.ID, pool.tunnelName, pool.endpointName, pool.activeCount)
+return conn, nil
+}
+conn.mu.Unlock()
+}
 
-	return nil, fmt.Errorf("no available connections in pool")
+// 如果没有空闲连接且未达到最大数量，创建新连接
+// 注意：服务端是被动连接，无法主动创建连接
+// 这里只能等待客户端连接，或者返回错误
+// 为了简化，如果没有空闲连接，我们返回错误，让上层重试或等待
+// 实际场景中，客户端应该已经建立了足够的连接
+
+return nil, fmt.Errorf("no available connections in pool (max: %d, active: %d)", pool.maxSize, pool.activeCount)
 }
 
 // ReturnConnection 归还连接到连接池
 func (pool *WebSocketPool) ReturnConnection(conn *WebSocketConnection) {
-	conn.mu.Lock()
-	if conn.Status != StatusInUse {
-		conn.mu.Unlock()
-		return
-	}
-	
-	conn.inUse = false
-	conn.Status = StatusIdle
-	conn.LastUsedTime = time.Now()
-	conn.mu.Unlock()
-
-	pool.mu.Lock()
-	pool.activeCount--
-	log.Printf("[WS-POOL] Connection %s returned to pool %s.%s (active: %d)", 
-		conn.ID, pool.tunnelName, pool.endpointName, pool.activeCount)
-	pool.mu.Unlock()
+conn.mu.Lock()
+if conn.Status != StatusInUse {
+conn.mu.Unlock()
+return
 }
 
-// createConnection 创建新的WebSocket连接
+conn.inUse = false
+conn.Status = StatusIdle
+conn.LastUsedTime = time.Now()
+conn.mu.Unlock()
+
+pool.mu.Lock()
+pool.activeCount--
+log.Printf("[WS-POOL] Connection %s returned to pool %s.%s (active: %d)",
+conn.ID, pool.tunnelName, pool.endpointName, pool.activeCount)
+pool.mu.Unlock()
+}
+
+// createConnection 仅作为接口占位，实际连接由客户端发起
 func (pool *WebSocketPool) createConnection() (*WebSocketConnection, error) {
-	// 这里应该实现实际的WebSocket连接逻辑
-	// 暂时返回一个模拟连接
-	conn := &WebSocketConnection{
-		ID:              generateWSRequestID(),
-		TunnelName:      pool.tunnelName,
-		EndpointName:    pool.endpointName,
-		Status:          StatusIdle,
-		CreatedTime:     time.Now(),
-		LastUsedTime:    time.Now(),
-		sendCh:          make(chan []byte, 256),
-		pendingRequests: make(map[string]chan *WebSocketResponse),
-	}
-
-	// 启动连接处理goroutine
-	go conn.handleConnection(pool)
-	
-	return conn, nil
-}
-
-// handleConnection 处理WebSocket连接
-func (conn *WebSocketConnection) handleConnection(pool *WebSocketPool) {
-	// 这里应该实现实际的WebSocket消息处理逻辑
-	// 包括ping/pong、消息收发等
-	ticker := time.NewTicker(PingPeriod)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ticker.C:
-			// 发送ping
-			if conn.Conn != nil {
-				conn.Conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
-				if err := conn.Conn.WriteMessage(websocket.PingMessage, nil); err != nil {
-					log.Printf("[WS-CONN] Failed to send ping for connection %s: %v", conn.ID, err)
-					conn.close()
-					return
-				}
-			}
-		}
-	}
+return nil, errors.New("server cannot initiate websocket connections")
 }
 
 // close 关闭连接
 func (conn *WebSocketConnection) close() {
-	conn.mu.Lock()
-	defer conn.mu.Unlock()
+conn.mu.Lock()
+defer conn.mu.Unlock()
 
-	if conn.Status == StatusClosed {
-		return
-	}
+if conn.Status == StatusClosed {
+return
+}
 
-	conn.Status = StatusClosed
-	if conn.Conn != nil {
-		conn.Conn.Close()
-	}
-	close(conn.sendCh)
+conn.Status = StatusClosed
+if conn.Conn != nil {
+conn.Conn.Close()
+}
+close(conn.sendCh)
 }
 
 // maintainPool 维护连接池，清理过期连接
 func (pool *WebSocketPool) maintainPool() {
-	ticker := time.NewTicker(30 * time.Second)
-	defer ticker.Stop()
+ticker := time.NewTicker(30 * time.Second)
+defer ticker.Stop()
 
-	for range ticker.C {
-		pool.cleanupExpiredConnections()
-	}
+for range ticker.C {
+pool.cleanupExpiredConnections()
+}
 }
 
 // cleanupExpiredConnections 清理过期连接
 func (pool *WebSocketPool) cleanupExpiredConnections() {
-	pool.mu.Lock()
-	defer pool.mu.Unlock()
+pool.mu.Lock()
+defer pool.mu.Unlock()
 
-	now := time.Now()
-	activeConnections := make([]*WebSocketConnection, 0)
+now := time.Now()
+activeConnections := make([]*WebSocketConnection, 0)
 
-	for _, conn := range pool.connections {
-		conn.mu.Lock()
-		shouldClose := false
-		
-		// 检查是否闲置超时
-		if conn.Status == StatusIdle && now.Sub(conn.LastUsedTime) > pool.idleTimeout {
-			shouldClose = true
-		}
-		
-		// 检查是否达到最大生命周期
-		if now.Sub(conn.CreatedTime) > pool.maxLifetime {
-			shouldClose = true
-		}
-		
-		// 检查连接是否已关闭
-		if conn.Status == StatusClosed {
-			shouldClose = true
-		}
+for _, conn := range pool.connections {
+conn.mu.Lock()
+shouldClose := false
 
-		if shouldClose {
-			log.Printf("[WS-POOL] Closing expired connection %s in pool %s.%s", 
-				conn.ID, pool.tunnelName, pool.endpointName)
-			conn.mu.Unlock()
-			conn.close()
-		} else {
-			activeConnections = append(activeConnections, conn)
-			conn.mu.Unlock()
-		}
-	}
+// 检查是否闲置超时
+if conn.Status == StatusIdle && now.Sub(conn.LastUsedTime) > pool.idleTimeout {
+shouldClose = true
+}
 
-	pool.connections = activeConnections
-	log.Printf("[WS-POOL] Pool %s.%s cleanup completed, active connections: %d", 
-		pool.tunnelName, pool.endpointName, len(pool.connections))
+// 检查是否达到最大生命周期
+if now.Sub(conn.CreatedTime) > pool.maxLifetime {
+shouldClose = true
+}
+
+// 检查连接是否已关闭
+if conn.Status == StatusClosed {
+shouldClose = true
+}
+
+if shouldClose {
+log.Printf("[WS-POOL] Closing expired connection %s in pool %s.%s",
+conn.ID, pool.tunnelName, pool.endpointName)
+conn.mu.Unlock()
+conn.close()
+} else {
+activeConnections = append(activeConnections, conn)
+conn.mu.Unlock()
+}
+}
+
+pool.connections = activeConnections
 }
 
 // SendRequest 通过WebSocket连接发送请求
-func (pool *WebSocketPool) SendRequest(ctx context.Context, data []byte) ([]byte, error) {
-	conn, err := pool.GetConnection()
-	if err != nil {
-		return nil, err
-	}
-	defer pool.ReturnConnection(conn)
+func (pool *WebSocketPool) SendRequest(ctx context.Context, reqPayload *RequestPayload) ([]byte, error) {
+conn, err := pool.GetConnection()
+if err != nil {
+return nil, err
+}
+defer pool.ReturnConnection(conn)
 
-	return conn.SendRequest(ctx, data)
+return conn.SendRequest(ctx, reqPayload, pool.password)
 }
 
 // SendRequest 通过单个WebSocket连接发送请求
-func (conn *WebSocketConnection) SendRequest(ctx context.Context, data []byte) ([]byte, error) {
-	if conn.Conn == nil {
-		return nil, errors.New("websocket connection not established")
-	}
+func (conn *WebSocketConnection) SendRequest(ctx context.Context, reqPayload *RequestPayload, password string) ([]byte, error) {
+if conn.Conn == nil {
+return nil, errors.New("websocket connection not established")
+}
 
-	requestID := generateWSRequestID()
-	respCh := make(chan *WebSocketResponse, 1)
+requestID := generateRequestID()
+respCh := make(chan *pb.Response, 1)
 
-	conn.mu.Lock()
-	conn.pendingRequests[requestID] = respCh
-	conn.mu.Unlock()
+conn.mu.Lock()
+conn.pendingRequests[requestID] = respCh
+conn.mu.Unlock()
 
-	defer func() {
-		conn.mu.Lock()
-		delete(conn.pendingRequests, requestID)
-		conn.mu.Unlock()
-	}()
+defer func() {
+conn.mu.Lock()
+delete(conn.pendingRequests, requestID)
+conn.mu.Unlock()
+}()
 
-	// 创建消息 - 使用与现有代码兼容的消息格式
-	msg := map[string]interface{}{
-		"id":      requestID,
-		"type":    "request",
-		"payload": data,
-	}
+// 加密数据
+encryptedData, err := encrypt(reqPayload.Data, password)
+if err != nil {
+return nil, fmt.Errorf("failed to encrypt request: %v", err)
+}
 
-	msgBytes, err := json.Marshal(msg)
-	if err != nil {
-		return nil, err
-	}
+// 创建Protobuf消息
+msg := &pb.ServerToEndpoint{
+Id: requestID,
+Payload: &pb.ServerToEndpoint_Request{
+Request: &pb.Request{
+Url:  reqPayload.URL,
+Data: encryptedData,
+},
+},
+}
 
-	// 发送消息
-	if err := conn.Conn.WriteMessage(websocket.TextMessage, msgBytes); err != nil {
-		return nil, err
-	}
+msgBytes, err := proto.Marshal(msg)
+if err != nil {
+return nil, err
+}
 
-	// 等待响应
-	select {
-	case resp := <-respCh:
-		if resp.Error != "" {
-			return nil, errors.New(resp.Error)
-		}
-		return resp.Data, nil
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	case <-time.After(30 * time.Second):
-		return nil, errors.New("request timeout")
-	}
+// 发送二进制消息
+if err := conn.Conn.WriteMessage(websocket.BinaryMessage, msgBytes); err != nil {
+return nil, err
+}
+
+// 等待响应
+select {
+case resp := <-respCh:
+if resp.GetError() != "" {
+return nil, errors.New(resp.GetError())
+}
+
+// 解密响应
+decryptedData, err := decrypt(resp.GetData(), password)
+if err != nil {
+return nil, fmt.Errorf("failed to decrypt response: %v", err)
+}
+return decryptedData, nil
+case <-ctx.Done():
+return nil, ctx.Err()
+case <-time.After(30 * time.Second):
+return nil, errors.New("request timeout")
+}
 }
 
 // HandleWebSocketUpgrade 处理WebSocket升级请求
 func (wspm *WebSocketPoolManager) HandleWebSocketUpgrade(w http.ResponseWriter, r *http.Request) {
-	tunnelName := r.Header.Get("X-Tunnel-Name")
-	endpointName := r.Header.Get("X-Endpoint-Name")
-	password := r.Header.Get("X-Tunnel-Password")
+tunnelName := r.Header.Get("X-Tunnel-Name")
+endpointName := r.Header.Get("X-Endpoint-Name")
+password := r.Header.Get("X-Tunnel-Password")
 
-	if tunnelName == "" || endpointName == "" {
-		http.Error(w, "Missing required headers", http.StatusBadRequest)
-		return
-	}
+if tunnelName == "" || endpointName == "" {
+http.Error(w, "Missing required headers", http.StatusBadRequest)
+return
+}
 
-	// 验证隧道配置
-	wspm.mu.RLock()
-	config, exists := wspm.config.Tunnels[tunnelName]
-	wspm.mu.RUnlock()
+// 验证隧道配置
+wspm.mu.RLock()
+config, exists := wspm.config.Tunnels[tunnelName]
+wspm.mu.RUnlock()
 
-	if !exists {
-		http.Error(w, "Tunnel not found", http.StatusNotFound)
-		return
-	}
+if !exists {
+http.Error(w, "Tunnel not found", http.StatusNotFound)
+return
+}
 
-	if config.Password != "" && config.Password != password {
-		http.Error(w, "Invalid password", http.StatusUnauthorized)
-		return
-	}
+if config.Password != "" && config.Password != password {
+http.Error(w, "Invalid password", http.StatusUnauthorized)
+return
+}
 
-	// 升级连接
-	conn, err := wspm.upgrader.Upgrade(w, r, nil)
-	if err != nil {
-		log.Printf("[WS] Failed to upgrade connection: %v", err)
-		return
-	}
+// 升级连接
+conn, err := wspm.upgrader.Upgrade(w, r, nil)
+if err != nil {
+log.Printf("[WS] Failed to upgrade connection: %v", err)
+return
+}
 
-	// 创建连接对象
-	wsConn := &WebSocketConnection{
-		ID:              generateWSRequestID(),
-		Conn:            conn,
-		TunnelName:      tunnelName,
-		EndpointName:    endpointName,
-		Status:          StatusIdle,
-		CreatedTime:     time.Now(),
-		LastUsedTime:    time.Now(),
-		sendCh:          make(chan []byte, 256),
-		pendingRequests: make(map[string]chan *WebSocketResponse),
-	}
+// 创建连接对象
+wsConn := &WebSocketConnection{
+ID:              generateRequestID(),
+Conn:            conn,
+TunnelName:      tunnelName,
+EndpointName:    endpointName,
+Status:          StatusIdle,
+CreatedTime:     time.Now(),
+LastUsedTime:    time.Now(),
+sendCh:          make(chan []byte, 256),
+pendingRequests: make(map[string]chan *pb.Response),
+}
 
-	// 获取或创建连接池
-	pool := wspm.GetOrCreatePool(tunnelName, endpointName, password, r.Host)
-	
-	pool.mu.Lock()
-	if len(pool.connections) < pool.maxSize {
-		pool.connections = append(pool.connections, wsConn)
-		log.Printf("[WS] New WebSocket connection %s added to pool %s.%s", 
-			wsConn.ID, tunnelName, endpointName)
-	}
-	pool.mu.Unlock()
+// 获取或创建连接池
+pool := wspm.GetOrCreatePool(tunnelName, endpointName, password, r.Host)
 
-	// 启动连接处理
-	go wsConn.handleWebSocketConnection(pool)
+pool.mu.Lock()
+if len(pool.connections) < pool.maxSize {
+pool.connections = append(pool.connections, wsConn)
+log.Printf("[WS] New WebSocket connection %s added to pool %s.%s",
+wsConn.ID, tunnelName, endpointName)
+} else {
+log.Printf("[WS] Pool %s.%s is full, rejecting connection", tunnelName, endpointName)
+conn.Close()
+pool.mu.Unlock()
+return
+}
+pool.mu.Unlock()
+
+// 启动连接处理
+go wsConn.handleWebSocketConnection(pool)
 }
 
 // handleWebSocketConnection 处理WebSocket连接的消息收发
 func (conn *WebSocketConnection) handleWebSocketConnection(pool *WebSocketPool) {
-	defer func() {
-		conn.close()
-		// 从池中移除
-		pool.mu.Lock()
-		for i, c := range pool.connections {
-			if c.ID == conn.ID {
-				pool.connections = append(pool.connections[:i], pool.connections[i+1:]...)
-				break
-			}
-		}
-		pool.mu.Unlock()
-	}()
+defer func() {
+conn.close()
+// 从池中移除
+pool.mu.Lock()
+for i, c := range pool.connections {
+if c.ID == conn.ID {
+pool.connections = append(pool.connections[:i], pool.connections[i+1:]...)
+break
+}
+}
+pool.mu.Unlock()
+}()
 
-	conn.Conn.SetReadDeadline(time.Now().Add(PongWait))
-	conn.Conn.SetPongHandler(func(string) error {
-		conn.Conn.SetReadDeadline(time.Now().Add(PongWait))
-		return nil
-	})
+conn.Conn.SetReadDeadline(time.Now().Add(PongWait))
+conn.Conn.SetPongHandler(func(string) error {
+conn.Conn.SetReadDeadline(time.Now().Add(PongWait))
+return nil
+})
 
-	for {
-		_, message, err := conn.Conn.ReadMessage()
-		if err != nil {
-			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-				log.Printf("[WS] Connection %s read error: %v", conn.ID, err)
-			}
-			break
-		}
-
-		// 处理消息
-		var msg map[string]interface{}
-		if err := json.Unmarshal(message, &msg); err != nil {
-			log.Printf("[WS] Error unmarshalling message from connection %s: %v", conn.ID, err)
-			continue
-		}
-
-		msgType, ok := msg["type"].(string)
-		if !ok {
-			continue
-		}
-
-		switch msgType {
-		case "response":
-			// 处理响应
-			msgID, _ := msg["id"].(string)
-			payload, _ := msg["payload"].(map[string]interface{})
-			
-			data, _ := payload["data"].([]byte)
-			errorStr, _ := payload["error"].(string)
-
-			conn.mu.Lock()
-			if ch, ok := conn.pendingRequests[msgID]; ok {
-				ch <- &WebSocketResponse{
-					Data:  data,
-					Error: errorStr,
-				}
-				delete(conn.pendingRequests, msgID)
-			}
-			conn.mu.Unlock()
-		}
-	}
+for {
+_, message, err := conn.Conn.ReadMessage()
+if err != nil {
+if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
+log.Printf("[WS] Connection %s read error: %v", conn.ID, err)
+}
+break
 }
 
-// generateWSRequestID 生成WebSocket请求ID
-func generateWSRequestID() string {
-	b := make([]byte, 16)
-	// 使用crypto/rand生成随机数
-	if _, err := rand.Read(b); err != nil {
-		// 如果随机数生成失败，使用时间戳
-		return fmt.Sprintf("ws-%d", time.Now().UnixNano())
-	}
-	return fmt.Sprintf("ws-%x", b)
+// 处理Protobuf消息
+var msg pb.EndpointToServer
+if err := proto.Unmarshal(message, &msg); err != nil {
+log.Printf("[WS] Error unmarshalling protobuf message from connection %s: %v", conn.ID, err)
+continue
+}
+
+switch payload := msg.Payload.(type) {
+case *pb.EndpointToServer_Response:
+// 处理响应
+resp := payload.Response
+conn.mu.Lock()
+if ch, ok := conn.pendingRequests[resp.Id]; ok {
+ch <- resp
+delete(conn.pendingRequests, resp.Id)
+}
+conn.mu.Unlock()
+
+case *pb.EndpointToServer_Heartbeat:
+// 处理心跳
+log.Printf("[WS] Received heartbeat from %s", conn.EndpointName)
+
+case *pb.EndpointToServer_Registration:
+// 处理注册信息（可选，目前已在握手头中处理）
+}
+}
+}
+
+// FindTunnelForEndpoint 查找端点所在的隧道
+func (wspm *WebSocketPoolManager) FindTunnelForEndpoint(endpointName string) (string, bool) {
+wspm.mu.RLock()
+defer wspm.mu.RUnlock()
+
+for _, pool := range wspm.pools {
+if pool.endpointName == endpointName {
+pool.mu.RLock()
+hasConnections := len(pool.connections) > 0
+pool.mu.RUnlock()
+
+if hasConnections {
+return pool.tunnelName, true
+}
+}
+}
+return "", false
+}
+
+// GetEndpointsInfo 获取指定隧道的所有端点信息
+func (wspm *WebSocketPoolManager) GetEndpointsInfo(tunnelName string) map[string]*EndpointInfo {
+wspm.mu.RLock()
+defer wspm.mu.RUnlock()
+
+info := make(map[string]*EndpointInfo)
+
+for _, pool := range wspm.pools {
+if pool.tunnelName == tunnelName {
+pool.mu.RLock()
+if len(pool.connections) > 0 {
+// 使用第一个连接作为代表
+conn := pool.connections[0]
+conn.mu.Lock()
+
+// 简单的统计信息
+// 注意：目前WebSocket连接没有详细的Metrics统计，这里先传nil
+info[pool.endpointName] = &EndpointInfo{
+Name:             pool.endpointName,
+RemoteAddr:       conn.Conn.RemoteAddr().String(),
+OnlineTime:       conn.CreatedTime,
+LastActivityTime: conn.LastUsedTime,
+Stats:            nil,
+}
+conn.mu.Unlock()
+}
+pool.mu.RUnlock()
+}
+}
+return info
 }
