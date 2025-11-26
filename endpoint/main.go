@@ -27,6 +27,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/protobuf/proto"
 )
 
 var (
@@ -35,6 +36,7 @@ var (
 	tunnelName     = flag.String("tunnel", "", "name of the tunnel to connect to (must be defined in server config)")
 	tunnelPassword = flag.String("password", "", "tunnel password for encryption")
 	debug          = flag.Bool("debug", false, "enable debug logging")
+	transportMode  = flag.String("transport", "mix", "transport mode: grpc, ws, or mix (default: mix)")
 
 	activeRequests sync.Map // Stores map[string]context.CancelFunc
 )
@@ -92,11 +94,31 @@ func main() {
 
 // runClientSession 运行一个客户端会话，返回是否应该重连
 func runClientSession(ctx context.Context) bool {
+	switch *transportMode {
+	case "grpc":
+		return runGRPCSession(ctx)
+	case "ws":
+		return runWebSocketSession(ctx)
+	case "mix":
+		// 先尝试gRPC，失败后再尝试WebSocket
+		if success := runGRPCSession(ctx); !success {
+			log.Printf("gRPC connection failed, falling back to WebSocket")
+			return runWebSocketSession(ctx)
+		}
+		return true
+	default:
+		log.Printf("Invalid transport mode: %s, using mix mode", *transportMode)
+		return runGRPCSession(ctx)
+	}
+}
+
+// runGRPCSession 运行gRPC会话
+func runGRPCSession(ctx context.Context) bool {
 	log.Printf("Connecting to gRPC server at %s", *serverAddr)
 	conn, err := grpc.Dial(*serverAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		log.Printf("Failed to connect: %v", err)
-		return true // 连接失败可能是网络问题，应该重试
+		return false // gRPC连接失败，让上层处理fallback
 	}
 	defer conn.Close()
 
@@ -120,7 +142,7 @@ func runClientSession(ctx context.Context) bool {
 			log.Printf("Permanent error detected, stopping reconnection attempts.")
 			return false
 		}
-		return true // 其他错误可能是暂时的，应该重试
+		return false // gRPC连接失败，让上层处理fallback
 	}
 	log.Println("Successfully established gRPC stream.")
 
@@ -175,6 +197,203 @@ func runClientSession(ctx context.Context) bool {
 }
 
 // isPermanentError 判断错误是否为永久性错误（如认证失败、隧道不存在等）
+// runWebSocketSession 运行WebSocket会话
+func runWebSocketSession(ctx context.Context) bool {
+	log.Printf("Connecting to WebSocket server at %s", *serverAddr)
+	
+	// 创建WebSocket客户端
+	wsClient := NewWebSocketClient(*serverAddr, *tunnelName, *name, *tunnelPassword, *debug)
+	
+	// 尝试连接
+	if err := wsClient.Connect(); err != nil {
+		log.Printf("Failed to connect to WebSocket: %v", err)
+		return true // WebSocket连接失败，应该重试
+	}
+	defer wsClient.Disconnect()
+	
+	log.Println("Successfully established WebSocket connection.")
+	
+	// 用于通知发生永久性错误的通道
+	permanentErrorChan := make(chan error, 1)
+	streamEnded := make(chan struct{})
+	
+	// Goroutine to receive messages from the server
+	go func() {
+		defer close(streamEnded)
+		for {
+			select {
+			case <-ctx.Done():
+				log.Println("Context cancelled, stopping WebSocket receive loop.")
+				return
+			default:
+				// 接收WebSocket消息
+				message, err := wsClient.Receive()
+				if err != nil {
+					if err.Error() == "context cancelled" {
+						return
+					}
+					log.Printf("Error receiving from WebSocket: %v", err)
+					return
+				}
+				
+				// 解析消息
+				var msg pb.ServerToEndpoint
+				if err := proto.Unmarshal(message, &msg); err != nil {
+					log.Printf("Error unmarshaling WebSocket message: %v", err)
+					continue
+				}
+				
+				go handleServerMessageWebSocket(wsClient, &msg)
+			}
+		}
+	}()
+	
+	// 等待流结束或永久性错误
+	select {
+	case <-permanentErrorChan:
+		return false // 永久性错误，不应该重试
+	case <-streamEnded:
+		log.Printf("WebSocket connection ended.")
+		return true // 正常结束，应该重试
+	case <-ctx.Done():
+		log.Printf("Context cancelled, closing WebSocket connection.")
+		return false
+	}
+}
+
+// handleServerMessageWebSocket 处理WebSocket服务器消息
+func handleServerMessageWebSocket(wsClient *WebSocketClient, msg *pb.ServerToEndpoint) {
+	requestID := msg.GetId()
+	switch payload := msg.Payload.(type) {
+	case *pb.ServerToEndpoint_Request:
+		handleRequestWebSocket(wsClient, requestID, payload.Request)
+	case *pb.ServerToEndpoint_Cancel:
+		log.Printf("[CANCEL] Received cancellation for request %s", requestID)
+		if cancelFunc, ok := activeRequests.Load(requestID); ok {
+			cancelFunc.(context.CancelFunc)()
+			activeRequests.Delete(requestID)
+		}
+	}
+}
+
+// handleRequestWebSocket 处理WebSocket请求
+func handleRequestWebSocket(wsClient *WebSocketClient, requestID string, reqPayload *pb.Request) {
+	ctx, cancel := context.WithCancel(context.Background())
+	activeRequests.Store(requestID, cancel)
+	defer func() {
+		cancel()
+		activeRequests.Delete(requestID)
+	}()
+
+	if *debug {
+		log.Printf("[DEBUG %s] Handling WebSocket request, URL: %s, DataLen: %d", requestID, reqPayload.GetUrl(), len(reqPayload.GetData()))
+	}
+
+	// 处理请求逻辑与gRPC版本相同
+	decryptedData, err := decrypt(reqPayload.GetData(), *tunnelPassword)
+	if err != nil {
+		log.Printf("[ERROR %s] Error decrypting request: %v", requestID, err)
+		sendErrorResponseWebSocket(wsClient, requestID, "decryption failed")
+		return
+	}
+
+	req, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(decryptedData)))
+	if err != nil {
+		log.Printf("[ERROR %s] Error reading request: %v", requestID, err)
+		sendErrorResponseWebSocket(wsClient, requestID, "cannot read request")
+		return
+	}
+
+	if *debug {
+		// Log headers for debugging
+		var headers bytes.Buffer
+		req.Header.Write(&headers)
+		log.Printf("[DEBUG %s] Decrypted request headers:\n%s", requestID, headers.String())
+	}
+
+	targetURL, err := url.Parse(reqPayload.GetUrl())
+	if err != nil {
+		log.Printf("[ERROR %s] Error parsing target URL: %v", requestID, err)
+		sendErrorResponseWebSocket(wsClient, requestID, "invalid target URL")
+		return
+	}
+	req.URL = targetURL
+	req.Host = targetURL.Host
+	req.RequestURI = ""
+	req = req.WithContext(ctx)
+
+	log.Printf("Forwarding WebSocket request %s to %s", requestID, req.URL.String())
+
+	resp, err := sharedClient.Do(req)
+	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			log.Printf("[CANCEL %s] Request was cancelled locally.", requestID)
+			return
+		}
+		log.Printf("[ERROR %s] Error executing request: %v", requestID, err)
+		sendErrorResponseWebSocket(wsClient, requestID, err.Error())
+		return
+	}
+	defer resp.Body.Close()
+
+	if *debug {
+		log.Printf("[DEBUG %s] Received response: %s", requestID, resp.Status)
+		var headers bytes.Buffer
+		resp.Header.Write(&headers)
+		log.Printf("[DEBUG %s] Response headers:\n%s", requestID, headers.String())
+	}
+
+	respData, err := httputil.DumpResponse(resp, true)
+	if err != nil {
+		log.Printf("[ERROR %s] Error dumping response: %v", requestID, err)
+		sendErrorResponseWebSocket(wsClient, requestID, "cannot dump response")
+		return
+	}
+
+	encryptedData, err := encrypt(respData, *tunnelPassword)
+	if err != nil {
+		log.Printf("[ERROR %s] Error encrypting response: %v", requestID, err)
+		sendErrorResponseWebSocket(wsClient, requestID, "encryption failed")
+		return
+	}
+
+	sendSuccessResponseWebSocket(wsClient, requestID, encryptedData)
+}
+
+// sendResponseWebSocket 发送WebSocket响应
+func sendResponseWebSocket(wsClient *WebSocketClient, requestID string, respPayload *pb.Response) {
+	msg := &pb.EndpointToServer{
+		Payload: &pb.EndpointToServer_Response{
+			Response: respPayload,
+		},
+	}
+	
+	// 序列化消息
+	data, err := proto.Marshal(msg)
+	if err != nil {
+		log.Printf("Error marshaling WebSocket response for request %s: %v", requestID, err)
+		return
+	}
+	
+	if err := wsClient.Send(data); err != nil {
+		log.Printf("Error sending WebSocket response for request %s: %v", requestID, err)
+	}
+}
+
+// sendSuccessResponseWebSocket 发送成功响应
+func sendSuccessResponseWebSocket(wsClient *WebSocketClient, requestID string, data []byte) {
+	if *debug {
+		log.Printf("[DEBUG %s] Sending WebSocket success response, len: %d", requestID, len(data))
+	}
+	sendResponseWebSocket(wsClient, requestID, &pb.Response{Id: requestID, Content: &pb.Response_Data{Data: data}})
+}
+
+// sendErrorResponseWebSocket 发送错误响应
+func sendErrorResponseWebSocket(wsClient *WebSocketClient, requestID string, errorMsg string) {
+	log.Printf("Sending WebSocket error response for request %s: %s", requestID, errorMsg)
+	sendResponseWebSocket(wsClient, requestID, &pb.Response{Id: requestID, Content: &pb.Response_Error{Error: errorMsg}})
+}
+
 func isPermanentError(err error) bool {
 	if err == nil {
 		return false
