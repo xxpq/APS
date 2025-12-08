@@ -1,9 +1,9 @@
 package main
 
 import (
-	"fmt"
 	"bytes"
 	"crypto/tls"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -221,6 +221,12 @@ func (p *DedicatedProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if encoding := resp.Header.Get("Content-Encoding"); encoding == "" {
+		w.Header().Del("Content-Encoding")
+	} else {
+		w.Header().Set("Content-Encoding", encoding)
+	}
+
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(body)))
 	w.WriteHeader(resp.StatusCode)
 	w.Write(body)
@@ -386,6 +392,18 @@ func (p *DedicatedProxy) modifyResponseBody(resp *http.Response) ([]byte, error)
 		return body, nil
 	}
 
+	if toConfig.Match == "" && len(toConfig.Replace) == 0 {
+		return body, nil
+	}
+
+	encodingHeader := resp.Header.Get("Content-Encoding")
+	decodedBody, encoding, decoded, err := decodeBodyWithEncoding(body, encodingHeader)
+	if err != nil {
+		log.Printf("[DEDICATED:%d] Failed to decode response body (%s): %v", p.port, encodingHeader, err)
+	} else if decoded {
+		body = decodedBody
+	}
+
 	// Match
 	if toConfig.Match != "" {
 		re, err := regexp.Compile(toConfig.Match)
@@ -416,6 +434,21 @@ func (p *DedicatedProxy) modifyResponseBody(resp *http.Response) ([]byte, error)
 			log.Printf("[DEDICATED:%d RESPONSE REPLACE] Applied replacement: %s -> %s", p.port, key, value)
 		}
 		body = []byte(tempBody)
+	}
+
+	if decoded && encoding != "" {
+		reencodedBody, err := encodeBodyWithEncoding(body, encoding)
+		if err != nil {
+			log.Printf("[DEDICATED:%d] Failed to re-encode response body (%s): %v", p.port, encoding, err)
+			resp.Header.Del("Content-Encoding")
+			return body, nil
+		}
+		resp.Header.Set("Content-Encoding", encoding)
+		return reencodedBody, nil
+	}
+
+	if decoded {
+		resp.Header.Del("Content-Encoding")
 	}
 
 	return body, nil

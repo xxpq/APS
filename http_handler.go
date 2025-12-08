@@ -66,7 +66,7 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// 获取server配置
 	serverConfig := p.config.Servers[p.serverName]
-	
+
 	// 检查server级别的Endpoints/Tunnels配置
 	var serverEndpointNames, serverTunnelNames []string
 	if serverConfig != nil {
@@ -91,12 +91,12 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// 获取用户和组级别的Endpoints/Tunnels配置（最高优先级）
 	var userEndpointNames, userTunnelNames []string
-	
+
 	if user != nil {
 		// 用户级别配置
 		userEndpointNames = parseStringOrArray(user.Endpoint)
 		userTunnelNames = parseStringOrArray(user.Tunnel)
-		
+
 		// 组级别配置（只有用户级别没有配置时，才使用组级别配置）
 		if len(userEndpointNames) == 0 && len(userTunnelNames) == 0 {
 			if p.config.Auth != nil && p.config.Auth.Groups != nil {
@@ -119,7 +119,7 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	hasAnyConfig := len(userEndpointNames) > 0 || len(userTunnelNames) > 0 ||
 		len(serverEndpointNames) > 0 || len(serverTunnelNames) > 0 ||
 		(mapping != nil && (len(mapping.endpointNames) > 0 || len(mapping.tunnelNames) > 0))
-	
+
 	if !matched && !hasAnyConfig && !r.URL.IsAbs() {
 		isError = true
 		http.NotFound(w, r)
@@ -321,7 +321,7 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 
 	copyHeaders(proxyReq.Header, r.Header)
 	targetParsed, _ := url.Parse(targetURL)
-	
+
 	// 如果使用了IPS参数，保持原始主机名作为Host头
 	if selectedIP != "" {
 		originalParsed, _ := url.Parse(targetURL)
@@ -332,7 +332,7 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		proxyReq.Host = targetParsed.Host
 		proxyReq.Header.Set("Host", targetParsed.Host)
 	}
-	
+
 	proxyReq.Header.Set("X-Forwarded-For", getClientIP(r))
 	proxyReq.Header.Set("X-Forwarded-Host", r.Host)
 	proxyReq.Header.Set("X-Forwarded-Proto", getScheme(r))
@@ -583,6 +583,12 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	bytesRecv = uint64(len(body))
 
+	if encoding := resp.Header.Get("Content-Encoding"); encoding == "" {
+		w.Header().Del("Content-Encoding")
+	} else {
+		w.Header().Set("Content-Encoding", encoding)
+	}
+
 	// Remove conflicting Transfer-Encoding and set a strict numeric Content-Length
 	w.Header().Del("Transfer-Encoding")
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(body)))
@@ -690,6 +696,18 @@ func (p *MapRemoteProxy) modifyResponseBody(resp *http.Response, mapping *Mappin
 		return body, nil
 	}
 
+	if toConfig.Match == "" && len(toConfig.Replace) == 0 {
+		return body, nil
+	}
+
+	encodingHeader := resp.Header.Get("Content-Encoding")
+	decodedBody, encoding, decoded, err := decodeBodyWithEncoding(body, encodingHeader)
+	if err != nil {
+		log.Printf("[RESPONSE DECODE] Failed to decode body (%s): %v", encodingHeader, err)
+	} else if decoded {
+		body = decodedBody
+	}
+
 	if toConfig.Match != "" {
 		re, err := compileRegex(toConfig.Match)
 		if err != nil {
@@ -720,6 +738,20 @@ func (p *MapRemoteProxy) modifyResponseBody(resp *http.Response, mapping *Mappin
 		body = []byte(tempBody)
 	}
 
+	if decoded && encoding != "" {
+		reencodedBody, err := encodeBodyWithEncoding(body, encoding)
+		if err != nil {
+			log.Printf("[RESPONSE ENCODE] Failed to re-encode body (%s): %v", encoding, err)
+			resp.Header.Del("Content-Encoding")
+			return body, nil
+		}
+		resp.Header.Set("Content-Encoding", encoding)
+		return reencodedBody, nil
+	}
+
+	if decoded {
+		resp.Header.Del("Content-Encoding")
+	}
 	return body, nil
 }
 

@@ -3,6 +3,7 @@ module aps
 go 1.25.0
 
 require (
+	github.com/andybalholm/brotli v1.1.0 // indirect
 	github.com/bufbuild/protocompile v0.14.1 // indirect
 	github.com/chromedp/cdproto v0.0.0-20250803210736-d308e07a266d // indirect
 	github.com/golang/protobuf v1.5.4 // indirect

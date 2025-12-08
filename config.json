@@ -1,79 +1,48 @@
 {
   "servers": {
     "default": {
-      "port": 3000,
-      "cert": "auto"
-    },
-    "api_server": {
-      "port": 8081,
-      "cert": "auto"
-    },
-    "local_dev": {
-      "port": 8083
-    },
-    "openai_specific": {
-      "port": 8088
+      "port": 8090,
+      "public": true,
+      "panel": true
     }
   },
-  "proxies": {
-    "us_proxies": [
-      "https://proxy1.example.com:8080",
-      "http://user:pass@proxy2.example.com:8080",
-      "socks5://proxy3.example.com:8080"
-    ],
-    "eu_proxies": [
-      "socks5://user:pass@eu-proxy1.example.com:9090",
-      "http://eu-proxy2.example.com:9090"
-    ],
-    "dedicated_openai": "http://user:pass@dedicated.proxy.com:8080"
+  "tunnels": {
+    "dev": {
+      "servers": ["default"],
+      "password": "test"
+    }
+  },
+  "auth": {
+    "users": {
+      "admin": {
+        "password": "admin",
+        "admin": true
+      }
+    }
   },
   "mappings": [
     {
-      "comment": "示例1: 简单的 API 转发，使用一组美国代理",
-      "listen": "api_server",
-      "from": "https://api.example.com/v1*",
-      "to": "https://backend.example.com/api/v1*",
-      "proxy": "us_proxies"
-    },
-    {
-      "comment": "示例2: 绑定到多个监听服务，并使用多组代理（将从多组中随机选择一个代理）",
-      "listen": ["default", "api_server"],
-      "from": "https://multi.example.com/*",
-      "to": "https://backend.multi.com/*",
-      "proxy": ["us_proxies", "eu_proxies"]
-    },
-    {
-      "comment": "示例3: 本地静态文件服务，仅在 local_dev 服务上生效",
-      "listen": "local_dev",
-      "from": "/static/*",
-      "local": "./static/*"
-    },
-    {
-      "comment": "示例4: OpenAI 请求转发，使用专有代理和特定监听端口",
-      "listen": "openai_specific",
       "from": {
-        "url": "https://api.openai.com/v1*",
-        "headers": {
-          "Authorization": [
-            "Bearer sk-proj-token1-xxxxxxxxxxxxxx",
-            "Bearer sk-proj-token2-yyyyyyyyyyyyyy"
-          ]
-        },
-        "proxy": "dedicated_openai"
+        "proxy": "socks5://127.0.0.1:7890",
+        "url": "http://8.159.132.172:8090/geoserver/*"
       },
-      "to": "https://p-q.p-q.co/v1*"
-    },
-    {
-      "comment": "示例5: 相对路径的 API 服务，在默认服务上生效",
-      "listen": "default",
-      "from": "/api/local/*",
-      "to": "http://localhost:9000/api/*"
-    },
-    {
-      "comment": "示例6: from 是一个完整的 URL，请求将通过监听服务进行匹配和转发",
-      "listen": "api_server",
-      "from": "https://a.b.cn/*",
-      "to": "https://x.p-q.co/v2*"
+      "to": {
+        "headers": {
+          "access-control-allow-origin": "http://10.1.24.223:8083",
+          "content-security-policy": null,
+          "cross-origin-opener-policy": null,
+          "cross-origin-resource-policy": null,
+          "x-frame-options": null
+        },
+        "replace": {
+          "https://pairs.lv": "http://ekpay.top:8090",
+          "https://api.pairs.lv": "http://api.ekpay.top:8090"
+        },
+        "url": "http://10.1.24.223:8089/geoserver/*"
+      },
+      "via": {
+        "endpoints": "test_dev"
+      }
     }
   ]
 }

@@ -1,6 +1,10 @@
 package main
 
 import (
+	"bytes"
+	"compress/gzip"
+	"compress/zlib"
+	"io"
 	"math/rand"
 	"net/http"
 	"net/url"
@@ -10,6 +14,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/andybalholm/brotli"
 	"github.com/gorilla/websocket"
 )
 
@@ -196,4 +201,78 @@ func containsString(slice []string, str string) bool {
 		}
 	}
 	return false
+}
+
+func normalizeContentEncoding(header string) string {
+	if header == "" {
+		return ""
+	}
+	parts := strings.Split(header, ",")
+	if len(parts) == 0 {
+		return ""
+	}
+	return strings.ToLower(strings.TrimSpace(parts[0]))
+}
+
+func decodeBodyWithEncoding(body []byte, header string) ([]byte, string, bool, error) {
+	encoding := normalizeContentEncoding(header)
+	if encoding == "" {
+		return body, "", false, nil
+	}
+
+	var reader io.ReadCloser
+	var err error
+
+	switch encoding {
+	case "gzip":
+		reader, err = gzip.NewReader(bytes.NewReader(body))
+	case "deflate":
+		reader, err = zlib.NewReader(bytes.NewReader(body))
+	case "br":
+		reader = io.NopCloser(brotli.NewReader(bytes.NewReader(body)))
+	default:
+		return body, encoding, false, nil
+	}
+
+	if err != nil {
+		return body, encoding, false, err
+	}
+	defer reader.Close()
+
+	decoded, err := io.ReadAll(reader)
+	if err != nil {
+		return body, encoding, false, err
+	}
+	return decoded, encoding, true, nil
+}
+
+func encodeBodyWithEncoding(body []byte, encoding string) ([]byte, error) {
+	if encoding == "" {
+		return body, nil
+	}
+
+	var buf bytes.Buffer
+	var writer io.WriteCloser
+	var err error
+
+	switch encoding {
+	case "gzip":
+		writer = gzip.NewWriter(&buf)
+	case "deflate":
+		writer = zlib.NewWriter(&buf)
+	case "br":
+		writer = brotli.NewWriter(&buf)
+	default:
+		return body, nil
+	}
+
+	if _, err = writer.Write(body); err != nil {
+		writer.Close()
+		return nil, err
+	}
+	if err = writer.Close(); err != nil {
+		return nil, err
+	}
+
+	return buf.Bytes(), nil
 }

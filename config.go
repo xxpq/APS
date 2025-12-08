@@ -72,22 +72,22 @@ func (pc *ProxyConfig) UnmarshalJSON(data []byte) error {
 }
 
 type TunnelConfig struct {
-	Servers  []string  `json:"servers"`
-	Password string    `json:"password,omitempty"` // AES key for encryption
-	Auth     *RuleAuth `json:"auth,omitempty"`
+	Servers       []string             `json:"servers"`
+	Password      string               `json:"password,omitempty"` // AES key for encryption
+	Auth          *RuleAuth            `json:"auth,omitempty"`
 	WebSocketPool *WebSocketPoolConfig `json:"websocket_pool,omitempty"` // WebSocket连接池配置
 	TrafficPolicies
 }
 
 // WebSocketPoolConfig WebSocket连接池配置
 type WebSocketPoolConfig struct {
-	Enabled      bool `json:"enabled,omitempty"`      // 是否启用WebSocket连接池
-	PoolSize     int  `json:"pool_size,omitempty"`    // 连接池大小，默认为3
-	MaxPoolSize  int  `json:"max_pool_size,omitempty"` // 最大连接池大小，默认为10
-	IdleTimeout  int  `json:"idle_timeout,omitempty"`  // 连接闲置超时时间（秒），默认为300
-	MaxLifetime  int  `json:"max_lifetime,omitempty"`  // 连接最大生命周期（秒），默认为1800
-	FallbackEnabled bool `json:"fallback_enabled,omitempty"` // 是否启用gRPC到WebSocket的fallback
-	FallbackThreshold int `json:"fallback_threshold,omitempty"` // gRPC失败多少次后启用fallback
+	Enabled           bool `json:"enabled,omitempty"`            // 是否启用WebSocket连接池
+	PoolSize          int  `json:"pool_size,omitempty"`          // 连接池大小，默认为3
+	MaxPoolSize       int  `json:"max_pool_size,omitempty"`      // 最大连接池大小，默认为10
+	IdleTimeout       int  `json:"idle_timeout,omitempty"`       // 连接闲置超时时间（秒），默认为300
+	MaxLifetime       int  `json:"max_lifetime,omitempty"`       // 连接最大生命周期（秒），默认为1800
+	FallbackEnabled   bool `json:"fallback_enabled,omitempty"`   // 是否启用gRPC到WebSocket的fallback
+	FallbackThreshold int  `json:"fallback_threshold,omitempty"` // gRPC失败多少次后启用fallback
 }
 
 type ScriptingConfig struct {
@@ -96,13 +96,13 @@ type ScriptingConfig struct {
 }
 
 type P12Config struct {
-	Path     string `json:"path"`
-	Password string `json:"password"`
+	Path     string `json:"path,omitempty"`
+	Password string `json:"password,omitempty"`
 }
 
 type AuthConfig struct {
-	Users  map[string]*User  `json:"users"`
-	Groups map[string]*Group `json:"groups"`
+	Users  map[string]*User  `json:"users,omitempty"`
+	Groups map[string]*Group `json:"groups,omitempty"`
 }
 
 // ConnectionPolicies defines policies for timeouts, concurrency, and network simulation.
@@ -133,7 +133,7 @@ type User struct {
 }
 
 type Group struct {
-	Users    []string    `json:"users"`
+	Users    []string    `json:"users,omitempty"`
 	Dump     string      `json:"dump,omitempty"`
 	Endpoint interface{} `json:"endpoint,omitempty"` // string or []string
 	Tunnel   interface{} `json:"tunnel,omitempty"`   // string or []string
@@ -183,7 +183,7 @@ type EndpointConfig struct {
 	GRPC        *GRPCConfig            `json:"grpc,omitempty"`
 	WebSocket   *WebSocketConfig       `json:"websocket,omitempty"`
 	Script      string                 `json:"script,omitempty"`
-	IPs         interface{}            `json:"ips,omitempty"`         // 支持 string 或 []string，指定目标IP地址
+	IPs         interface{}            `json:"ips,omitempty"` // 支持 string 或 []string，指定目标IP地址
 }
 
 // GetHeader 获取 header 值，如果是数组则随机选择一个
