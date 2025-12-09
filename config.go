@@ -185,6 +185,7 @@ type EndpointConfig struct {
 	WebSocket   *WebSocketConfig       `json:"websocket,omitempty"`
 	Script      string                 `json:"script,omitempty"`
 	IPs         interface{}            `json:"ips,omitempty"` // 支持 string 或 []string，指定目标IP地址
+	Insecure    *bool                  `json:"insecure,omitempty"`
 }
 
 // GetHeader 获取 header 值，如果是数组则随机选择一个

@@ -616,34 +616,40 @@ func handleRequestWebSocket(wsClient *WebSocketClient, requestID string, reqPayl
 
 	log.Printf("Forwarding WebSocket request %s to %s (Host: %s)", requestID, req.URL.String(), req.Host)
 
-	// Create a custom client to handle SNI for HTTPS requests to an IP address.
-	// We need to set the ServerName in TLSClientConfig to the original hostname.
+	// Create a custom client to handle SNI and insecure connections for HTTPS requests.
 	client := sharedClient
 	if req.URL.Scheme == "https" {
-		// Clone the shared transport and customize it for this request.
 		customTransport := sharedClient.Transport.(*http.Transport).Clone()
-
-		// Since Transport.Clone performs a shallow copy of TLSClientConfig,
-		// we must clone it to avoid modifying the shared client's config.
 		if customTransport.TLSClientConfig != nil {
 			customTransport.TLSClientConfig = customTransport.TLSClientConfig.Clone()
 		} else {
 			customTransport.TLSClientConfig = &tls.Config{}
 		}
 
-		// The original hostname is in req.Host. We need to strip the port if it exists.
+		// Set SNI from the Host header
 		serverName := req.Host
 		if strings.Contains(serverName, ":") {
 			serverName = strings.Split(serverName, ":")[0]
 		}
 		customTransport.TLSClientConfig.ServerName = serverName
 
+		// Check for an "X-Aps-Insecure" header to control InsecureSkipVerify.
+		// This header is added by the proxy if "insecure: true" is set in the mapping.
+		if insecureHeader := req.Header.Get("X-Aps-Insecure"); insecureHeader == "true" {
+			customTransport.TLSClientConfig.InsecureSkipVerify = true
+			if *debug {
+				log.Printf("[DEBUG %s] InsecureSkipVerify enabled by X-Aps-Insecure header.", requestID)
+			}
+		}
+		// We can now remove the header as it's served its purpose
+		req.Header.Del("X-Aps-Insecure")
+
 		client = &http.Client{
 			Transport:     customTransport,
 			CheckRedirect: sharedClient.CheckRedirect,
 		}
 		if *debug {
-			log.Printf("[DEBUG %s] Custom TLS SNI configured for host: %s", requestID, serverName)
+			log.Printf("[DEBUG %s] Custom TLS configured for host: %s, Insecure: %v", requestID, serverName, customTransport.TLSClientConfig.InsecureSkipVerify)
 		}
 	}
 
@@ -791,34 +797,40 @@ func handleRequest(stream pb.TunnelService_EstablishClient, requestID string, re
 
 	log.Printf("Forwarding request %s to %s (Host: %s)", requestID, req.URL.String(), req.Host)
 
-	// Create a custom client to handle SNI for HTTPS requests to an IP address.
-	// We need to set the ServerName in TLSClientConfig to the original hostname.
+	// Create a custom client to handle SNI and insecure connections for HTTPS requests.
 	client := sharedClient
 	if req.URL.Scheme == "https" {
-		// Clone the shared transport and customize it for this request.
 		customTransport := sharedClient.Transport.(*http.Transport).Clone()
-
-		// Since Transport.Clone performs a shallow copy of TLSClientConfig,
-		// we must clone it to avoid modifying the shared client's config.
 		if customTransport.TLSClientConfig != nil {
 			customTransport.TLSClientConfig = customTransport.TLSClientConfig.Clone()
 		} else {
 			customTransport.TLSClientConfig = &tls.Config{}
 		}
 
-		// The original hostname is in req.Host. We need to strip the port if it exists.
+		// Set SNI from the Host header
 		serverName := req.Host
 		if strings.Contains(serverName, ":") {
 			serverName = strings.Split(serverName, ":")[0]
 		}
 		customTransport.TLSClientConfig.ServerName = serverName
 
+		// Check for an "X-Aps-Insecure" header to control InsecureSkipVerify.
+		// This header is added by the proxy if "insecure: true" is set in the mapping.
+		if insecureHeader := req.Header.Get("X-Aps-Insecure"); insecureHeader == "true" {
+			customTransport.TLSClientConfig.InsecureSkipVerify = true
+			if *debug {
+				log.Printf("[DEBUG %s] InsecureSkipVerify enabled by X-Aps-Insecure header.", requestID)
+			}
+		}
+		// We can now remove the header as it's served its purpose
+		req.Header.Del("X-Aps-Insecure")
+
 		client = &http.Client{
 			Transport:     customTransport,
 			CheckRedirect: sharedClient.CheckRedirect,
 		}
 		if *debug {
-			log.Printf("[DEBUG %s] Custom TLS SNI configured for host: %s", requestID, serverName)
+			log.Printf("[DEBUG %s] Custom TLS configured for host: %s, Insecure: %v", requestID, serverName, customTransport.TLSClientConfig.InsecureSkipVerify)
 		}
 	}
 

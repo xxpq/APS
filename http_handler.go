@@ -514,6 +514,11 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if isTunnelRequest {
+		// If insecure is set, add a header to signal the endpoint to skip TLS verification.
+		if toConfig := mapping.GetToConfig(); toConfig != nil && toConfig.Insecure != nil && *toConfig.Insecure {
+			proxyReq.Header.Set("X-Aps-Insecure", "true")
+		}
+
 		reqBytes, err := httputil.DumpRequest(proxyReq, true)
 		if err != nil {
 			isError = true
@@ -561,9 +566,16 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	
 			if baseTransport != nil {
 				customTransport := baseTransport.Clone()
-				customTransport.TLSClientConfig = baseTransport.TLSClientConfig.Clone()
-				if customTransport.TLSClientConfig == nil {
-					customTransport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+				if baseTransport.TLSClientConfig != nil {
+					customTransport.TLSClientConfig = baseTransport.TLSClientConfig.Clone()
+				} else {
+					customTransport.TLSClientConfig = &tls.Config{}
+				}
+	
+				// Apply the insecure setting from the mapping
+				if toConfig := mapping.GetToConfig(); toConfig != nil && toConfig.Insecure != nil && *toConfig.Insecure {
+					customTransport.TLSClientConfig.InsecureSkipVerify = true
+					log.Printf("[IPS] InsecureSkipVerify enabled for direct request to %s", actualTargetURL)
 				}
 	
 				serverName := proxyReq.Host
