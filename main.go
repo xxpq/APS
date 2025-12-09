@@ -37,10 +37,11 @@ type ServerManager struct {
 	scriptRunner  *ScriptRunner
 	trafficShaper *TrafficShaper
 	stats         *StatsCollector
+	staticCache   *StaticCacheManager
 	replayManager *ReplayManager
 }
 
-func NewServerManager(config *Config, configFile string, dataStore *DataStore, harManager *HarLoggerManager, tunnelManager TunnelManagerInterface, scriptRunner *ScriptRunner, trafficShaper *TrafficShaper, stats *StatsCollector, replayManager *ReplayManager) *ServerManager {
+func NewServerManager(config *Config, configFile string, dataStore *DataStore, harManager *HarLoggerManager, tunnelManager TunnelManagerInterface, scriptRunner *ScriptRunner, trafficShaper *TrafficShaper, stats *StatsCollector, staticCache *StaticCacheManager, replayManager *ReplayManager) *ServerManager {
 	return &ServerManager{
 		servers:       make(map[string]*http.Server),
 		config:        config,
@@ -51,6 +52,7 @@ func NewServerManager(config *Config, configFile string, dataStore *DataStore, h
 		scriptRunner:  scriptRunner,
 		trafficShaper: trafficShaper,
 		stats:         stats,
+		staticCache:   staticCache,
 		replayManager: replayManager,
 	}
 }
@@ -73,7 +75,7 @@ func (sm *ServerManager) Start(name string, serverConfig *ListenConfig, isACMEEn
 		}
 	}
 
-	handler := createServerHandler(name, serverMappings[name], serverConfig, sm.config, sm.configFile, sm.dataStore, sm.harManager, sm.tunnelManager, sm.scriptRunner, sm.trafficShaper, sm.stats, sm.replayManager, isACMEEnabled)
+	handler := createServerHandler(name, serverMappings[name], serverConfig, sm.config, sm.configFile, sm.dataStore, sm.harManager, sm.tunnelManager, sm.scriptRunner, sm.trafficShaper, sm.stats, sm.staticCache, sm.replayManager, isACMEEnabled)
 	server := startServer(name, serverConfig, handler)
 	if server != nil {
 		sm.servers[name] = server
@@ -150,11 +152,15 @@ func main() {
 	trafficShaper := NewTrafficShaper(dataStore.QuotaUsage)
 	statsCollector := NewStatsCollector(config)
 
+	// 初始化静态文件缓存管理器
+	staticCache := NewStaticCacheManager(config.StaticCache)
+	defer staticCache.Stop()
+
 	// 设置tunnelManager的statsCollector，实现端点统计的集中式管理
 	tunnelManager.SetStatsCollector(statsCollector)
 	replayManager := NewReplayManager(config)
 
-	serverManager := NewServerManager(config, *configFile, dataStore, harManager, tunnelManager, scriptRunner, trafficShaper, statsCollector, replayManager)
+	serverManager := NewServerManager(config, *configFile, dataStore, harManager, tunnelManager, scriptRunner, trafficShaper, statsCollector, staticCache, replayManager)
 
 	watcher, err := NewConfigWatcher(*configFile, config, serverManager)
 	if err != nil {
@@ -238,9 +244,9 @@ func (sm *ServerManager) StartAll() {
 	}
 }
 
-func createServerHandler(serverName string, mappings []*Mapping, serverConfig *ListenConfig, config *Config, configFile string, dataStore *DataStore, harManager *HarLoggerManager, tunnelManager TunnelManagerInterface, scriptRunner *ScriptRunner, trafficShaper *TrafficShaper, stats *StatsCollector, replayManager *ReplayManager, isACMEEnabled bool) http.Handler {
+func createServerHandler(serverName string, mappings []*Mapping, serverConfig *ListenConfig, config *Config, configFile string, dataStore *DataStore, harManager *HarLoggerManager, tunnelManager TunnelManagerInterface, scriptRunner *ScriptRunner, trafficShaper *TrafficShaper, stats *StatsCollector, staticCache *StaticCacheManager, replayManager *ReplayManager, isACMEEnabled bool) http.Handler {
 	mux := http.NewServeMux()
-	proxy := NewMapRemoteProxy(config, dataStore, harManager, tunnelManager, scriptRunner, trafficShaper, stats, serverName)
+	proxy := NewMapRemoteProxy(config, dataStore, harManager, tunnelManager, scriptRunner, trafficShaper, stats, staticCache, serverName)
 
 	// 如果 cert 是 auto，注册证书下载处理器
 	if certStr, ok := serverConfig.Cert.(string); ok && certStr == "auto" {

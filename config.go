@@ -20,14 +20,22 @@ func init() {
 }
 
 type Config struct {
-	Servers   map[string]*ListenConfig `json:"servers"`
-	Proxies   map[string]*ProxyConfig  `json:"proxies,omitempty"`
-	Tunnels   map[string]*TunnelConfig `json:"tunnels,omitempty"`
-	Auth      *AuthConfig              `json:"auth,omitempty"`
-	P12s      map[string]*P12Config    `json:"p12s,omitempty"`
-	Scripting *ScriptingConfig         `json:"scripting,omitempty"`
-	Mappings  []Mapping                `json:"mappings"`
-	mu        sync.RWMutex
+	Servers     map[string]*ListenConfig `json:"servers"`
+	Proxies     map[string]*ProxyConfig  `json:"proxies,omitempty"`
+	Tunnels     map[string]*TunnelConfig `json:"tunnels,omitempty"`
+	Auth        *AuthConfig              `json:"auth,omitempty"`
+	P12s        map[string]*P12Config    `json:"p12s,omitempty"`
+	Scripting   *ScriptingConfig         `json:"scripting,omitempty"`
+	StaticCache *StaticCacheConfig       `json:"static_cache,omitempty"` // 静态文件缓存配置
+	Mappings    []Mapping                `json:"mappings"`
+	mu          sync.RWMutex
+}
+
+// StaticCacheConfig 静态文件缓存配置
+type StaticCacheConfig struct {
+	Enabled  bool   `json:"enabled"`             // 是否启用缓存
+	CacheDir string `json:"cache_dir,omitempty"` // 缓存目录，默认 "./cache"
+	TTL      int    `json:"ttl,omitempty"`       // 缓存有效期(秒)，默认 86400 (1天)
 }
 
 type DataStore struct {

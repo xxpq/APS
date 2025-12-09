@@ -61,6 +61,31 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 静态文件缓存检查
+	fullURL := p.buildOriginalURL(r)
+	if p.staticCache != nil && p.staticCache.IsCacheable(r.URL.Path) {
+		if cachedEntry, ok := p.staticCache.Get(fullURL); ok {
+			// 缓存命中，直接返回缓存内容（包含原始响应头）
+			for key, values := range cachedEntry.Headers {
+				// 跳过Content-Encoding和Transfer-Encoding，因为缓存的body已是解压后的原始内容
+				lowerKey := strings.ToLower(key)
+				if lowerKey == "content-encoding" || lowerKey == "transfer-encoding" || lowerKey == "content-length" {
+					continue
+				}
+				for _, value := range values {
+					w.Header().Add(key, value)
+				}
+			}
+			w.Header().Set("X-Cache", "HIT")
+			w.Header().Set("Content-Length", fmt.Sprintf("%d", len(cachedEntry.Body)))
+			w.WriteHeader(cachedEntry.StatusCode)
+			w.Write(cachedEntry.Body)
+			bytesSent = uint64(len(cachedEntry.Body))
+			log.Printf("[CACHE] HIT: %s (%d bytes)", fullURL, len(cachedEntry.Body))
+			return
+		}
+	}
+
 	targetURL, matched, mapping, matchedFromURL := p.mapRequest(r)
 	originalURL := p.buildOriginalURL(r)
 
@@ -682,6 +707,23 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		log.Printf("Error writing response body: %v", err)
 	}
 	bytesSent = counterWriter.BytesWritten
+
+	// 静态文件缓存保存 - 仅缓存成功的200响应
+	if p.staticCache != nil && p.staticCache.IsCacheable(r.URL.Path) && resp.StatusCode == http.StatusOK {
+		cacheURL := p.buildOriginalURL(r)
+		// 确保缓存的是解压后的明文内容
+		cacheBody := body
+		if encoding := resp.Header.Get("Content-Encoding"); encoding != "" {
+			decodedBody, _, decoded, err := decodeBodyWithEncoding(body, encoding)
+			if err == nil && decoded {
+				cacheBody = decodedBody
+				log.Printf("[CACHE] Decoded %s content before caching: %d -> %d bytes", encoding, len(body), len(cacheBody))
+			}
+		}
+		if err := p.staticCache.Set(cacheURL, resp.Header, resp.StatusCode, cacheBody); err != nil {
+			log.Printf("[CACHE] Error saving cache for %s: %v", cacheURL, err)
+		}
+	}
 
 	if policies.Quality < 1.0 {
 		log.Printf("[%s] %s - %d (%d bytes, throttled)", r.Method, originalURL, resp.StatusCode, bytesSent)
