@@ -723,7 +723,8 @@ func (p *MapRemoteProxy) modifyRequestBody(r *http.Request, mapping *Mapping) ([
 				log.Printf("Invalid replace regex in 'from' config: %v", err)
 				continue
 			}
-			tempBody = re.ReplaceAllString(tempBody, value)
+			unescapedValue := unescapeReplacementString(value)
+			tempBody = re.ReplaceAllString(tempBody, unescapedValue)
 		}
 		body = []byte(tempBody)
 	}
@@ -786,7 +787,8 @@ func (p *MapRemoteProxy) modifyResponseBody(resp *http.Response, mapping *Mappin
 				log.Printf("Invalid replace regex in 'to' config: %v", err)
 				continue
 			}
-			tempBody = re.ReplaceAllString(tempBody, value)
+			unescapedValue := unescapeReplacementString(value)
+			tempBody = re.ReplaceAllString(tempBody, unescapedValue)
 			log.Printf("[RESPONSE REPLACE] Applied replacement: %s -> %s", key, value)
 		}
 		body = []byte(tempBody)
@@ -829,6 +831,44 @@ func (tr *ThrottledReader) Read(p []byte) (n int, err error) {
 		time.Sleep(delay)
 	}
 	return tr.r.Read(p)
+}
+
+// unescapeReplacementString unescapes a string containing common Go-style escape sequences.
+// This allows using sequences like \n, \t, or \" in the 'replace' values in config.json.
+func unescapeReplacementString(s string) string {
+	var sb strings.Builder
+	sb.Grow(len(s))
+	i := 0
+	for i < len(s) {
+		if s[i] == '\\' {
+			if i+1 < len(s) {
+				i++
+				switch s[i] {
+				case 'n':
+					sb.WriteByte('\n')
+				case 'r':
+					sb.WriteByte('\r')
+				case 't':
+					sb.WriteByte('\t')
+				case '"':
+					sb.WriteByte('"')
+				case '\\':
+					sb.WriteByte('\\')
+				default:
+					// Not a recognized escape, treat literally
+					sb.WriteByte('\\')
+					sb.WriteByte(s[i])
+				}
+			} else {
+				// Trailing backslash
+				sb.WriteByte('\\')
+			}
+		} else {
+			sb.WriteByte(s[i])
+		}
+		i++
+	}
+	return sb.String()
 }
 
 func (p *MapRemoteProxy) createClientWithP12(p12Path, password string, policies FinalPolicies) (*http.Client, error) {
