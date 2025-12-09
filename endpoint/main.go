@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -31,6 +32,7 @@ import (
 	"github.com/kardianos/service"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/protobuf/proto"
 )
@@ -50,18 +52,28 @@ var (
 	stop           = flag.Bool("stop", false, "stop system service")
 	restart        = flag.Bool("restart", false, "restart system service")
 
-	activeRequests sync.Map // Stores map[string]context.CancelFunc
+	activeRequests sync.Map   // Stores map[string]context.CancelFunc
+	streamMu       sync.Mutex // 保护gRPC stream.Send的并发调用
 	relayManager   *RelayManager
 	logger         service.Logger
 )
 
 var sharedClient = &http.Client{
 	Transport: &http.Transport{
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		TLSClientConfig:       &tls.Config{InsecureSkipVerify: true},
+		MaxIdleConns:          1000,             // 最大空闲连接数
+		MaxIdleConnsPerHost:   100,              // 每个主机最大空闲连接
+		MaxConnsPerHost:       0,                // 0表示无限制
+		IdleConnTimeout:       90 * time.Second, // 空闲连接超时
+		TLSHandshakeTimeout:   10 * time.Second, // TLS握手超时
+		ExpectContinueTimeout: 1 * time.Second,  // 100-continue超时
+		DisableCompression:    true,             // 禁用压缩减少CPU开销
+		ForceAttemptHTTP2:     true,             // 启用HTTP/2
 	},
 	CheckRedirect: func(req *http.Request, via []*http.Request) error {
 		return http.ErrUseLastResponse
 	},
+	Timeout: 5 * time.Minute, // 请求总超时
 }
 
 const (
@@ -404,7 +416,18 @@ func runClientSession(ctx context.Context) bool {
 
 func runGRPCSession(ctx context.Context) bool {
 	log.Printf("Connecting to gRPC server at %s", *serverAddr)
-	conn, err := grpc.Dial(*serverAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := grpc.Dial(*serverAddr,
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithDefaultCallOptions(
+			grpc.MaxCallRecvMsgSize(math.MaxInt64),
+			grpc.MaxCallSendMsgSize(math.MaxInt64),
+		),
+		grpc.WithKeepaliveParams(keepalive.ClientParameters{
+			Time:                10 * time.Second, // ping间隔
+			Timeout:             5 * time.Second,  // ping超时
+			PermitWithoutStream: true,             // 允许无流时ping
+		}),
+	)
 	if err != nil {
 		log.Printf("Failed to connect: %v", err)
 		return true
@@ -560,7 +583,8 @@ func handleServerMessageWebSocket(wsClient *WebSocketClient, msg *pb.ServerToEnd
 	requestID := msg.GetId()
 	switch payload := msg.Payload.(type) {
 	case *pb.ServerToEndpoint_Request:
-		handleRequestWebSocket(wsClient, requestID, payload.Request)
+		// 使用goroutine异步处理请求，避免串行阻塞
+		go handleRequestWebSocket(wsClient, requestID, payload.Request)
 	case *pb.ServerToEndpoint_Cancel:
 		log.Printf("[CANCEL] Received cancellation for request %s", requestID)
 		if cancelFunc, ok := activeRequests.Load(requestID); ok {
@@ -585,14 +609,14 @@ func handleRequestWebSocket(wsClient *WebSocketClient, requestID string, reqPayl
 	decryptedData, err := decrypt(reqPayload.GetData(), *tunnelPassword)
 	if err != nil {
 		log.Printf("[ERROR %s] Error decrypting request: %v", requestID, err)
-		sendErrorResponseWebSocket(wsClient, requestID, "decryption failed")
+		sendStreamErrorResponseWebSocket(wsClient, requestID, "decryption failed")
 		return
 	}
 
 	req, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(decryptedData)))
 	if err != nil {
 		log.Printf("[ERROR %s] Error reading request: %v", requestID, err)
-		sendErrorResponseWebSocket(wsClient, requestID, "cannot read request")
+		sendStreamErrorResponseWebSocket(wsClient, requestID, "cannot read request")
 		return
 	}
 
@@ -605,7 +629,7 @@ func handleRequestWebSocket(wsClient *WebSocketClient, requestID string, reqPayl
 	targetURL, err := url.Parse(reqPayload.GetUrl())
 	if err != nil {
 		log.Printf("[ERROR %s] Error parsing target URL: %v", requestID, err)
-		sendErrorResponseWebSocket(wsClient, requestID, "invalid target URL")
+		sendStreamErrorResponseWebSocket(wsClient, requestID, "invalid target URL")
 		return
 	}
 	req.URL = targetURL
@@ -660,7 +684,7 @@ func handleRequestWebSocket(wsClient *WebSocketClient, requestID string, reqPayl
 			return
 		}
 		log.Printf("[ERROR %s] Error executing request: %v", requestID, err)
-		sendErrorResponseWebSocket(wsClient, requestID, err.Error())
+		sendStreamErrorResponseWebSocket(wsClient, requestID, err.Error())
 		return
 	}
 	defer resp.Body.Close()
@@ -672,24 +696,81 @@ func handleRequestWebSocket(wsClient *WebSocketClient, requestID string, reqPayl
 		log.Printf("[DEBUG %s] Response headers:\n%s", requestID, headers.String())
 	}
 
-	respData, err := httputil.DumpResponse(resp, true)
+	// --- Start of Streaming Logic ---
+
+	// 1. Send the response header first.
+	headerBytes, err := httputil.DumpResponse(resp, false) // false means do not include body
 	if err != nil {
-		log.Printf("[ERROR %s] Error dumping response: %v", requestID, err)
-		sendErrorResponseWebSocket(wsClient, requestID, "cannot dump response")
+		log.Printf("[ERROR %s] Error dumping response headers: %v", requestID, err)
+		sendStreamErrorResponseWebSocket(wsClient, requestID, "cannot dump response headers")
 		return
 	}
 
-	encryptedData, err := encrypt(respData, *tunnelPassword)
+	encryptedHeader, err := encrypt(headerBytes, *tunnelPassword)
 	if err != nil {
-		log.Printf("[ERROR %s] Error encrypting response: %v", requestID, err)
-		sendErrorResponseWebSocket(wsClient, requestID, "encryption failed")
+		log.Printf("[ERROR %s] Error encrypting response header: %v", requestID, err)
+		sendStreamErrorResponseWebSocket(wsClient, requestID, "header encryption failed")
 		return
 	}
 
-	sendSuccessResponseWebSocket(wsClient, requestID, encryptedData)
+	if err := sendResponsePartWebSocket(wsClient, requestID, &pb.Response{
+		Id:      requestID,
+		Content: &pb.Response_Header{Header: &pb.ResponseHeader{Header: encryptedHeader}},
+	}); err != nil {
+		log.Printf("[ERROR %s] Error sending response header: %v", requestID, err)
+		return
+	}
+	if *debug {
+		log.Printf("[DEBUG %s] Sent response header, len: %d", requestID, len(encryptedHeader))
+	}
+
+	// 2. Stream the response body in chunks.
+	buf := make([]byte, 128*1024) // 128KB chunks for better throughput
+	for {
+		n, err := resp.Body.Read(buf)
+		if n > 0 {
+			encryptedChunk, encErr := encrypt(buf[:n], *tunnelPassword)
+			if encErr != nil {
+				log.Printf("[ERROR %s] Error encrypting response chunk: %v", requestID, encErr)
+				sendStreamErrorResponseWebSocket(wsClient, requestID, "chunk encryption failed")
+				return
+			}
+			if err := sendResponsePartWebSocket(wsClient, requestID, &pb.Response{
+				Id:      requestID,
+				Content: &pb.Response_Chunk{Chunk: &pb.DataChunk{Data: encryptedChunk}},
+			}); err != nil {
+				log.Printf("[ERROR %s] Error sending response chunk: %v", requestID, err)
+				return // Stop streaming if we can't send
+			}
+			if *debug {
+				log.Printf("[DEBUG %s] Sent response chunk, len: %d", requestID, len(encryptedChunk))
+			}
+		}
+		if err == io.EOF {
+			break // End of body
+		}
+		if err != nil {
+			log.Printf("[ERROR %s] Error reading response body: %v", requestID, err)
+			sendStreamErrorResponseWebSocket(wsClient, requestID, "error reading response body")
+			return
+		}
+	}
+
+	// 3. Send the end-of-stream message.
+	if err := sendResponsePartWebSocket(wsClient, requestID, &pb.Response{
+		Id:      requestID,
+		Content: &pb.Response_End{End: &pb.StreamEnd{}},
+	}); err != nil {
+		log.Printf("[ERROR %s] Error sending end-of-stream: %v", requestID, err)
+		return
+	}
+	if *debug {
+		log.Printf("[DEBUG %s] Sent end-of-stream message.", requestID)
+	}
+	// --- End of Streaming Logic ---
 }
 
-func sendResponseWebSocket(wsClient *WebSocketClient, requestID string, respPayload *pb.Response) {
+func sendResponsePartWebSocket(wsClient *WebSocketClient, requestID string, respPayload *pb.Response) error {
 	msg := &pb.EndpointToServer{
 		Payload: &pb.EndpointToServer_Response{
 			Response: respPayload,
@@ -697,24 +778,34 @@ func sendResponseWebSocket(wsClient *WebSocketClient, requestID string, respPayl
 	}
 	data, err := proto.Marshal(msg)
 	if err != nil {
-		log.Printf("Error marshaling WebSocket response for request %s: %v", requestID, err)
-		return
+		log.Printf("Error marshaling WebSocket response part for request %s: %v", requestID, err)
+		return err
 	}
 	if err := wsClient.Send(data); err != nil {
-		log.Printf("Error sending WebSocket response for request %s: %v", requestID, err)
+		log.Printf("Error sending WebSocket response part for request %s: %v", requestID, err)
+		return err
+	}
+	return nil
+}
+
+func sendStreamErrorResponseWebSocket(wsClient *WebSocketClient, requestID string, errorMsg string) {
+	log.Printf("Sending WebSocket stream error for request %s: %s", requestID, errorMsg)
+	err := sendResponsePartWebSocket(wsClient, requestID, &pb.Response{
+		Id:      requestID,
+		Content: &pb.Response_End{End: &pb.StreamEnd{Error: errorMsg}},
+	})
+	if err != nil {
+		log.Printf("Failed to send stream error response for %s: %v", requestID, err)
 	}
 }
 
-func sendSuccessResponseWebSocket(wsClient *WebSocketClient, requestID string, data []byte) {
-	if *debug {
-		log.Printf("[DEBUG %s] Sending WebSocket success response, len: %d", requestID, len(data))
-	}
-	sendResponseWebSocket(wsClient, requestID, &pb.Response{Id: requestID, Content: &pb.Response_Data{Data: data}})
-}
-
+// Deprecated: use sendStreamErrorResponseWebSocket instead for streaming.
 func sendErrorResponseWebSocket(wsClient *WebSocketClient, requestID string, errorMsg string) {
 	log.Printf("Sending WebSocket error response for request %s: %s", requestID, errorMsg)
-	sendResponseWebSocket(wsClient, requestID, &pb.Response{Id: requestID, Content: &pb.Response_Error{Error: errorMsg}})
+	err := sendResponsePartWebSocket(wsClient, requestID, &pb.Response{Id: requestID, Content: &pb.Response_Error{Error: errorMsg}})
+	if err != nil {
+		log.Printf("Failed to send error response for %s: %v", requestID, err)
+	}
 }
 
 func isPermanentError(err error) bool {
@@ -741,7 +832,8 @@ func handleServerMessage(stream pb.TunnelService_EstablishClient, msg *pb.Server
 	requestID := msg.GetId()
 	switch payload := msg.Payload.(type) {
 	case *pb.ServerToEndpoint_Request:
-		handleRequest(stream, requestID, payload.Request)
+		// 使用goroutine异步处理请求，避免串行阻塞
+		go handleRequest(stream, requestID, payload.Request)
 	case *pb.ServerToEndpoint_Cancel:
 		log.Printf("[CANCEL] Received cancellation for request %s", requestID)
 		if cancelFunc, ok := activeRequests.Load(requestID); ok {
@@ -766,14 +858,14 @@ func handleRequest(stream pb.TunnelService_EstablishClient, requestID string, re
 	decryptedData, err := decrypt(reqPayload.GetData(), *tunnelPassword)
 	if err != nil {
 		log.Printf("[ERROR %s] Error decrypting request: %v", requestID, err)
-		sendErrorResponse(stream, requestID, "decryption failed")
+		sendStreamErrorResponse(stream, requestID, "decryption failed")
 		return
 	}
 
 	req, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(decryptedData)))
 	if err != nil {
 		log.Printf("[ERROR %s] Error reading request: %v", requestID, err)
-		sendErrorResponse(stream, requestID, "cannot read request")
+		sendStreamErrorResponse(stream, requestID, "cannot read request")
 		return
 	}
 
@@ -786,7 +878,7 @@ func handleRequest(stream pb.TunnelService_EstablishClient, requestID string, re
 	targetURL, err := url.Parse(reqPayload.GetUrl())
 	if err != nil {
 		log.Printf("[ERROR %s] Error parsing target URL: %v", requestID, err)
-		sendErrorResponse(stream, requestID, "invalid target URL")
+		sendStreamErrorResponse(stream, requestID, "invalid target URL")
 		return
 	}
 	req.URL = targetURL
@@ -841,7 +933,7 @@ func handleRequest(stream pb.TunnelService_EstablishClient, requestID string, re
 			return
 		}
 		log.Printf("[ERROR %s] Error executing request: %v", requestID, err)
-		sendErrorResponse(stream, requestID, err.Error())
+		sendStreamErrorResponse(stream, requestID, err.Error())
 		return
 	}
 	defer resp.Body.Close()
@@ -853,44 +945,115 @@ func handleRequest(stream pb.TunnelService_EstablishClient, requestID string, re
 		log.Printf("[DEBUG %s] Response headers:\n%s", requestID, headers.String())
 	}
 
-	respData, err := httputil.DumpResponse(resp, true)
+	// --- Start of Streaming Logic ---
+
+	// 1. Send the response header first.
+	headerBytes, err := httputil.DumpResponse(resp, false) // false means do not include body
 	if err != nil {
-		log.Printf("[ERROR %s] Error dumping response: %v", requestID, err)
-		sendErrorResponse(stream, requestID, "cannot dump response")
+		log.Printf("[ERROR %s] Error dumping response headers: %v", requestID, err)
+		sendStreamErrorResponse(stream, requestID, "cannot dump response headers")
 		return
 	}
 
-	encryptedData, err := encrypt(respData, *tunnelPassword)
+	encryptedHeader, err := encrypt(headerBytes, *tunnelPassword)
 	if err != nil {
-		log.Printf("[ERROR %s] Error encrypting response: %v", requestID, err)
-		sendErrorResponse(stream, requestID, "encryption failed")
+		log.Printf("[ERROR %s] Error encrypting response header: %v", requestID, err)
+		sendStreamErrorResponse(stream, requestID, "header encryption failed")
 		return
 	}
 
-	sendSuccessResponse(stream, requestID, encryptedData)
+	if err := sendResponsePart(stream, requestID, &pb.Response{
+		Id:      requestID,
+		Content: &pb.Response_Header{Header: &pb.ResponseHeader{Header: encryptedHeader}},
+	}); err != nil {
+		log.Printf("[ERROR %s] Error sending response header: %v", requestID, err)
+		return
+	}
+	if *debug {
+		log.Printf("[DEBUG %s] Sent response header, len: %d", requestID, len(encryptedHeader))
+	}
+
+	// 2. Stream the response body in chunks.
+	buf := make([]byte, 128*1024) // 128KB chunks for better throughput
+	for {
+		n, err := resp.Body.Read(buf)
+		if n > 0 {
+			encryptedChunk, encErr := encrypt(buf[:n], *tunnelPassword)
+			if encErr != nil {
+				log.Printf("[ERROR %s] Error encrypting response chunk: %v", requestID, encErr)
+				sendStreamErrorResponse(stream, requestID, "chunk encryption failed")
+				return
+			}
+			if err := sendResponsePart(stream, requestID, &pb.Response{
+				Id:      requestID,
+				Content: &pb.Response_Chunk{Chunk: &pb.DataChunk{Data: encryptedChunk}},
+			}); err != nil {
+				log.Printf("[ERROR %s] Error sending response chunk: %v", requestID, err)
+				return // Stop streaming if we can't send
+			}
+			if *debug {
+				log.Printf("[DEBUG %s] Sent response chunk, len: %d", requestID, len(encryptedChunk))
+			}
+		}
+		if err == io.EOF {
+			break // End of body
+		}
+		if err != nil {
+			log.Printf("[ERROR %s] Error reading response body: %v", requestID, err)
+			sendStreamErrorResponse(stream, requestID, "error reading response body")
+			return
+		}
+	}
+
+	// 3. Send the end-of-stream message.
+	if err := sendResponsePart(stream, requestID, &pb.Response{
+		Id:      requestID,
+		Content: &pb.Response_End{End: &pb.StreamEnd{}},
+	}); err != nil {
+		log.Printf("[ERROR %s] Error sending end-of-stream: %v", requestID, err)
+		return
+	}
+	if *debug {
+		log.Printf("[DEBUG %s] Sent end-of-stream message.", requestID)
+	}
+	// --- End of Streaming Logic ---
 }
 
-func sendResponse(stream pb.TunnelService_EstablishClient, requestID string, respPayload *pb.Response) {
+func sendResponsePart(stream pb.TunnelService_EstablishClient, requestID string, respPayload *pb.Response) error {
 	msg := &pb.EndpointToServer{
 		Payload: &pb.EndpointToServer_Response{
 			Response: respPayload,
 		},
 	}
-	if err := stream.Send(msg); err != nil {
-		log.Printf("Error sending response for request %s: %v", requestID, err)
+	// 使用互斥锁保护stream.Send，因为gRPC stream不是线程安全的
+	streamMu.Lock()
+	err := stream.Send(msg)
+	streamMu.Unlock()
+	if err != nil {
+		log.Printf("Error sending response part for request %s: %v", requestID, err)
+		return err
+	}
+	return nil
+}
+
+func sendStreamErrorResponse(stream pb.TunnelService_EstablishClient, requestID string, errorMsg string) {
+	log.Printf("Sending stream error for request %s: %s", requestID, errorMsg)
+	err := sendResponsePart(stream, requestID, &pb.Response{
+		Id:      requestID,
+		Content: &pb.Response_End{End: &pb.StreamEnd{Error: errorMsg}},
+	})
+	if err != nil {
+		log.Printf("Failed to send stream error response for %s: %v", requestID, err)
 	}
 }
 
-func sendSuccessResponse(stream pb.TunnelService_EstablishClient, requestID string, data []byte) {
-	if *debug {
-		log.Printf("[DEBUG %s] Sending success response, len: %d", requestID, len(data))
-	}
-	sendResponse(stream, requestID, &pb.Response{Id: requestID, Content: &pb.Response_Data{Data: data}})
-}
-
+// Deprecated: use sendStreamErrorResponse instead for streaming.
 func sendErrorResponse(stream pb.TunnelService_EstablishClient, requestID string, errorMsg string) {
 	log.Printf("Sending error response for request %s: %s", requestID, errorMsg)
-	sendResponse(stream, requestID, &pb.Response{Id: requestID, Content: &pb.Response_Error{Error: errorMsg}})
+	err := sendResponsePart(stream, requestID, &pb.Response{Id: requestID, Content: &pb.Response_Error{Error: errorMsg}})
+	if err != nil {
+		log.Printf("Failed to send error response for %s: %v", requestID, err)
+	}
 }
 
 func createKey(password string) []byte {

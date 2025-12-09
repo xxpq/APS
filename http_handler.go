@@ -534,21 +534,25 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 			Data: reqBytes,
 		}
 
-		respBytes, err := p.tunnelManager.SendRequest(r.Context(), tunnelName, endpointName, reqPayload)
+		bodyStream, headerBytes, err := p.tunnelManager.SendRequestStream(r.Context(), tunnelName, endpointName, reqPayload)
 		if err != nil {
 			isError = true
 			http.Error(w, "Failed to send request through tunnel: "+err.Error(), http.StatusBadGateway)
 			log.Printf("[TUNNEL] Error sending request via endpoint '%s': %v", endpointName, err)
 			return
 		}
+		defer bodyStream.Close()
 
-		resp, err = http.ReadResponse(bufio.NewReader(bytes.NewReader(respBytes)), proxyReq)
+		// Read the initial response from the header bytes
+		resp, err = http.ReadResponse(bufio.NewReader(bytes.NewReader(headerBytes)), proxyReq)
 		if err != nil {
 			isError = true
-			http.Error(w, "Failed to read response from tunnel", http.StatusInternalServerError)
-			log.Printf("[TUNNEL] Error reading response from endpoint '%s': %v", endpointName, err)
+			http.Error(w, "Failed to read response header from tunnel", http.StatusInternalServerError)
+			log.Printf("[TUNNEL] Error reading response header from endpoint '%s': %v", endpointName, err)
 			return
 		}
+		// The body from ReadResponse is empty; we will stream the real body.
+		resp.Body = bodyStream
 	} else {
 		// This is a direct request (not via tunnel)
 		// If we are using IP substitution for an HTTPS request, we need to
@@ -563,7 +567,7 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 					baseTransport, _ = trt.GetInnerTransport().(*http.Transport)
 				}
 			}
-	
+
 			if baseTransport != nil {
 				customTransport := baseTransport.Clone()
 				if baseTransport.TLSClientConfig != nil {
@@ -571,19 +575,19 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 				} else {
 					customTransport.TLSClientConfig = &tls.Config{}
 				}
-	
+
 				// Apply the insecure setting from the mapping
 				if toConfig := mapping.GetToConfig(); toConfig != nil && toConfig.Insecure != nil && *toConfig.Insecure {
 					customTransport.TLSClientConfig.InsecureSkipVerify = true
 					log.Printf("[IPS] InsecureSkipVerify enabled for direct request to %s", actualTargetURL)
 				}
-	
+
 				serverName := proxyReq.Host
 				if strings.Contains(serverName, ":") {
 					serverName = strings.Split(serverName, ":")[0]
 				}
 				customTransport.TLSClientConfig.ServerName = serverName
-	
+
 				// Create a temporary client with the custom transport for this request.
 				sniClient := &http.Client{
 					Transport: customTransport,
@@ -601,7 +605,7 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		} else {
 			resp, err = client.Do(proxyReq)
 		}
-	
+
 		if err != nil {
 			isError = true
 			p.logHarEntry(r, nil, startTime, mapping, user)

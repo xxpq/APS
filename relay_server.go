@@ -7,12 +7,15 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net"
 	"sync"
 	"time"
 
 	pb "aps/tunnelpb"
+
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/metadata"
 )
 
@@ -36,9 +39,9 @@ type RelayServer struct {
 type RelayClientConnection struct {
 	Name       string
 	Stream     pb.RelayService_EstablishRelayServer
-	Conn       net.Conn       // 用于反向连接的原始连接
-	EndpointID string         // 端点ID
-	Type       string         // 连接类型: "normal" 或 "reverse"
+	Conn       net.Conn // 用于反向连接的原始连接
+	EndpointID string   // 端点ID
+	Type       string   // 连接类型: "normal" 或 "reverse"
 	LastActive time.Time
 	mu         sync.Mutex
 }
@@ -65,11 +68,26 @@ func (rs *RelayServer) Start(ctx context.Context) error {
 	}
 
 	rs.listener = listener
-	rs.grpcServer = grpc.NewServer()
+	rs.grpcServer = grpc.NewServer(
+		grpc.MaxRecvMsgSize(math.MaxInt64),
+		grpc.MaxSendMsgSize(math.MaxInt64),
+		grpc.NumStreamWorkers(uint32(100)), // 并发流处理worker数
+		grpc.KeepaliveParams(keepalive.ServerParameters{
+			MaxConnectionIdle:     5 * time.Minute,  // 空闲连接超时
+			MaxConnectionAge:      30 * time.Minute, // 连接最大生命周期
+			MaxConnectionAgeGrace: 10 * time.Second, // 优雅关闭等待时间
+			Time:                  30 * time.Second, // keepalive ping间隔
+			Timeout:               10 * time.Second, // keepalive ping超时
+		}),
+		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
+			MinTime:             5 * time.Second, // 客户端ping最小间隔
+			PermitWithoutStream: true,            // 允许无流时ping
+		}),
+	)
 	pb.RegisterRelayServiceServer(rs.grpcServer, rs)
 
 	log.Printf("[RelayServer] Starting relay server on %s", rs.address)
-	
+
 	go func() {
 		if err := rs.grpcServer.Serve(listener); err != nil {
 			log.Printf("[RelayServer] Failed to serve: %v", err)
@@ -82,13 +100,13 @@ func (rs *RelayServer) Start(ctx context.Context) error {
 // Stop 停止中继服务器
 func (rs *RelayServer) Stop() {
 	log.Printf("[RelayServer] Stopping relay server")
-	
+
 	rs.cancel()
-	
+
 	if rs.grpcServer != nil {
 		rs.grpcServer.GracefulStop()
 	}
-	
+
 	if rs.listener != nil {
 		rs.listener.Close()
 	}
@@ -276,7 +294,7 @@ func (rs *RelayServer) handleRelayData(fromClient *RelayClientConnection, messag
 	}
 
 	// 转发给目标客户端
-	log.Printf("[RelayServer] Relaying data from %s to %s (size: %d bytes)", 
+	log.Printf("[RelayServer] Relaying data from %s to %s (size: %d bytes)",
 		fromClient.Name, targetClient, len(message.Data))
 
 	return targetConn.sendMessage(message)
@@ -285,9 +303,9 @@ func (rs *RelayServer) handleRelayData(fromClient *RelayClientConnection, messag
 // handleRelayControl 处理中继控制消息
 func (rs *RelayServer) handleRelayControl(fromClient *RelayClientConnection, message *pb.RelayMessage) error {
 	// 处理控制消息，如心跳、状态更新等
-	log.Printf("[RelayServer] Received control message from %s: %s", 
+	log.Printf("[RelayServer] Received control message from %s: %s",
 		fromClient.Name, string(message.Data))
-	
+
 	// 可以在这里添加具体的控制逻辑
 	return nil
 }
@@ -305,9 +323,9 @@ func (rs *RelayServer) handleRouteRequest(fromClient *RelayClientConnection, mes
 
 	// 构建路由响应
 	routeResponse := RelayRouteResponse{
-		Source:  fromClient.Name,
-		Target:  routeRequest.Target,
-		Path:    []string{fromClient.Name, rs.name, "SERVER"},
+		Source:   fromClient.Name,
+		Target:   routeRequest.Target,
+		Path:     []string{fromClient.Name, rs.name, "SERVER"},
 		HopCount: 2,
 		Latency:  50, // 模拟延迟
 	}
@@ -318,10 +336,10 @@ func (rs *RelayServer) handleRouteRequest(fromClient *RelayClientConnection, mes
 	}
 
 	response := &pb.RelayMessage{
-		Type:        pb.RelayMessageType_ROUTE_RESPONSE,
+		Type:         pb.RelayMessageType_ROUTE_RESPONSE,
 		SourceClient: rs.name,
 		TargetClient: fromClient.Name,
-		Data:        responseData,
+		Data:         responseData,
 	}
 
 	return fromClient.sendMessage(response)
@@ -331,7 +349,7 @@ func (rs *RelayServer) handleRouteRequest(fromClient *RelayClientConnection, mes
 func (rs *RelayServer) forwardToServer(fromClient *RelayClientConnection, message *pb.RelayMessage) error {
 	// 这里需要实现转发到APS服务器的逻辑
 	log.Printf("[RelayServer] Forwarding message from %s to APS server", fromClient.Name)
-	
+
 	// 可以建立到APS服务器的连接，或者通过现有的隧道连接
 	// 暂时返回成功，后续实现具体逻辑
 	return nil

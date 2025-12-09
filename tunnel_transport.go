@@ -64,17 +64,19 @@ func (t *TunnelRoundTripper) roundTripViaTunnel(req *http.Request, mapping *Mapp
 
 	// Send the request via the tunnel manager's gRPC stream
 	log.Printf("[TUNNEL] Sending request for %s via tunnel '%s' to endpoint '%s'", req.URL.String(), tunnelName, endpointName)
-	respData, err := t.tunnelManager.SendRequest(req.Context(), tunnelName, endpointName, reqPayload)
+	bodyStream, headerBytes, err := t.tunnelManager.SendRequestStream(req.Context(), tunnelName, endpointName, reqPayload)
 	if err != nil {
 		log.Printf("[TUNNEL] Request via tunnel failed: %v. Falling back to direct connection.", err)
 		return t.next.RoundTrip(req) // Fallback
 	}
 
 	// Deserialize the response
-	resp, err := http.ReadResponse(bufio.NewReader(bytes.NewReader(respData)), req)
+	resp, err := http.ReadResponse(bufio.NewReader(bytes.NewReader(headerBytes)), req)
 	if err != nil {
+		bodyStream.Close()
 		return nil, fmt.Errorf("failed to read response from tunnel: %w", err)
 	}
+	resp.Body = bodyStream
 
 	return resp, nil
 }

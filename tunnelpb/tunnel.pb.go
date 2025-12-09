@@ -401,14 +401,163 @@ func (x *Request) GetData() []byte {
 	return nil
 }
 
-// Response is a raw HTTP response sent back from the endpoint to the server.
+// ResponseHeader contains the initial part of an HTTP response (status line and headers).
+type ResponseHeader struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The raw bytes of the HTTP response headers (e.g., from httputil.DumpResponse without body).
+	// This data will be encrypted by the client before sending.
+	Header        []byte `protobuf:"bytes,1,opt,name=header,proto3" json:"header,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ResponseHeader) Reset() {
+	*x = ResponseHeader{}
+	mi := &file_tunnelpb_tunnel_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ResponseHeader) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ResponseHeader) ProtoMessage() {}
+
+func (x *ResponseHeader) ProtoReflect() protoreflect.Message {
+	mi := &file_tunnelpb_tunnel_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ResponseHeader.ProtoReflect.Descriptor instead.
+func (*ResponseHeader) Descriptor() ([]byte, []int) {
+	return file_tunnelpb_tunnel_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *ResponseHeader) GetHeader() []byte {
+	if x != nil {
+		return x.Header
+	}
+	return nil
+}
+
+// DataChunk contains a chunk of the HTTP response body.
+type DataChunk struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// A chunk of the response body.
+	// This data will be encrypted by the client before sending.
+	Data          []byte `protobuf:"bytes,1,opt,name=data,proto3" json:"data,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DataChunk) Reset() {
+	*x = DataChunk{}
+	mi := &file_tunnelpb_tunnel_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DataChunk) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DataChunk) ProtoMessage() {}
+
+func (x *DataChunk) ProtoReflect() protoreflect.Message {
+	mi := &file_tunnelpb_tunnel_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DataChunk.ProtoReflect.Descriptor instead.
+func (*DataChunk) Descriptor() ([]byte, []int) {
+	return file_tunnelpb_tunnel_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *DataChunk) GetData() []byte {
+	if x != nil {
+		return x.Data
+	}
+	return nil
+}
+
+// StreamEnd marks the end of a response stream.
+type StreamEnd struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Optional: If an error occurred during streaming, it's reported here.
+	Error         string `protobuf:"bytes,1,opt,name=error,proto3" json:"error,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *StreamEnd) Reset() {
+	*x = StreamEnd{}
+	mi := &file_tunnelpb_tunnel_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *StreamEnd) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*StreamEnd) ProtoMessage() {}
+
+func (x *StreamEnd) ProtoReflect() protoreflect.Message {
+	mi := &file_tunnelpb_tunnel_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use StreamEnd.ProtoReflect.Descriptor instead.
+func (*StreamEnd) Descriptor() ([]byte, []int) {
+	return file_tunnelpb_tunnel_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *StreamEnd) GetError() string {
+	if x != nil {
+		return x.Error
+	}
+	return ""
+}
+
+// Response is a message sent back from the endpoint to the server.
+// It supports streaming for large response bodies.
 type Response struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Correlates with the Request ID from ServerToEndpoint.
 	Id string `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	// The content of the response. A typical sequence for a successful response is:
+	// 1. One ResponseHeader message.
+	// 2. Zero or more DataChunk messages.
+	// 3. One StreamEnd message.
+	// For errors that occur before the response starts, a single StreamEnd with an error can be sent.
+	//
 	// Types that are valid to be assigned to Content:
 	//
-	//	*Response_Data
+	//	*Response_Header
+	//	*Response_Chunk
+	//	*Response_End
 	//	*Response_Error
 	Content       isResponse_Content `protobuf_oneof:"content"`
 	unknownFields protoimpl.UnknownFields
@@ -417,7 +566,7 @@ type Response struct {
 
 func (x *Response) Reset() {
 	*x = Response{}
-	mi := &file_tunnelpb_tunnel_proto_msgTypes[4]
+	mi := &file_tunnelpb_tunnel_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -429,7 +578,7 @@ func (x *Response) String() string {
 func (*Response) ProtoMessage() {}
 
 func (x *Response) ProtoReflect() protoreflect.Message {
-	mi := &file_tunnelpb_tunnel_proto_msgTypes[4]
+	mi := &file_tunnelpb_tunnel_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -442,7 +591,7 @@ func (x *Response) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Response.ProtoReflect.Descriptor instead.
 func (*Response) Descriptor() ([]byte, []int) {
-	return file_tunnelpb_tunnel_proto_rawDescGZIP(), []int{4}
+	return file_tunnelpb_tunnel_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *Response) GetId() string {
@@ -459,10 +608,28 @@ func (x *Response) GetContent() isResponse_Content {
 	return nil
 }
 
-func (x *Response) GetData() []byte {
+func (x *Response) GetHeader() *ResponseHeader {
 	if x != nil {
-		if x, ok := x.Content.(*Response_Data); ok {
-			return x.Data
+		if x, ok := x.Content.(*Response_Header); ok {
+			return x.Header
+		}
+	}
+	return nil
+}
+
+func (x *Response) GetChunk() *DataChunk {
+	if x != nil {
+		if x, ok := x.Content.(*Response_Chunk); ok {
+			return x.Chunk
+		}
+	}
+	return nil
+}
+
+func (x *Response) GetEnd() *StreamEnd {
+	if x != nil {
+		if x, ok := x.Content.(*Response_End); ok {
+			return x.End
 		}
 	}
 	return nil
@@ -481,17 +648,27 @@ type isResponse_Content interface {
 	isResponse_Content()
 }
 
-type Response_Data struct {
-	// The raw bytes of the HTTP response (e.g., from httputil.DumpResponse).
-	// This data will be encrypted by the client before sending.
-	Data []byte `protobuf:"bytes,2,opt,name=data,proto3,oneof"`
+type Response_Header struct {
+	Header *ResponseHeader `protobuf:"bytes,2,opt,name=header,proto3,oneof"`
+}
+
+type Response_Chunk struct {
+	Chunk *DataChunk `protobuf:"bytes,3,opt,name=chunk,proto3,oneof"`
+}
+
+type Response_End struct {
+	End *StreamEnd `protobuf:"bytes,4,opt,name=end,proto3,oneof"`
 }
 
 type Response_Error struct {
-	Error string `protobuf:"bytes,3,opt,name=error,proto3,oneof"`
+	Error string `protobuf:"bytes,5,opt,name=error,proto3,oneof"` // For backward compatibility and immediate errors
 }
 
-func (*Response_Data) isResponse_Content() {}
+func (*Response_Header) isResponse_Content() {}
+
+func (*Response_Chunk) isResponse_Content() {}
+
+func (*Response_End) isResponse_Content() {}
 
 func (*Response_Error) isResponse_Content() {}
 
@@ -504,7 +681,7 @@ type Cancel struct {
 
 func (x *Cancel) Reset() {
 	*x = Cancel{}
-	mi := &file_tunnelpb_tunnel_proto_msgTypes[5]
+	mi := &file_tunnelpb_tunnel_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -516,7 +693,7 @@ func (x *Cancel) String() string {
 func (*Cancel) ProtoMessage() {}
 
 func (x *Cancel) ProtoReflect() protoreflect.Message {
-	mi := &file_tunnelpb_tunnel_proto_msgTypes[5]
+	mi := &file_tunnelpb_tunnel_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -529,7 +706,7 @@ func (x *Cancel) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Cancel.ProtoReflect.Descriptor instead.
 func (*Cancel) Descriptor() ([]byte, []int) {
-	return file_tunnelpb_tunnel_proto_rawDescGZIP(), []int{5}
+	return file_tunnelpb_tunnel_proto_rawDescGZIP(), []int{8}
 }
 
 // Heartbeat is a message to check if the connection is still alive.
@@ -542,7 +719,7 @@ type Heartbeat struct {
 
 func (x *Heartbeat) Reset() {
 	*x = Heartbeat{}
-	mi := &file_tunnelpb_tunnel_proto_msgTypes[6]
+	mi := &file_tunnelpb_tunnel_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -554,7 +731,7 @@ func (x *Heartbeat) String() string {
 func (*Heartbeat) ProtoMessage() {}
 
 func (x *Heartbeat) ProtoReflect() protoreflect.Message {
-	mi := &file_tunnelpb_tunnel_proto_msgTypes[6]
+	mi := &file_tunnelpb_tunnel_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -567,7 +744,7 @@ func (x *Heartbeat) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Heartbeat.ProtoReflect.Descriptor instead.
 func (*Heartbeat) Descriptor() ([]byte, []int) {
-	return file_tunnelpb_tunnel_proto_rawDescGZIP(), []int{6}
+	return file_tunnelpb_tunnel_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *Heartbeat) GetTimestamp() int64 {
@@ -592,7 +769,7 @@ type RelayMessage struct {
 
 func (x *RelayMessage) Reset() {
 	*x = RelayMessage{}
-	mi := &file_tunnelpb_tunnel_proto_msgTypes[7]
+	mi := &file_tunnelpb_tunnel_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -604,7 +781,7 @@ func (x *RelayMessage) String() string {
 func (*RelayMessage) ProtoMessage() {}
 
 func (x *RelayMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_tunnelpb_tunnel_proto_msgTypes[7]
+	mi := &file_tunnelpb_tunnel_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -617,7 +794,7 @@ func (x *RelayMessage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RelayMessage.ProtoReflect.Descriptor instead.
 func (*RelayMessage) Descriptor() ([]byte, []int) {
-	return file_tunnelpb_tunnel_proto_rawDescGZIP(), []int{7}
+	return file_tunnelpb_tunnel_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *RelayMessage) GetType() RelayMessageType {
@@ -677,7 +854,7 @@ type RouteInfo struct {
 
 func (x *RouteInfo) Reset() {
 	*x = RouteInfo{}
-	mi := &file_tunnelpb_tunnel_proto_msgTypes[8]
+	mi := &file_tunnelpb_tunnel_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -689,7 +866,7 @@ func (x *RouteInfo) String() string {
 func (*RouteInfo) ProtoMessage() {}
 
 func (x *RouteInfo) ProtoReflect() protoreflect.Message {
-	mi := &file_tunnelpb_tunnel_proto_msgTypes[8]
+	mi := &file_tunnelpb_tunnel_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -702,7 +879,7 @@ func (x *RouteInfo) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RouteInfo.ProtoReflect.Descriptor instead.
 func (*RouteInfo) Descriptor() ([]byte, []int) {
-	return file_tunnelpb_tunnel_proto_rawDescGZIP(), []int{8}
+	return file_tunnelpb_tunnel_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *RouteInfo) GetSource() string {
@@ -760,7 +937,7 @@ type RouteRequest struct {
 
 func (x *RouteRequest) Reset() {
 	*x = RouteRequest{}
-	mi := &file_tunnelpb_tunnel_proto_msgTypes[9]
+	mi := &file_tunnelpb_tunnel_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -772,7 +949,7 @@ func (x *RouteRequest) String() string {
 func (*RouteRequest) ProtoMessage() {}
 
 func (x *RouteRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_tunnelpb_tunnel_proto_msgTypes[9]
+	mi := &file_tunnelpb_tunnel_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -785,7 +962,7 @@ func (x *RouteRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RouteRequest.ProtoReflect.Descriptor instead.
 func (*RouteRequest) Descriptor() ([]byte, []int) {
-	return file_tunnelpb_tunnel_proto_rawDescGZIP(), []int{9}
+	return file_tunnelpb_tunnel_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *RouteRequest) GetSource() string {
@@ -828,7 +1005,7 @@ type RouteConstraints struct {
 
 func (x *RouteConstraints) Reset() {
 	*x = RouteConstraints{}
-	mi := &file_tunnelpb_tunnel_proto_msgTypes[10]
+	mi := &file_tunnelpb_tunnel_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -840,7 +1017,7 @@ func (x *RouteConstraints) String() string {
 func (*RouteConstraints) ProtoMessage() {}
 
 func (x *RouteConstraints) ProtoReflect() protoreflect.Message {
-	mi := &file_tunnelpb_tunnel_proto_msgTypes[10]
+	mi := &file_tunnelpb_tunnel_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -853,7 +1030,7 @@ func (x *RouteConstraints) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RouteConstraints.ProtoReflect.Descriptor instead.
 func (*RouteConstraints) Descriptor() ([]byte, []int) {
-	return file_tunnelpb_tunnel_proto_rawDescGZIP(), []int{10}
+	return file_tunnelpb_tunnel_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *RouteConstraints) GetMaxHops() int32 {
@@ -888,7 +1065,7 @@ type RouteResponse struct {
 
 func (x *RouteResponse) Reset() {
 	*x = RouteResponse{}
-	mi := &file_tunnelpb_tunnel_proto_msgTypes[11]
+	mi := &file_tunnelpb_tunnel_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -900,7 +1077,7 @@ func (x *RouteResponse) String() string {
 func (*RouteResponse) ProtoMessage() {}
 
 func (x *RouteResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_tunnelpb_tunnel_proto_msgTypes[11]
+	mi := &file_tunnelpb_tunnel_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -913,7 +1090,7 @@ func (x *RouteResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RouteResponse.ProtoReflect.Descriptor instead.
 func (*RouteResponse) Descriptor() ([]byte, []int) {
-	return file_tunnelpb_tunnel_proto_rawDescGZIP(), []int{11}
+	return file_tunnelpb_tunnel_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *RouteResponse) GetRoutes() []*RouteInfo {
@@ -942,7 +1119,7 @@ type RouteUpdate struct {
 
 func (x *RouteUpdate) Reset() {
 	*x = RouteUpdate{}
-	mi := &file_tunnelpb_tunnel_proto_msgTypes[12]
+	mi := &file_tunnelpb_tunnel_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -954,7 +1131,7 @@ func (x *RouteUpdate) String() string {
 func (*RouteUpdate) ProtoMessage() {}
 
 func (x *RouteUpdate) ProtoReflect() protoreflect.Message {
-	mi := &file_tunnelpb_tunnel_proto_msgTypes[12]
+	mi := &file_tunnelpb_tunnel_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -967,7 +1144,7 @@ func (x *RouteUpdate) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RouteUpdate.ProtoReflect.Descriptor instead.
 func (*RouteUpdate) Descriptor() ([]byte, []int) {
-	return file_tunnelpb_tunnel_proto_rawDescGZIP(), []int{12}
+	return file_tunnelpb_tunnel_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *RouteUpdate) GetEndpoint() string {
@@ -1002,7 +1179,7 @@ type RouteUpdateResponse struct {
 
 func (x *RouteUpdateResponse) Reset() {
 	*x = RouteUpdateResponse{}
-	mi := &file_tunnelpb_tunnel_proto_msgTypes[13]
+	mi := &file_tunnelpb_tunnel_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1014,7 +1191,7 @@ func (x *RouteUpdateResponse) String() string {
 func (*RouteUpdateResponse) ProtoMessage() {}
 
 func (x *RouteUpdateResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_tunnelpb_tunnel_proto_msgTypes[13]
+	mi := &file_tunnelpb_tunnel_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1027,7 +1204,7 @@ func (x *RouteUpdateResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RouteUpdateResponse.ProtoReflect.Descriptor instead.
 func (*RouteUpdateResponse) Descriptor() ([]byte, []int) {
-	return file_tunnelpb_tunnel_proto_rawDescGZIP(), []int{13}
+	return file_tunnelpb_tunnel_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *RouteUpdateResponse) GetSuccess() bool {
@@ -1067,11 +1244,19 @@ const file_tunnelpb_tunnel_proto_rawDesc = "" +
 	"\bpassword\x18\x03 \x01(\tR\bpassword\"/\n" +
 	"\aRequest\x12\x10\n" +
 	"\x03url\x18\x01 \x01(\tR\x03url\x12\x12\n" +
-	"\x04data\x18\x02 \x01(\fR\x04data\"S\n" +
+	"\x04data\x18\x02 \x01(\fR\x04data\"(\n" +
+	"\x0eResponseHeader\x12\x16\n" +
+	"\x06header\x18\x01 \x01(\fR\x06header\"\x1f\n" +
+	"\tDataChunk\x12\x12\n" +
+	"\x04data\x18\x01 \x01(\fR\x04data\"!\n" +
+	"\tStreamEnd\x12\x14\n" +
+	"\x05error\x18\x01 \x01(\tR\x05error\"\xc1\x01\n" +
 	"\bResponse\x12\x0e\n" +
-	"\x02id\x18\x01 \x01(\tR\x02id\x12\x14\n" +
-	"\x04data\x18\x02 \x01(\fH\x00R\x04data\x12\x16\n" +
-	"\x05error\x18\x03 \x01(\tH\x00R\x05errorB\t\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x120\n" +
+	"\x06header\x18\x02 \x01(\v2\x16.tunnel.ResponseHeaderH\x00R\x06header\x12)\n" +
+	"\x05chunk\x18\x03 \x01(\v2\x11.tunnel.DataChunkH\x00R\x05chunk\x12%\n" +
+	"\x03end\x18\x04 \x01(\v2\x11.tunnel.StreamEndH\x00R\x03end\x12\x16\n" +
+	"\x05error\x18\x05 \x01(\tH\x00R\x05errorB\t\n" +
 	"\acontent\"\b\n" +
 	"\x06Cancel\")\n" +
 	"\tHeartbeat\x12\x1c\n" +
@@ -1142,50 +1327,56 @@ func file_tunnelpb_tunnel_proto_rawDescGZIP() []byte {
 }
 
 var file_tunnelpb_tunnel_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_tunnelpb_tunnel_proto_msgTypes = make([]protoimpl.MessageInfo, 15)
+var file_tunnelpb_tunnel_proto_msgTypes = make([]protoimpl.MessageInfo, 18)
 var file_tunnelpb_tunnel_proto_goTypes = []any{
 	(RelayMessageType)(0),       // 0: tunnel.RelayMessageType
 	(*ServerToEndpoint)(nil),    // 1: tunnel.ServerToEndpoint
 	(*EndpointToServer)(nil),    // 2: tunnel.EndpointToServer
 	(*RegistrationRequest)(nil), // 3: tunnel.RegistrationRequest
 	(*Request)(nil),             // 4: tunnel.Request
-	(*Response)(nil),            // 5: tunnel.Response
-	(*Cancel)(nil),              // 6: tunnel.Cancel
-	(*Heartbeat)(nil),           // 7: tunnel.Heartbeat
-	(*RelayMessage)(nil),        // 8: tunnel.RelayMessage
-	(*RouteInfo)(nil),           // 9: tunnel.RouteInfo
-	(*RouteRequest)(nil),        // 10: tunnel.RouteRequest
-	(*RouteConstraints)(nil),    // 11: tunnel.RouteConstraints
-	(*RouteResponse)(nil),       // 12: tunnel.RouteResponse
-	(*RouteUpdate)(nil),         // 13: tunnel.RouteUpdate
-	(*RouteUpdateResponse)(nil), // 14: tunnel.RouteUpdateResponse
-	nil,                         // 15: tunnel.RelayMessage.MetadataEntry
+	(*ResponseHeader)(nil),      // 5: tunnel.ResponseHeader
+	(*DataChunk)(nil),           // 6: tunnel.DataChunk
+	(*StreamEnd)(nil),           // 7: tunnel.StreamEnd
+	(*Response)(nil),            // 8: tunnel.Response
+	(*Cancel)(nil),              // 9: tunnel.Cancel
+	(*Heartbeat)(nil),           // 10: tunnel.Heartbeat
+	(*RelayMessage)(nil),        // 11: tunnel.RelayMessage
+	(*RouteInfo)(nil),           // 12: tunnel.RouteInfo
+	(*RouteRequest)(nil),        // 13: tunnel.RouteRequest
+	(*RouteConstraints)(nil),    // 14: tunnel.RouteConstraints
+	(*RouteResponse)(nil),       // 15: tunnel.RouteResponse
+	(*RouteUpdate)(nil),         // 16: tunnel.RouteUpdate
+	(*RouteUpdateResponse)(nil), // 17: tunnel.RouteUpdateResponse
+	nil,                         // 18: tunnel.RelayMessage.MetadataEntry
 }
 var file_tunnelpb_tunnel_proto_depIdxs = []int32{
 	4,  // 0: tunnel.ServerToEndpoint.request:type_name -> tunnel.Request
-	6,  // 1: tunnel.ServerToEndpoint.cancel:type_name -> tunnel.Cancel
-	7,  // 2: tunnel.ServerToEndpoint.heartbeat:type_name -> tunnel.Heartbeat
+	9,  // 1: tunnel.ServerToEndpoint.cancel:type_name -> tunnel.Cancel
+	10, // 2: tunnel.ServerToEndpoint.heartbeat:type_name -> tunnel.Heartbeat
 	3,  // 3: tunnel.EndpointToServer.registration:type_name -> tunnel.RegistrationRequest
-	5,  // 4: tunnel.EndpointToServer.response:type_name -> tunnel.Response
-	7,  // 5: tunnel.EndpointToServer.heartbeat:type_name -> tunnel.Heartbeat
-	0,  // 6: tunnel.RelayMessage.type:type_name -> tunnel.RelayMessageType
-	15, // 7: tunnel.RelayMessage.metadata:type_name -> tunnel.RelayMessage.MetadataEntry
-	11, // 8: tunnel.RouteRequest.constraints:type_name -> tunnel.RouteConstraints
-	9,  // 9: tunnel.RouteResponse.routes:type_name -> tunnel.RouteInfo
-	9,  // 10: tunnel.RouteUpdate.routes:type_name -> tunnel.RouteInfo
-	2,  // 11: tunnel.TunnelService.Establish:input_type -> tunnel.EndpointToServer
-	8,  // 12: tunnel.RelayService.EstablishRelay:input_type -> tunnel.RelayMessage
-	10, // 13: tunnel.RoutingService.CalculateRoutes:input_type -> tunnel.RouteRequest
-	13, // 14: tunnel.RoutingService.UpdateRouteInfo:input_type -> tunnel.RouteUpdate
-	1,  // 15: tunnel.TunnelService.Establish:output_type -> tunnel.ServerToEndpoint
-	8,  // 16: tunnel.RelayService.EstablishRelay:output_type -> tunnel.RelayMessage
-	12, // 17: tunnel.RoutingService.CalculateRoutes:output_type -> tunnel.RouteResponse
-	14, // 18: tunnel.RoutingService.UpdateRouteInfo:output_type -> tunnel.RouteUpdateResponse
-	15, // [15:19] is the sub-list for method output_type
-	11, // [11:15] is the sub-list for method input_type
-	11, // [11:11] is the sub-list for extension type_name
-	11, // [11:11] is the sub-list for extension extendee
-	0,  // [0:11] is the sub-list for field type_name
+	8,  // 4: tunnel.EndpointToServer.response:type_name -> tunnel.Response
+	10, // 5: tunnel.EndpointToServer.heartbeat:type_name -> tunnel.Heartbeat
+	5,  // 6: tunnel.Response.header:type_name -> tunnel.ResponseHeader
+	6,  // 7: tunnel.Response.chunk:type_name -> tunnel.DataChunk
+	7,  // 8: tunnel.Response.end:type_name -> tunnel.StreamEnd
+	0,  // 9: tunnel.RelayMessage.type:type_name -> tunnel.RelayMessageType
+	18, // 10: tunnel.RelayMessage.metadata:type_name -> tunnel.RelayMessage.MetadataEntry
+	14, // 11: tunnel.RouteRequest.constraints:type_name -> tunnel.RouteConstraints
+	12, // 12: tunnel.RouteResponse.routes:type_name -> tunnel.RouteInfo
+	12, // 13: tunnel.RouteUpdate.routes:type_name -> tunnel.RouteInfo
+	2,  // 14: tunnel.TunnelService.Establish:input_type -> tunnel.EndpointToServer
+	11, // 15: tunnel.RelayService.EstablishRelay:input_type -> tunnel.RelayMessage
+	13, // 16: tunnel.RoutingService.CalculateRoutes:input_type -> tunnel.RouteRequest
+	16, // 17: tunnel.RoutingService.UpdateRouteInfo:input_type -> tunnel.RouteUpdate
+	1,  // 18: tunnel.TunnelService.Establish:output_type -> tunnel.ServerToEndpoint
+	11, // 19: tunnel.RelayService.EstablishRelay:output_type -> tunnel.RelayMessage
+	15, // 20: tunnel.RoutingService.CalculateRoutes:output_type -> tunnel.RouteResponse
+	17, // 21: tunnel.RoutingService.UpdateRouteInfo:output_type -> tunnel.RouteUpdateResponse
+	18, // [18:22] is the sub-list for method output_type
+	14, // [14:18] is the sub-list for method input_type
+	14, // [14:14] is the sub-list for extension type_name
+	14, // [14:14] is the sub-list for extension extendee
+	0,  // [0:14] is the sub-list for field type_name
 }
 
 func init() { file_tunnelpb_tunnel_proto_init() }
@@ -1203,8 +1394,10 @@ func file_tunnelpb_tunnel_proto_init() {
 		(*EndpointToServer_Response)(nil),
 		(*EndpointToServer_Heartbeat)(nil),
 	}
-	file_tunnelpb_tunnel_proto_msgTypes[4].OneofWrappers = []any{
-		(*Response_Data)(nil),
+	file_tunnelpb_tunnel_proto_msgTypes[7].OneofWrappers = []any{
+		(*Response_Header)(nil),
+		(*Response_Chunk)(nil),
+		(*Response_End)(nil),
 		(*Response_Error)(nil),
 	}
 	type x struct{}
@@ -1213,7 +1406,7 @@ func file_tunnelpb_tunnel_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_tunnelpb_tunnel_proto_rawDesc), len(file_tunnelpb_tunnel_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   15,
+			NumMessages:   18,
 			NumExtensions: 0,
 			NumServices:   3,
 		},

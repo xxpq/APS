@@ -4,11 +4,14 @@ import (
 	"errors"
 	"io"
 	"log"
+	"math"
 	"net"
 	"sync"
+	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
 
@@ -43,7 +46,22 @@ func (s *TunnelServer) Start(addr string) error {
 		return err
 	}
 
-	s.grpcServer = grpc.NewServer()
+	s.grpcServer = grpc.NewServer(
+		grpc.MaxRecvMsgSize(math.MaxInt64),
+		grpc.MaxSendMsgSize(math.MaxInt64),
+		grpc.NumStreamWorkers(uint32(100)), // 并发流处理worker数
+		grpc.KeepaliveParams(keepalive.ServerParameters{
+			MaxConnectionIdle:     5 * time.Minute,  // 空闲连接超时
+			MaxConnectionAge:      30 * time.Minute, // 连接最大生命周期
+			MaxConnectionAgeGrace: 10 * time.Second, // 优雅关闭等待时间
+			Time:                  30 * time.Second, // keepalive ping间隔
+			Timeout:               10 * time.Second, // keepalive ping超时
+		}),
+		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
+			MinTime:             5 * time.Second, // 客户端ping最小间隔
+			PermitWithoutStream: true,            // 允许无流时ping
+		}),
+	)
 	pb.RegisterTunnelServiceServer(s.grpcServer, s)
 
 	log.Printf("[GRPC] Tunnel server listening on %s", addr)

@@ -1,14 +1,17 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"sync"
 	"time"
 
 	pb "aps/tunnelpb"
+
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -35,7 +38,7 @@ func NewHybridTunnelManager(config *Config, statsCollector *StatsCollector) *Hyb
 
 	// 初始化gRPC隧道管理器
 	htm.grpcManager = NewTunnelManager(config, statsCollector)
-	
+
 	// 初始化WebSocket连接池管理器
 	htm.wsManager = NewWebSocketPoolManager(config, statsCollector)
 
@@ -54,13 +57,13 @@ func (htm *HybridTunnelManager) updateConfigFromTunnels() {
 	for _, tunnelConfig := range htm.config.Tunnels {
 		if tunnelConfig.WebSocketPool != nil {
 			wsConfig := tunnelConfig.WebSocketPool
-			
+
 			// 更新fallback配置
 			htm.fallbackEnabled = wsConfig.FallbackEnabled
 			if wsConfig.FallbackThreshold > 0 {
 				htm.fallbackThreshold = wsConfig.FallbackThreshold
 			}
-			
+
 			log.Printf("[HYBRID] Updated WebSocket pool config - FallbackEnabled: %v, FallbackThreshold: %d",
 				htm.fallbackEnabled, htm.fallbackThreshold)
 			break // 使用第一个找到的配置
@@ -72,7 +75,7 @@ func (htm *HybridTunnelManager) updateConfigFromTunnels() {
 func (htm *HybridTunnelManager) SetStatsCollector(statsCollector *StatsCollector) {
 	htm.mu.Lock()
 	defer htm.mu.Unlock()
-	
+
 	htm.statsCollector = statsCollector
 	if htm.grpcManager != nil {
 		htm.grpcManager.SetStatsCollector(statsCollector)
@@ -113,35 +116,47 @@ func (htm *HybridTunnelManager) HandleIncomingMessage(msg *pb.EndpointToServer) 
 	htm.grpcManager.HandleIncomingMessage(msg)
 }
 
-// SendRequest 发送请求，支持gRPC到WebSocket的fallback
-func (htm *HybridTunnelManager) SendRequest(ctx context.Context, tunnelName, endpointName string, reqPayload *RequestPayload) ([]byte, error) {
+// SendRequestStream sends a request and returns a stream for the response.
+func (htm *HybridTunnelManager) SendRequestStream(ctx context.Context, tunnelName, endpointName string, reqPayload *RequestPayload) (io.ReadCloser, []byte, error) {
 	htm.mu.RLock()
 	fallbackEnabled := htm.fallbackEnabled
 	htm.mu.RUnlock()
 
-	// 首先尝试gRPC
+	// First, try gRPC
 	if htm.grpcManager != nil {
-		data, err := htm.grpcManager.SendRequest(ctx, tunnelName, endpointName, reqPayload)
+		bodyStream, header, err := htm.grpcManager.SendRequestStream(ctx, tunnelName, endpointName, reqPayload)
 		if err == nil {
-			return data, nil
+			return bodyStream, header, nil
 		}
 
-		// 如果gRPC失败且启用了fallback，尝试WebSocket
+		// If gRPC fails and fallback is enabled, try WebSocket
 		if fallbackEnabled && htm.shouldFallback(err) {
-			log.Printf("[HYBRID] gRPC request failed for tunnel %s.%s, trying WebSocket fallback: %v", 
+			log.Printf("[HYBRID] gRPC request failed for tunnel %s.%s, trying WebSocket fallback: %v",
 				tunnelName, endpointName, err)
-			return htm.sendWebSocketRequest(ctx, tunnelName, endpointName, reqPayload)
+			// Note: WebSocket implementation does not support streaming yet.
+			// This will read the entire body into memory.
+			data, err := htm.sendWebSocketRequest(ctx, tunnelName, endpointName, reqPayload)
+			if err != nil {
+				return nil, nil, err
+			}
+			// To match the stream interface, we wrap the data in a ReadCloser.
+			// This is not true streaming.
+			return io.NopCloser(bytes.NewReader(data)), nil, nil
 		}
 
-		return nil, err
+		return nil, nil, err
 	}
 
-	// 如果gRPC管理器不可用，直接尝试WebSocket
+	// If gRPC manager is not available, try WebSocket directly
 	if fallbackEnabled {
-		return htm.sendWebSocketRequest(ctx, tunnelName, endpointName, reqPayload)
+		data, err := htm.sendWebSocketRequest(ctx, tunnelName, endpointName, reqPayload)
+		if err != nil {
+			return nil, nil, err
+		}
+		return io.NopCloser(bytes.NewReader(data)), nil, nil
 	}
 
-	return nil, errors.New("no available tunnel managers")
+	return nil, nil, errors.New("no available tunnel managers")
 }
 
 // shouldFallback 判断是否应该fallback到WebSocket
@@ -192,7 +207,7 @@ func (htm *HybridTunnelManager) sendWebSocketRequest(ctx context.Context, tunnel
 
 	// 获取或创建WebSocket连接池
 	pool := htm.wsManager.GetOrCreatePool(tunnelName, endpointName, tunnelConfig.Password, "")
-	
+
 	// 通过WebSocket发送请求
 	respData, err := pool.SendRequest(ctx, reqPayload)
 	if err != nil {
@@ -228,51 +243,51 @@ func (htm *HybridTunnelManager) FindTunnelForEndpoint(endpointName string) (stri
 	}
 
 	// 尝试WebSocket
-		if htm.wsManager != nil {
-			if tunnelName, exists := htm.wsManager.FindTunnelForEndpoint(endpointName); exists {
-				return tunnelName, true
-			}
+	if htm.wsManager != nil {
+		if tunnelName, exists := htm.wsManager.FindTunnelForEndpoint(endpointName); exists {
+			return tunnelName, true
 		}
-	
-		return "", false
 	}
-	
-	// GetEndpointsInfo 获取端点信息
-	func (htm *HybridTunnelManager) GetEndpointsInfo(tunnelName string) map[string]*EndpointInfo {
-		var grpcInfo, wsInfo map[string]*EndpointInfo
-	
-		// 获取gRPC信息
-		if htm.grpcManager != nil {
-			grpcInfo = htm.grpcManager.GetEndpointsInfo(tunnelName)
+
+	return "", false
+}
+
+// GetEndpointsInfo 获取端点信息
+func (htm *HybridTunnelManager) GetEndpointsInfo(tunnelName string) map[string]*EndpointInfo {
+	var grpcInfo, wsInfo map[string]*EndpointInfo
+
+	// 获取gRPC信息
+	if htm.grpcManager != nil {
+		grpcInfo = htm.grpcManager.GetEndpointsInfo(tunnelName)
+	}
+
+	// 获取WebSocket信息
+	if htm.wsManager != nil {
+		wsInfo = htm.wsManager.GetEndpointsInfo(tunnelName)
+	}
+
+	// 合并结果
+	if grpcInfo == nil && wsInfo == nil {
+		return nil
+	}
+
+	result := make(map[string]*EndpointInfo)
+	if grpcInfo != nil {
+		for k, v := range grpcInfo {
+			result[k] = v
 		}
-	
-		// 获取WebSocket信息
-		if htm.wsManager != nil {
-			wsInfo = htm.wsManager.GetEndpointsInfo(tunnelName)
-		}
-	
-		// 合并结果
-		if grpcInfo == nil && wsInfo == nil {
-			return nil
-		}
-	
-		result := make(map[string]*EndpointInfo)
-		if grpcInfo != nil {
-			for k, v := range grpcInfo {
+	}
+	if wsInfo != nil {
+		for k, v := range wsInfo {
+			// 如果重名，gRPC优先
+			if _, exists := result[k]; !exists {
 				result[k] = v
 			}
 		}
-		if wsInfo != nil {
-			for k, v := range wsInfo {
-				// 如果重名，gRPC优先
-				if _, exists := result[k]; !exists {
-					result[k] = v
-				}
-			}
-		}
-	
-		return result
 	}
+
+	return result
+}
 
 // MeasureEndpointLatency 测量端点延迟
 func (htm *HybridTunnelManager) MeasureEndpointLatency(tunnelName, endpointName string) (time.Duration, error) {
@@ -286,13 +301,13 @@ func (htm *HybridTunnelManager) MeasureEndpointLatency(tunnelName, endpointName 
 	// 如果gRPC失败，尝试WebSocket
 	if htm.wsManager != nil {
 		pool := htm.wsManager.GetOrCreatePool(tunnelName, endpointName, "", "")
-		
+
 		// 使用轻量级ping请求测量延迟
 		pingPayload := &RequestPayload{
-		URL:  "aps://ping",
-		Data: []byte("ping"),
+			URL:  "aps://ping",
+			Data: []byte("ping"),
 		}
-		
+
 		start := time.Now()
 		_, err := pool.SendRequest(context.Background(), pingPayload)
 		if err != nil {
@@ -309,7 +324,7 @@ func (htm *HybridTunnelManager) MeasureEndpointLatency(tunnelName, endpointName 
 func (htm *HybridTunnelManager) EnableFallback(enabled bool) {
 	htm.mu.Lock()
 	defer htm.mu.Unlock()
-	
+
 	htm.fallbackEnabled = enabled
 	log.Printf("[HYBRID] Fallback mechanism %s", map[bool]string{true: "enabled", false: "disabled"}[enabled])
 }
@@ -320,7 +335,7 @@ func (htm *HybridTunnelManager) GetPoolStats() map[string]interface{} {
 	defer htm.mu.RUnlock()
 
 	stats := make(map[string]interface{})
-	
+
 	// gRPC统计
 	if htm.grpcManager != nil {
 		grpcStats := make(map[string]interface{})
@@ -342,12 +357,12 @@ func (htm *HybridTunnelManager) GetPoolStats() map[string]interface{} {
 // Cleanup 清理资源
 func (htm *HybridTunnelManager) Cleanup() {
 	log.Println("[HYBRID] Cleaning up hybrid tunnel manager")
-	
+
 	// 这里可以添加清理逻辑
 	if htm.grpcManager != nil {
 		// 清理gRPC管理器
 	}
-	
+
 	if htm.wsManager != nil {
 		// 清理WebSocket管理器
 	}

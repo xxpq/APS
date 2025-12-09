@@ -4,9 +4,11 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math"
 	"sync"
 
 	pb "aps/tunnelpb"
+
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
@@ -48,7 +50,13 @@ func (rc *RelayClient) ConnectToRelay(ctx context.Context, endpoint *RelayEndpoi
 	log.Printf("[RelayClient] Connecting to relay: %s at %s", endpoint.Name, endpoint.Address)
 
 	// 建立gRPC连接
-	conn, err := grpc.Dial(endpoint.Address, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := grpc.Dial(endpoint.Address,
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithDefaultCallOptions(
+			grpc.MaxCallRecvMsgSize(math.MaxInt64),
+			grpc.MaxCallSendMsgSize(math.MaxInt64),
+		),
+	)
 	if err != nil {
 		return fmt.Errorf("failed to connect to relay %s: %v", endpoint.Name, err)
 	}
@@ -89,13 +97,13 @@ func (rc *RelayClient) Disconnect() {
 	}
 
 	log.Printf("[RelayClient] Disconnecting from relay")
-	
+
 	rc.cancel()
-	
+
 	if rc.stream != nil {
 		rc.stream.CloseSend()
 	}
-	
+
 	if rc.conn != nil {
 		rc.conn.Close()
 	}

@@ -23,8 +23,8 @@ var (
 	regexMutex = &sync.RWMutex{}
 	// Global WebSocket upgrader, shared between tunnel and proxy logic
 	upgrader = websocket.Upgrader{
-		ReadBufferSize:  1024,
-		WriteBufferSize: 1024,
+		ReadBufferSize:  1024 * 1024, // 1MB buffer for large messages
+		WriteBufferSize: 1024 * 1024, // 1MB buffer for large messages
 		// Allow any origin
 		CheckOrigin: func(r *http.Request) bool {
 			return true
@@ -81,7 +81,7 @@ func setCorsHeaders(h http.Header) {
 	h.Set("Access-Control-Expose-Headers", "*")
 	h.Set("Access-Control-Request-Method", "*")
 	h.Set("Access-Control-Request-Headers", "*")
-	h.Set("Cross-Origin-Opener-Policy", "same-origin")
+	h.Set("Cross-Origin-Opener-Policy", "cross-origin")
 	h.Set("Cross-Origin-Resource-Policy", "cross-origin")
 }
 

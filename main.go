@@ -6,19 +6,22 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"math"
 	"net"
 	"net/http"
 	"os"
-	"strings"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
 
 	pb "aps/tunnelpb"
-	"google.golang.org/grpc"
+
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/h2c"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/keepalive"
 )
 
 // ServerManager manages the lifecycle of multiple HTTP servers.
@@ -146,7 +149,7 @@ func main() {
 	scriptRunner := NewScriptRunner(config.Scripting)
 	trafficShaper := NewTrafficShaper(dataStore.QuotaUsage)
 	statsCollector := NewStatsCollector(config)
-	
+
 	// 设置tunnelManager的statsCollector，实现端点统计的集中式管理
 	tunnelManager.SetStatsCollector(statsCollector)
 	replayManager := NewReplayManager(config)
@@ -259,6 +262,8 @@ func createServerHandler(serverName string, mappings []*Mapping, serverConfig *L
 			adminHandlers.SetTunnelManager(hybridTM.grpcManager)
 		} else if tm, ok := tunnelManager.(*TunnelManager); ok {
 			adminHandlers.SetTunnelManager(tm)
+		} else {
+			log.Println("Warning: could not set tunnel manager for admin handlers, tunnel info will be unavailable.")
 		}
 		adminHandlers.RegisterHandlers(mux)
 	}
@@ -287,13 +292,28 @@ func createServerHandler(serverName string, mappings []*Mapping, serverConfig *L
 		baseHandler = GetACMEHandler(baseHandler)
 	}
 
-	// 创建 gRPC 服务器
-	grpcServer := grpc.NewServer()
-	
+	// 创建 gRPC 服务器 - 高并发优化
+	grpcServer := grpc.NewServer(
+		grpc.MaxRecvMsgSize(math.MaxInt64),
+		grpc.MaxSendMsgSize(math.MaxInt64),
+		grpc.NumStreamWorkers(uint32(100)), // 并发流处理worker数
+		grpc.KeepaliveParams(keepalive.ServerParameters{
+			MaxConnectionIdle:     5 * time.Minute,  // 空闲连接超时
+			MaxConnectionAge:      30 * time.Minute, // 连接最大生命周期
+			MaxConnectionAgeGrace: 10 * time.Second, // 优雅关闭等待时间
+			Time:                  30 * time.Second, // keepalive ping间隔
+			Timeout:               10 * time.Second, // keepalive ping超时
+		}),
+		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
+			MinTime:             5 * time.Second, // 客户端ping最小间隔
+			PermitWithoutStream: true,            // 允许无流时ping
+		}),
+	)
+
 	// 根据隧道管理器类型注册不同的服务
 	if hybridTM, ok := tunnelManager.(*HybridTunnelManager); ok {
 		pb.RegisterTunnelServiceServer(grpcServer, &TunnelServiceServer{tunnelManager: hybridTM.grpcManager})
-		
+
 		// 注册WebSocket处理器
 		mux.HandleFunc("/.tunnel", func(w http.ResponseWriter, r *http.Request) {
 			hybridTM.wsManager.HandleWebSocketUpgrade(w, r)

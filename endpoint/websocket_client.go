@@ -39,8 +39,8 @@ func NewWebSocketClient(serverURL, tunnelName, endpointName, tunnelPassword stri
 		endpointName:   endpointName,
 		tunnelPassword: tunnelPassword,
 		debug:          debug,
-		sendChan:       make(chan []byte, 100),
-		receiveChan:    make(chan []byte, 100),
+		sendChan:       make(chan []byte, 1000), // 增大缓冲区提高吞吐量
+		receiveChan:    make(chan []byte, 1000), // 增大缓冲区提高吞吐量
 		ctx:            ctx,
 		cancel:         cancel,
 	}
@@ -71,16 +71,21 @@ func (c *WebSocketClient) Connect() error {
 	headers.Set("X-Tunnel-Password", c.tunnelPassword)
 	headers.Set("X-Aps-Tunnel", endpointVersion)
 
-	// 创建WebSocket连接
+	// 创建WebSocket连接，增大缓冲区以支持大消息
 	dialer := websocket.Dialer{
 		TLSClientConfig:  &tls.Config{InsecureSkipVerify: true},
 		HandshakeTimeout: 10 * time.Second,
+		ReadBufferSize:   1024 * 1024, // 1MB
+		WriteBufferSize:  1024 * 1024, // 1MB
 	}
 
 	conn, _, err := dialer.Dial(wsURL, headers)
 	if err != nil {
 		return fmt.Errorf("failed to connect to WebSocket: %v", err)
 	}
+
+	// 移除WebSocket消息大小限制以支持大文件传输
+	conn.SetReadLimit(0)
 
 	c.conn = conn
 	c.isConnected = true
