@@ -8,6 +8,7 @@ import (
 	"crypto/cipher"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/tls"
 	"errors"
 	"flag"
 	"fmt"
@@ -55,6 +56,9 @@ var (
 )
 
 var sharedClient = &http.Client{
+	Transport: &http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+	},
 	CheckRedirect: func(req *http.Request, via []*http.Request) error {
 		return http.ErrUseLastResponse
 	},
@@ -605,13 +609,45 @@ func handleRequestWebSocket(wsClient *WebSocketClient, requestID string, reqPayl
 		return
 	}
 	req.URL = targetURL
-	req.Host = targetURL.Host
+	// req.Host is already correctly set by http.ReadRequest from the Host header.
+	// We should not overwrite it with the IP address from targetURL.Host.
 	req.RequestURI = ""
 	req = req.WithContext(ctx)
 
-	log.Printf("Forwarding WebSocket request %s to %s", requestID, req.URL.String())
+	log.Printf("Forwarding WebSocket request %s to %s (Host: %s)", requestID, req.URL.String(), req.Host)
 
-	resp, err := sharedClient.Do(req)
+	// Create a custom client to handle SNI for HTTPS requests to an IP address.
+	// We need to set the ServerName in TLSClientConfig to the original hostname.
+	client := sharedClient
+	if req.URL.Scheme == "https" {
+		// Clone the shared transport and customize it for this request.
+		customTransport := sharedClient.Transport.(*http.Transport).Clone()
+
+		// Since Transport.Clone performs a shallow copy of TLSClientConfig,
+		// we must clone it to avoid modifying the shared client's config.
+		if customTransport.TLSClientConfig != nil {
+			customTransport.TLSClientConfig = customTransport.TLSClientConfig.Clone()
+		} else {
+			customTransport.TLSClientConfig = &tls.Config{}
+		}
+
+		// The original hostname is in req.Host. We need to strip the port if it exists.
+		serverName := req.Host
+		if strings.Contains(serverName, ":") {
+			serverName = strings.Split(serverName, ":")[0]
+		}
+		customTransport.TLSClientConfig.ServerName = serverName
+
+		client = &http.Client{
+			Transport:     customTransport,
+			CheckRedirect: sharedClient.CheckRedirect,
+		}
+		if *debug {
+			log.Printf("[DEBUG %s] Custom TLS SNI configured for host: %s", requestID, serverName)
+		}
+	}
+
+	resp, err := client.Do(req)
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
 			log.Printf("[CANCEL %s] Request was cancelled locally.", requestID)
@@ -748,13 +784,45 @@ func handleRequest(stream pb.TunnelService_EstablishClient, requestID string, re
 		return
 	}
 	req.URL = targetURL
-	req.Host = targetURL.Host
+	// req.Host is already correctly set by http.ReadRequest from the Host header.
+	// We should not overwrite it with the IP address from targetURL.Host.
 	req.RequestURI = ""
 	req = req.WithContext(ctx)
 
-	log.Printf("Forwarding request %s to %s", requestID, req.URL.String())
+	log.Printf("Forwarding request %s to %s (Host: %s)", requestID, req.URL.String(), req.Host)
 
-	resp, err := sharedClient.Do(req)
+	// Create a custom client to handle SNI for HTTPS requests to an IP address.
+	// We need to set the ServerName in TLSClientConfig to the original hostname.
+	client := sharedClient
+	if req.URL.Scheme == "https" {
+		// Clone the shared transport and customize it for this request.
+		customTransport := sharedClient.Transport.(*http.Transport).Clone()
+
+		// Since Transport.Clone performs a shallow copy of TLSClientConfig,
+		// we must clone it to avoid modifying the shared client's config.
+		if customTransport.TLSClientConfig != nil {
+			customTransport.TLSClientConfig = customTransport.TLSClientConfig.Clone()
+		} else {
+			customTransport.TLSClientConfig = &tls.Config{}
+		}
+
+		// The original hostname is in req.Host. We need to strip the port if it exists.
+		serverName := req.Host
+		if strings.Contains(serverName, ":") {
+			serverName = strings.Split(serverName, ":")[0]
+		}
+		customTransport.TLSClientConfig.ServerName = serverName
+
+		client = &http.Client{
+			Transport:     customTransport,
+			CheckRedirect: sharedClient.CheckRedirect,
+		}
+		if *debug {
+			log.Printf("[DEBUG %s] Custom TLS SNI configured for host: %s", requestID, serverName)
+		}
+	}
+
+	resp, err := client.Do(req)
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
 			log.Printf("[CANCEL %s] Request was cancelled locally.", requestID)

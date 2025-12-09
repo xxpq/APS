@@ -320,17 +320,28 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	copyHeaders(proxyReq.Header, r.Header)
-	targetParsed, _ := url.Parse(targetURL)
+	// Correctly set the Host header. When using IP substitution, the request's Host
+	// header must contain the original domain name for the target server to identify
+	// the correct virtual host.
 
-	// 如果使用了IPS参数，保持原始主机名作为Host头
+	// The original destination URL is in `targetURL`. We need to parse the host from it.
+	// A schemeless URL (e.g., "example.com") won't be parsed correctly by url.Parse
+	// to extract a host. Prepending "//" makes it a valid scheme-relative URL.
+	hostParseURL := targetURL
+	if !strings.Contains(hostParseURL, "://") {
+		hostParseURL = "//" + hostParseURL
+	}
+
+	originalParsed, _ := url.Parse(hostParseURL)
+
+	// Set the Host for the outgoing request. This is correct for both cases
+	// (with or without IP substitution) because originalParsed.Host will always
+	// be the domain we want to target.
+	proxyReq.Host = originalParsed.Host
+	proxyReq.Header.Set("Host", originalParsed.Host)
+
 	if selectedIP != "" {
-		originalParsed, _ := url.Parse(targetURL)
-		proxyReq.Host = originalParsed.Host
-		proxyReq.Header.Set("Host", originalParsed.Host)
 		log.Printf("[IPS] Preserving original Host header: %s", originalParsed.Host)
-	} else {
-		proxyReq.Host = targetParsed.Host
-		proxyReq.Header.Set("Host", targetParsed.Host)
 	}
 
 	proxyReq.Header.Set("X-Forwarded-For", getClientIP(r))
@@ -535,7 +546,50 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	} else {
 		// This is a direct request (not via tunnel)
-		resp, err = client.Do(proxyReq)
+		// If we are using IP substitution for an HTTPS request, we need to
+		// customize the TLS client config to set the SNI to the original host.
+		if selectedIP != "" && proxyReq.URL.Scheme == "https" {
+			// Clone the default transport and set the ServerName for SNI.
+			baseTransport, ok := p.client.Transport.(*http.Transport)
+			if !ok {
+				// If the transport is not a standard http.Transport (e.g., it's a TunnelRoundTripper),
+				// we need to get the underlying transport.
+				if trt, ok := p.client.Transport.(*TunnelRoundTripper); ok {
+					baseTransport, _ = trt.GetInnerTransport().(*http.Transport)
+				}
+			}
+	
+			if baseTransport != nil {
+				customTransport := baseTransport.Clone()
+				customTransport.TLSClientConfig = baseTransport.TLSClientConfig.Clone()
+				if customTransport.TLSClientConfig == nil {
+					customTransport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+				}
+	
+				serverName := proxyReq.Host
+				if strings.Contains(serverName, ":") {
+					serverName = strings.Split(serverName, ":")[0]
+				}
+				customTransport.TLSClientConfig.ServerName = serverName
+	
+				// Create a temporary client with the custom transport for this request.
+				sniClient := &http.Client{
+					Transport: customTransport,
+					Timeout:   client.Timeout,
+					CheckRedirect: func(req *http.Request, via []*http.Request) error {
+						return http.ErrUseLastResponse
+					},
+				}
+				log.Printf("[IPS] Using custom transport with SNI: %s for direct request to %s", serverName, actualTargetURL)
+				resp, err = sniClient.Do(proxyReq)
+			} else {
+				log.Printf("[IPS] Warning: Could not get base http.Transport to configure SNI.")
+				resp, err = client.Do(proxyReq)
+			}
+		} else {
+			resp, err = client.Do(proxyReq)
+		}
+	
 		if err != nil {
 			isError = true
 			p.logHarEntry(r, nil, startTime, mapping, user)
