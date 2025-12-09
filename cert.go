@@ -19,11 +19,11 @@ import (
 )
 
 var (
-	certCache = make(map[string]*tls.Certificate)
-	certMutex sync.RWMutex
-	caCert    *x509.Certificate
-	caKey     *rsa.PrivateKey
-	caCertPEM []byte
+	certCache   = make(map[string]*tls.Certificate)
+	certMutex   sync.RWMutex
+	caCert      *x509.Certificate
+	caKey       *rsa.PrivateKey
+	caCertPEM   []byte
 	acmeManager *autocert.Manager
 )
 
@@ -265,9 +265,9 @@ func InitACME(config *Config) {
 	}
 
 	acmeManager = &autocert.Manager{
-		Cache:      autocert.DirCache(acmeDir),
-		Prompt:     autocert.AcceptTOS,
-		HostPolicy: autocert.HostWhitelist(acmeDomains...),
+		Cache:  autocert.DirCache(acmeDir),
+		Prompt: autocert.AcceptTOS,
+		// HostPolicy: autocert.HostWhitelist(acmeDomains...),
 	}
 }
 
