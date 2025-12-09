@@ -85,9 +85,35 @@ return true // 允许所有来源
 }
 }
 
+// UpdateTunnels dynamically updates the tunnel list from a new configuration.
+func (wspm *WebSocketPoolManager) UpdateTunnels(newConfig *Config) {
+	wspm.mu.Lock()
+	defer wspm.mu.Unlock()
+
+	log.Println("[WS-POOL] Updating pools based on new configuration...")
+	wspm.config = newConfig // 更新配置引用
+
+	newTunnelsMap := make(map[string]bool)
+	if newConfig.Tunnels != nil {
+		for name := range newConfig.Tunnels {
+			newTunnelsMap[name] = true
+		}
+	}
+
+	// 遍历所有连接池，移除属于已删除隧道的池
+	for key, pool := range wspm.pools {
+		if !newTunnelsMap[pool.tunnelName] {
+			log.Printf("[WS-POOL] Removing pool for tunnel '%s' as it is no longer in the configuration.", pool.tunnelName)
+			pool.closeAllConnections()
+			delete(wspm.pools, key)
+		}
+	}
+	log.Printf("[WS-POOL] Pools updated. Total pools now: %d", len(wspm.pools))
+}
+
 // GetOrCreatePool 获取或创建连接池
 func (wspm *WebSocketPoolManager) GetOrCreatePool(tunnelName, endpointName, password, serverAddr string) *WebSocketPool {
-key := fmt.Sprintf("%s.%s", tunnelName, endpointName)
+	key := fmt.Sprintf("%s.%s", tunnelName, endpointName)
 
 wspm.mu.RLock()
 if pool, exists := wspm.pools[key]; exists {
@@ -205,10 +231,21 @@ func (pool *WebSocketPool) createConnection() (*WebSocketConnection, error) {
 return nil, errors.New("server cannot initiate websocket connections")
 }
 
+// closeAllConnections 关闭并清理池中所有连接
+func (pool *WebSocketPool) closeAllConnections() {
+	pool.mu.Lock()
+	defer pool.mu.Unlock()
+	log.Printf("[WS-POOL] Closing all connections in pool for %s.%s", pool.tunnelName, pool.endpointName)
+	for _, conn := range pool.connections {
+		conn.close()
+	}
+	pool.connections = nil
+}
+
 // close 关闭连接
 func (conn *WebSocketConnection) close() {
-conn.mu.Lock()
-defer conn.mu.Unlock()
+	conn.mu.Lock()
+	defer conn.mu.Unlock()
 
 if conn.Status == StatusClosed {
 return
