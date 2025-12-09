@@ -62,7 +62,7 @@ func (p *MapRemoteProxy) handleWebSocket(w http.ResponseWriter, r *http.Request)
 	}
 
 	// Use the existing mapping logic to find the target backend and the specific mapping rule
-	targetURL, matched, mapping := p.mapRequest(r)
+	targetURL, matched, mapping, matchedFromURL := p.mapRequest(r)
 	if !matched {
 		isError = true
 		log.Printf("[WS] No mapping found for %s", originalURL)
@@ -72,7 +72,7 @@ func (p *MapRemoteProxy) handleWebSocket(w http.ResponseWriter, r *http.Request)
 
 	// Populate keys for stats
 	if mapping != nil {
-		ruleKey = mapping.GetFromURL()
+		ruleKey = matchedFromURL
 		if len(mapping.tunnelNames) > 0 {
 			tunnelKey = mapping.tunnelNames[0]
 		}

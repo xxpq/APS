@@ -8,34 +8,36 @@ import (
 	"strings"
 )
 
-func (p *MapRemoteProxy) mapRequest(r *http.Request) (string, bool, *Mapping) {
+func (p *MapRemoteProxy) mapRequest(r *http.Request) (string, bool, *Mapping, string) {
 	originalURL := p.buildOriginalURL(r)
 	mappings := p.config.GetMappings()
-	
+
 	var bestMatch *Mapping
 	var bestScore = -1
 	var finalURL string
+	var matchedFromURL string
 
 	for i := range mappings {
 		mapping := &mappings[i]
-		
-		score, newURL := p.calculateMatchScore(mapping, r, originalURL)
+
+		score, newURL, fromURL := p.calculateMatchScore(mapping, r, originalURL)
 
 		if score > bestScore {
 			bestScore = score
 			bestMatch = mapping
 			finalURL = newURL
+			matchedFromURL = fromURL
 		}
 	}
 
 	if bestMatch != nil {
-		return finalURL, true, bestMatch
+		return finalURL, true, bestMatch, matchedFromURL
 	}
 
-	return originalURL, false, nil
+	return originalURL, false, nil, ""
 }
 
-func (p *MapRemoteProxy) calculateMatchScore(mapping *Mapping, r *http.Request, originalURL string) (int, string) {
+func (p *MapRemoteProxy) calculateMatchScore(mapping *Mapping, r *http.Request, originalURL string) (int, string, string) {
 	// Check if the mapping is for the current server
 	isForThisServer := false
 	for _, name := range mapping.serverNames {
@@ -45,25 +47,29 @@ func (p *MapRemoteProxy) calculateMatchScore(mapping *Mapping, r *http.Request, 
 		}
 	}
 	if !isForThisServer {
-		return -1, ""
+		return -1, "", ""
 	}
 
-	// Base URL match
-	matched, newURL := p.matchAndReplace(originalURL, *mapping)
-	if !matched {
-		return -1, ""
-	}
-
-	score := 1 // Base score for URL match
 	fromConfig := mapping.GetFromConfig()
+	if fromConfig == nil {
+		return -1, "", ""
+	}
 
-	if fromConfig != nil {
+	for _, fromURL := range fromConfig.URLs {
+		// Base URL match
+		matched, newURL := p.matchAndReplace(originalURL, fromURL, mapping.GetToURL())
+		if !matched {
+			continue
+		}
+
+		score := 1 // Base score for URL match
+
 		// Method match
 		if fromConfig.Method != nil {
 			if fromConfig.MatchesMethod(r.Method) {
 				score += 10
 			} else {
-				return -1, "" // Method is specified but does not match
+				return -1, "", "" // Method is specified but does not match
 			}
 		}
 
@@ -91,7 +97,7 @@ func (p *MapRemoteProxy) calculateMatchScore(mapping *Mapping, r *http.Request, 
 			service, method, ok := parseGRPCPath(r.URL.Path)
 			if !ok {
 				// This rule requires a gRPC match, but the path is not a valid gRPC path.
-				return -1, ""
+				return -1, "", ""
 			}
 
 			grpcMatch := true
@@ -114,7 +120,7 @@ func (p *MapRemoteProxy) calculateMatchScore(mapping *Mapping, r *http.Request, 
 			}
 
 			if !grpcMatch {
-				return -1, "" // gRPC service/method specified but does not match
+				return -1, "", "" // gRPC service/method specified but does not match
 			}
 
 			// Metadata (Header) match for gRPC
@@ -128,15 +134,13 @@ func (p *MapRemoteProxy) calculateMatchScore(mapping *Mapping, r *http.Request, 
 				}
 			}
 		}
+		return score, newURL, fromURL
 	}
 
-	return score, newURL
+	return -1, "", ""
 }
 
-func (p *MapRemoteProxy) matchAndReplace(originalURL string, mapping Mapping) (bool, string) {
-	fromPattern := mapping.GetFromURL()
-	toPattern := mapping.GetToURL()
-
+func (p *MapRemoteProxy) matchAndReplace(originalURL, fromPattern, toPattern string) (bool, string) {
 	log.Printf("[DEBUG] Trying to match: %s with pattern: %s", originalURL, fromPattern)
 
 	if matched, newURL := p.tryRegexMatch(originalURL, fromPattern, toPattern); matched {

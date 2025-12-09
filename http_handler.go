@@ -61,7 +61,7 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	targetURL, matched, mapping := p.mapRequest(r)
+	targetURL, matched, mapping, matchedFromURL := p.mapRequest(r)
 	originalURL := p.buildOriginalURL(r)
 
 	// 获取server配置
@@ -129,7 +129,7 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Populate keys for stats
 	if mapping != nil {
-		ruleKey = mapping.GetFromURL()
+		ruleKey = matchedFromURL
 		if len(mapping.tunnelNames) > 0 {
 			tunnelKey = mapping.tunnelNames[0]
 		}

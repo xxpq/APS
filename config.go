@@ -173,7 +173,8 @@ type WebSocketConfig struct {
 
 // EndpointConfig 用于配置请求或响应的详细信息
 type EndpointConfig struct {
-	URL         string                 `json:"url"`
+	URL         string                 `json:"url,omitempty"` // For single URL backward compatibility
+	URLs        []string               `json:"urls,omitempty"`
 	Method      interface{}            `json:"method,omitempty"`      // 支持 string 或 []string，限制 HTTP 方法
 	Headers     map[string]interface{} `json:"headers,omitempty"`     // 支持 string 或 []string，null 表示移除
 	QueryString map[string]interface{} `json:"querystring,omitempty"` // 支持 string，null 表示移除
@@ -449,6 +450,9 @@ func (lc *ListenConfig) UnmarshalJSON(data []byte) error {
 // GetFromURL 获取 from 的 URL 字符串
 func (m *Mapping) GetFromURL() string {
 	if m.fromConfig != nil {
+		if len(m.fromConfig.URLs) > 0 {
+			return m.fromConfig.URLs[0]
+		}
 		return m.fromConfig.URL
 	}
 	if str, ok := m.From.(string); ok {
@@ -460,6 +464,9 @@ func (m *Mapping) GetFromURL() string {
 // GetToURL 获取 to 的 URL 字符串
 func (m *Mapping) GetToURL() string {
 	if m.toConfig != nil {
+		if len(m.toConfig.URLs) > 0 {
+			return m.toConfig.URLs[0]
+		}
 		return m.toConfig.URL
 	}
 	if str, ok := m.To.(string); ok {
@@ -489,8 +496,24 @@ func parseEndpointConfig(data interface{}) (*EndpointConfig, error) {
 		str = strings.TrimSpace(str)
 		str = strings.Trim(str, "`")
 		return &EndpointConfig{
-			URL: str,
+			URLs: []string{str},
 		}, nil
+	}
+
+	// 如果是字符串数组
+	if arr, ok := data.([]interface{}); ok {
+		var urls []string
+		for _, item := range arr {
+			if str, ok := item.(string); ok {
+				urls = append(urls, str)
+			}
+		}
+		if len(urls) > 0 {
+			return &EndpointConfig{URLs: urls}, nil
+		}
+	}
+	if arr, ok := data.([]string); ok {
+		return &EndpointConfig{URLs: arr}, nil
 	}
 
 	// 如果是 map，解析为完整配置
@@ -505,6 +528,35 @@ func parseEndpointConfig(data interface{}) (*EndpointConfig, error) {
 		if err := json.Unmarshal(jsonBytes, &config); err != nil {
 			return nil, err
 		}
+		// Handle "url" field which can be a string or an array
+		if urlData, ok := mapData["url"]; ok {
+			if str, ok := urlData.(string); ok {
+				config.URLs = append(config.URLs, str)
+			} else if arr, ok := urlData.([]interface{}); ok {
+				for _, item := range arr {
+					if str, ok := item.(string); ok {
+						config.URLs = append(config.URLs, str)
+					}
+				}
+			} else if arr, ok := urlData.([]string); ok {
+				config.URLs = append(config.URLs, arr...)
+			}
+		}
+		if config.URL != "" {
+			config.URLs = append(config.URLs, config.URL)
+		}
+		// Remove duplicates
+		keys := make(map[string]bool)
+		var list []string
+		for _, entry := range config.URLs {
+			if _, value := keys[entry]; !value {
+				keys[entry] = true
+				list = append(list, entry)
+			}
+		}
+		config.URLs = list
+		config.URL = "" // Clear single URL field
+
 		return &config, nil
 	}
 
@@ -611,7 +663,7 @@ func processConfig(config *Config) error {
 			log.Printf("Warning: mapping %d skipped - failed to parse 'from': %v", i+1, err)
 			continue
 		}
-		if fromConfig == nil || fromConfig.URL == "" {
+		if fromConfig == nil || len(fromConfig.URLs) == 0 {
 			log.Printf("Warning: mapping %d skipped - 'from' URL is empty", i+1)
 			continue
 		}
@@ -629,7 +681,7 @@ func processConfig(config *Config) error {
 			log.Printf("Warning: mapping %d skipped - failed to parse 'to': %v", i+1, err)
 			continue
 		}
-		if toConfig == nil || toConfig.URL == "" {
+		if toConfig == nil || (len(toConfig.URLs) == 0 && toConfig.URL == "") {
 			log.Printf("Warning: mapping %d skipped - 'to' URL is empty", i+1)
 			continue
 		}
