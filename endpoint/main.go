@@ -10,6 +10,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"flag"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -17,6 +18,8 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"syscall"
@@ -24,6 +27,7 @@ import (
 
 	pb "aps/tunnelpb"
 
+	"github.com/kardianos/service"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
@@ -39,9 +43,15 @@ var (
 	transportMode  = flag.String("transport", "mix", "transport mode: grpc, ws, or mix (default: mix)")
 	relayMode      = flag.String("relay-mode", "direct", "relay mode: direct, relay, or hybrid (default: direct)")
 	relayEndpoints = flag.String("relays", "", "comma-separated list of relay endpoints (e.g., 'relay1:18081,relay2:18081')")
+	install        = flag.Bool("install", false, "install system service")
+	uninstall      = flag.Bool("uninstall", false, "uninstall system service")
+	start          = flag.Bool("start", false, "start system service")
+	stop           = flag.Bool("stop", false, "stop system service")
+	restart        = flag.Bool("restart", false, "restart system service")
 
 	activeRequests sync.Map // Stores map[string]context.CancelFunc
 	relayManager   *RelayManager
+	logger         service.Logger
 )
 
 var sharedClient = &http.Client{
@@ -51,23 +61,153 @@ var sharedClient = &http.Client{
 }
 
 const (
-	endpointVersion = "1.0.0"
-	reconnectDelay  = 5 * time.Second
+	endpointVersion    = "1.0.0"
+	reconnectDelay     = 5 * time.Second
+	windowsServicePath = "C:\\Windows\\System32\\apse.exe"
+	unixServicePath    = "/usr/local/bin/apse"
 )
+
+type program struct {
+	exit chan struct{}
+}
+
+func (p *program) Start(s service.Service) error {
+	p.exit = make(chan struct{})
+	go p.run()
+	return nil
+}
+
+func (p *program) run() {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// When running as a service, flags are passed as arguments.
+	// We need to re-parse them for the service process.
+	flag.CommandLine.Parse(os.Args[1:])
+
+	if *tunnelName == "" {
+		if logger != nil {
+			logger.Error("-tunnel flag is required")
+		} else {
+			log.Println("-tunnel flag is required")
+		}
+		return
+	}
+
+	go func() {
+		for {
+			select {
+			case <-p.exit:
+				cancel()
+				return
+			default:
+				shouldReconnect := runClientSession(ctx)
+				if !shouldReconnect {
+					if logger != nil {
+						logger.Info("Permanent error detected, stopping reconnection attempts.")
+					} else {
+						log.Println("Permanent error detected, stopping reconnection attempts.")
+					}
+					return
+				}
+				if logger != nil {
+					logger.Infof("Session ended. Reconnecting in %v...", reconnectDelay)
+				} else {
+					log.Printf("Session ended. Reconnecting in %v...", reconnectDelay)
+				}
+				time.Sleep(reconnectDelay)
+			}
+		}
+	}()
+
+	<-p.exit
+}
+
+func (p *program) Stop(s service.Service) error {
+	close(p.exit)
+	return nil
+}
 
 func main() {
 	flag.Parse()
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 
-	if *tunnelName == "" {
-		log.Fatal("-tunnel flag is required")
+	if *install {
+		err := installService()
+		if err != nil {
+			log.Fatalf("Failed to install service: %v", err)
+		}
+		log.Println("Service installed and started successfully.")
+		return
 	}
 
-	// 初始化中继管理器
+	cfg, err := createServiceConfig()
+	if err != nil {
+		log.Fatalf("Failed to create service config: %v", err)
+	}
+
+	prg := &program{}
+	s, err := service.New(prg, cfg)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	if *uninstall {
+		err := uninstallService(s)
+		if err != nil {
+			log.Fatalf("Failed to uninstall service: %v", err)
+		}
+		log.Println("Service uninstalled successfully.")
+		return
+	}
+
+	if *start {
+		err := s.Start()
+		if err != nil {
+			log.Fatalf("Failed to start service: %v", err)
+		}
+		log.Println("Service started successfully.")
+		return
+	}
+
+	if *stop {
+		err := s.Stop()
+		if err != nil {
+			log.Fatalf("Failed to stop service: %v", err)
+		}
+		log.Println("Service stopped successfully.")
+		return
+	}
+
+	if *restart {
+		err := s.Restart()
+		if err != nil {
+			log.Fatalf("Failed to restart service: %v", err)
+		}
+		log.Println("Service restarted successfully.")
+		return
+	}
+
+	logger, err = s.Logger(nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	if !service.Interactive() {
+		err = s.Run()
+		if err != nil {
+			logger.Error(err)
+		}
+		return
+	}
+
+	log.Println("Running in interactive mode")
+	if *tunnelName == "" {
+		log.Fatal("-tunnel flag is required in interactive mode")
+	}
+
 	if *relayMode != "direct" {
 		relayManager = NewRelayManager(*name, *serverAddr, RelayMode(*relayMode))
-		
-		// 解析中继端点
 		if *relayEndpoints != "" {
 			relays := strings.Split(*relayEndpoints, ",")
 			for _, relay := range relays {
@@ -85,7 +225,6 @@ func main() {
 				}
 			}
 		}
-
 		ctx := context.Background()
 		if err := relayManager.Initialize(ctx); err != nil {
 			log.Printf("Failed to initialize relay manager: %v", err)
@@ -94,7 +233,6 @@ func main() {
 
 	interrupt := make(chan os.Signal, 1)
 	signal.Notify(interrupt, os.Interrupt, syscall.SIGTERM)
-
 	ctx, cancel := context.WithCancel(context.Background())
 
 	go func() {
@@ -107,7 +245,7 @@ func main() {
 				shouldReconnect := runClientSession(ctx)
 				if !shouldReconnect {
 					log.Printf("Permanent error detected, stopping reconnection attempts.")
-					cancel() // 通知主循环退出
+					cancel()
 					return
 				}
 				log.Printf("Session ended. Reconnecting in %v...", reconnectDelay)
@@ -119,20 +257,122 @@ func main() {
 	<-interrupt
 	log.Println("Interrupt received, shutting down.")
 	cancel()
-	
-	// 关闭中继管理器
+
 	if relayManager != nil {
 		relayManager.Shutdown()
 	}
-	
-	// Give time for the session to close gracefully
 	time.Sleep(1 * time.Second)
 	log.Println("Exiting.")
 }
 
-// runClientSession 运行一个客户端会话，返回是否应该重连
+func createServiceConfig() (*service.Config, error) {
+	serviceName := fmt.Sprintf("APS-Endpoint-%s", *name)
+	displayName := fmt.Sprintf("APS Endpoint (%s)", *name)
+	description := fmt.Sprintf("APS Endpoint service for endpoint '%s'.", *name)
+
+	var args []string
+	for _, arg := range os.Args[1:] {
+		if arg != "-install" && arg != "-uninstall" && arg != "-start" && arg != "-stop" && arg != "-restart" {
+			args = append(args, arg)
+		}
+	}
+
+	return &service.Config{
+		Name:        serviceName,
+		DisplayName: displayName,
+		Description: description,
+		Arguments:   args,
+	}, nil
+}
+
+func installService() error {
+	execPath, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("could not get executable path: %w", err)
+	}
+
+	targetPath := getServiceTargetPath()
+	if _, err := os.Stat(targetPath); os.IsNotExist(err) || !strings.EqualFold(execPath, targetPath) {
+		fmt.Printf("Copying executable from %s to %s\n", execPath, targetPath)
+		if err := copyFile(execPath, targetPath); err != nil {
+			return fmt.Errorf("failed to copy executable to %s: %w", targetPath, err)
+		}
+	}
+
+	cfg, err := createServiceConfig()
+	if err != nil {
+		return fmt.Errorf("failed to create service config: %w", err)
+	}
+	cfg.Executable = targetPath // Set the correct executable path for the service
+
+	prg := &program{}
+	s, err := service.New(prg, cfg)
+	if err != nil {
+		return fmt.Errorf("failed to create new service for install: %w", err)
+	}
+
+	if err := s.Install(); err != nil {
+		return err
+	}
+
+	return s.Start()
+}
+
+func uninstallService(s service.Service) error {
+	if err := s.Stop(); err != nil {
+		// Ignore errors if the service is not running
+	}
+	if err := s.Uninstall(); err != nil {
+		return fmt.Errorf("failed to uninstall service: %w", err)
+	}
+
+	targetPath := getServiceTargetPath()
+	if _, err := os.Stat(targetPath); err == nil {
+		fmt.Printf("Removing executable from %s\n", targetPath)
+		if err := os.Remove(targetPath); err != nil {
+			return fmt.Errorf("failed to remove executable from %s: %w", targetPath, err)
+		}
+	}
+	return nil
+}
+
+func getServiceTargetPath() string {
+	if runtime.GOOS == "windows" {
+		return windowsServicePath
+	}
+	return unixServicePath
+}
+
+func copyFile(src, dst string) error {
+	sourceFile, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer sourceFile.Close()
+
+	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
+		return err
+	}
+
+	destFile, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer destFile.Close()
+
+	if _, err := io.Copy(destFile, sourceFile); err != nil {
+		return err
+	}
+
+	if runtime.GOOS != "windows" {
+		if err := os.Chmod(dst, 0755); err != nil {
+			return err
+		}
+	}
+	return destFile.Sync()
+}
+
 func runClientSession(ctx context.Context) bool {
-	// 如果使用中继模式，先尝试中继连接
 	if *relayMode != "direct" && relayManager != nil {
 		if err := relayManager.ConnectToServer(ctx); err == nil {
 			log.Printf("Connected via relay mode: %s", *relayMode)
@@ -141,14 +381,12 @@ func runClientSession(ctx context.Context) bool {
 		log.Printf("Relay connection failed, falling back to direct connection")
 	}
 
-	// 使用原有的传输模式
 	switch *transportMode {
 	case "grpc":
 		return runGRPCSession(ctx)
 	case "ws":
 		return runWebSocketSession(ctx)
 	case "mix":
-		// 先尝试gRPC，失败后再尝试WebSocket
 		if success := runGRPCSession(ctx); !success {
 			log.Printf("gRPC connection failed, falling back to WebSocket")
 			return runWebSocketSession(ctx)
@@ -160,13 +398,12 @@ func runClientSession(ctx context.Context) bool {
 	}
 }
 
-// runGRPCSession 运行gRPC会话
 func runGRPCSession(ctx context.Context) bool {
 	log.Printf("Connecting to gRPC server at %s", *serverAddr)
 	conn, err := grpc.Dial(*serverAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		log.Printf("Failed to connect: %v", err)
-		return false // gRPC连接失败，让上层处理fallback
+		return true
 	}
 	defer conn.Close()
 
@@ -185,22 +422,19 @@ func runGRPCSession(ctx context.Context) bool {
 	stream, err := client.Establish(ctx)
 	if err != nil {
 		log.Printf("Failed to establish stream: %v", err)
-		// 检查是否为永久性错误，如果是则不再重连
 		if isPermanentError(err) {
 			log.Printf("Permanent error detected, stopping reconnection attempts.")
 			return false
 		}
-		return false // gRPC连接失败，让上层处理fallback
+		return true
 	}
 	log.Println("Successfully established gRPC stream.")
 
-	// 用于通知发生永久性错误的通道
 	permanentErrorChan := make(chan error, 1)
 	streamEnded := make(chan struct{})
 
-	// Goroutine to receive messages from the server
 	go func() {
-		defer close(streamEnded) // 确保流结束时会通知
+		defer close(streamEnded)
 		for {
 			msg, err := stream.Recv()
 			if err == io.EOF {
@@ -209,14 +443,11 @@ func runGRPCSession(ctx context.Context) bool {
 			}
 			if err != nil {
 				log.Printf("Error receiving from stream: %v", err)
-				// 检查是否为永久性错误
 				if isPermanentError(err) {
 					log.Printf("Permanent error detected in receive loop, stopping reconnection attempts.")
 					select {
 					case permanentErrorChan <- err:
-						// 成功发送永久性错误
 					default:
-						// 通道已有值，避免阻塞
 					}
 				}
 				return
@@ -225,75 +456,57 @@ func runGRPCSession(ctx context.Context) bool {
 		}
 	}()
 
-	// 等待流结束或永久性错误
 	select {
-	case <-permanentErrorChan:
-		// log.Printf("Received permanent error from receive loop: %v", err)
-		os.Exit(1)
-		return false // 永久性错误，不应该重试
+	case err := <-permanentErrorChan:
+		log.Printf("Received permanent error from receive loop: %v", err)
+		return false
 	case <-streamEnded:
 		log.Printf("Stream ended.")
-		// 检查是否在流结束时还有永久性错误
 		select {
 		case err := <-permanentErrorChan:
 			log.Printf("Found permanent error after stream end: %v", err)
 			return false
 		default:
-			return true // 正常结束，应该重试
+			return true
 		}
 	}
 }
 
-// isPermanentError 判断错误是否为永久性错误（如认证失败、隧道不存在等）
-// runWebSocketSession 运行WebSocket会话
 func runWebSocketSession(ctx context.Context) bool {
 	log.Printf("Connecting to WebSocket server at %s", *serverAddr)
-	
-	// 创建WebSocket客户端
 	wsClient := NewWebSocketClient(*serverAddr, *tunnelName, *name, *tunnelPassword, *debug)
-	
-	// 尝试连接
 	if err := wsClient.Connect(); err != nil {
 		log.Printf("Failed to connect to WebSocket: %v", err)
-		return true // WebSocket连接失败，应该重试
+		return true
 	}
 	defer wsClient.Disconnect()
-	
 	log.Println("Successfully established WebSocket connection.")
-	
-	// 用于通知发生永久性错误的通道
+
 	permanentErrorChan := make(chan error, 1)
 	streamEnded := make(chan struct{})
-	
-	// Goroutine to receive messages from the server
+
 	go func() {
 		defer close(streamEnded)
-		
-		// 设置ping ticker来检测连接状态
 		pingTicker := time.NewTicker(30 * time.Second)
 		defer pingTicker.Stop()
-		
+
 		for {
 			select {
 			case <-ctx.Done():
 				log.Println("Context cancelled, stopping WebSocket receive loop.")
 				return
 			case <-pingTicker.C:
-				// 定期发送ping消息来检测连接状态
 				if !wsClient.IsConnected() {
 					log.Printf("WebSocket connection detected as disconnected, stopping receive loop.")
 					return
 				}
-				// 尝试发送ping消息
 				if err := wsClient.Send([]byte("ping")); err != nil {
 					log.Printf("WebSocket ping failed, connection likely broken: %v", err)
 					return
 				}
 			default:
-				// 接收WebSocket消息（带超时）
 				messageChan := make(chan []byte, 1)
 				errChan := make(chan error, 1)
-				
 				go func() {
 					message, err := wsClient.Receive()
 					if err != nil {
@@ -302,27 +515,22 @@ func runWebSocketSession(ctx context.Context) bool {
 					}
 					messageChan <- message
 				}()
-				
+
 				select {
 				case message := <-messageChan:
-					// 解析消息
 					var msg pb.ServerToEndpoint
 					if err := proto.Unmarshal(message, &msg); err != nil {
 						log.Printf("Error unmarshaling WebSocket message: %v", err)
 						continue
 					}
-					
 					go handleServerMessageWebSocket(wsClient, &msg)
-					
 				case err := <-errChan:
 					if err.Error() == "context cancelled" {
 						return
 					}
 					log.Printf("Error receiving from WebSocket: %v", err)
 					return
-					
 				case <-time.After(5 * time.Second):
-					// 接收超时，检查连接状态
 					if !wsClient.IsConnected() {
 						log.Printf("WebSocket connection timeout and not connected, stopping receive loop.")
 						return
@@ -331,21 +539,19 @@ func runWebSocketSession(ctx context.Context) bool {
 			}
 		}
 	}()
-	
-	// 等待流结束或永久性错误
+
 	select {
 	case <-permanentErrorChan:
-		return false // 永久性错误，不应该重试
+		return false
 	case <-streamEnded:
 		log.Printf("WebSocket connection ended.")
-		return true // 正常结束，应该重试
+		return true
 	case <-ctx.Done():
 		log.Printf("Context cancelled, closing WebSocket connection.")
 		return false
 	}
 }
 
-// handleServerMessageWebSocket 处理WebSocket服务器消息
 func handleServerMessageWebSocket(wsClient *WebSocketClient, msg *pb.ServerToEndpoint) {
 	requestID := msg.GetId()
 	switch payload := msg.Payload.(type) {
@@ -360,7 +566,6 @@ func handleServerMessageWebSocket(wsClient *WebSocketClient, msg *pb.ServerToEnd
 	}
 }
 
-// handleRequestWebSocket 处理WebSocket请求
 func handleRequestWebSocket(wsClient *WebSocketClient, requestID string, reqPayload *pb.Request) {
 	ctx, cancel := context.WithCancel(context.Background())
 	activeRequests.Store(requestID, cancel)
@@ -373,7 +578,6 @@ func handleRequestWebSocket(wsClient *WebSocketClient, requestID string, reqPayl
 		log.Printf("[DEBUG %s] Handling WebSocket request, URL: %s, DataLen: %d", requestID, reqPayload.GetUrl(), len(reqPayload.GetData()))
 	}
 
-	// 处理请求逻辑与gRPC版本相同
 	decryptedData, err := decrypt(reqPayload.GetData(), *tunnelPassword)
 	if err != nil {
 		log.Printf("[ERROR %s] Error decrypting request: %v", requestID, err)
@@ -389,7 +593,6 @@ func handleRequestWebSocket(wsClient *WebSocketClient, requestID string, reqPayl
 	}
 
 	if *debug {
-		// Log headers for debugging
 		var headers bytes.Buffer
 		req.Header.Write(&headers)
 		log.Printf("[DEBUG %s] Decrypted request headers:\n%s", requestID, headers.String())
@@ -444,27 +647,22 @@ func handleRequestWebSocket(wsClient *WebSocketClient, requestID string, reqPayl
 	sendSuccessResponseWebSocket(wsClient, requestID, encryptedData)
 }
 
-// sendResponseWebSocket 发送WebSocket响应
 func sendResponseWebSocket(wsClient *WebSocketClient, requestID string, respPayload *pb.Response) {
 	msg := &pb.EndpointToServer{
 		Payload: &pb.EndpointToServer_Response{
 			Response: respPayload,
 		},
 	}
-	
-	// 序列化消息
 	data, err := proto.Marshal(msg)
 	if err != nil {
 		log.Printf("Error marshaling WebSocket response for request %s: %v", requestID, err)
 		return
 	}
-	
 	if err := wsClient.Send(data); err != nil {
 		log.Printf("Error sending WebSocket response for request %s: %v", requestID, err)
 	}
 }
 
-// sendSuccessResponseWebSocket 发送成功响应
 func sendSuccessResponseWebSocket(wsClient *WebSocketClient, requestID string, data []byte) {
 	if *debug {
 		log.Printf("[DEBUG %s] Sending WebSocket success response, len: %d", requestID, len(data))
@@ -472,7 +670,6 @@ func sendSuccessResponseWebSocket(wsClient *WebSocketClient, requestID string, d
 	sendResponseWebSocket(wsClient, requestID, &pb.Response{Id: requestID, Content: &pb.Response_Data{Data: data}})
 }
 
-// sendErrorResponseWebSocket 发送错误响应
 func sendErrorResponseWebSocket(wsClient *WebSocketClient, requestID string, errorMsg string) {
 	log.Printf("Sending WebSocket error response for request %s: %s", requestID, errorMsg)
 	sendResponseWebSocket(wsClient, requestID, &pb.Response{Id: requestID, Content: &pb.Response_Error{Error: errorMsg}})
@@ -483,15 +680,13 @@ func isPermanentError(err error) bool {
 		return false
 	}
 	errStr := err.Error()
-	// 检查常见的永久性错误关键字
 	permanentErrors := []string{
-		"Unauthenticated",         // 认证失败
-		"invalid tunnel password", // 密码错误
-		"NotFound",                // 资源未找到（如隧道不存在）
-		"already exists",          // 名称冲突
-		"permission denied",       // 权限被拒绝
+		"Unauthenticated",
+		"invalid tunnel password",
+		"NotFound",
+		"already exists",
+		"permission denied",
 	}
-
 	for _, permErr := range permanentErrors {
 		if strings.Contains(errStr, permErr) {
 			return true
@@ -541,7 +736,6 @@ func handleRequest(stream pb.TunnelService_EstablishClient, requestID string, re
 	}
 
 	if *debug {
-		// Log headers for debugging
 		var headers bytes.Buffer
 		req.Header.Write(&headers)
 		log.Printf("[DEBUG %s] Decrypted request headers:\n%s", requestID, headers.String())
@@ -665,22 +859,17 @@ func decrypt(data []byte, password string) ([]byte, error) {
 	return gcm.Open(nil, nonce, ciphertext, nil)
 }
 
-// runRelayClientSession 运行中继客户端会话
 func runRelayClientSession(ctx context.Context) bool {
 	log.Printf("Starting relay client session")
-
-	// 使用relayClient的流进行通信
 	stream := relayManager.relayClient.GetStream()
 	if stream == nil {
 		log.Printf("No relay stream available")
 		return true
 	}
 
-	// 用于通知发生永久性错误的通道
 	permanentErrorChan := make(chan error, 1)
 	streamEnded := make(chan struct{})
 
-	// Goroutine to receive messages from the relay
 	go func() {
 		defer close(streamEnded)
 		for {
@@ -696,14 +885,11 @@ func runRelayClientSession(ctx context.Context) bool {
 				}
 				if err != nil {
 					log.Printf("Error receiving from relay stream: %v", err)
-					// 检查是否为永久性错误
 					if isPermanentError(err) {
 						log.Printf("Permanent error detected in relay receive loop, stopping reconnection attempts.")
 						select {
 						case permanentErrorChan <- err:
-							// 成功发送永久性错误
 						default:
-							// 通道已有值，避免阻塞
 						}
 					}
 					return
@@ -713,19 +899,17 @@ func runRelayClientSession(ctx context.Context) bool {
 		}
 	}()
 
-	// 等待流结束或永久性错误
 	select {
 	case <-permanentErrorChan:
-		return false // 永久性错误，不应该重试
+		return false
 	case <-streamEnded:
 		log.Printf("Relay stream ended.")
-		// 检查是否在流结束时还有永久性错误
 		select {
 		case err := <-permanentErrorChan:
 			log.Printf("Found permanent error after relay stream end: %v", err)
 			return false
 		default:
-			return true // 正常结束，应该重试
+			return true
 		}
 	case <-ctx.Done():
 		log.Printf("Context cancelled, closing relay connection.")
