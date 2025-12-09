@@ -80,6 +80,52 @@ func (tm *TunnelManager) SetStatsCollector(statsCollector *StatsCollector) {
 	tm.statsCollector = statsCollector
 }
 
+// UpdateTunnels dynamically updates the tunnel list from a new configuration.
+func (tm *TunnelManager) UpdateTunnels(newConfig *Config) {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+
+	log.Println("[TunnelManager] Updating tunnels based on new configuration...")
+
+	newTunnelsMap := make(map[string]bool)
+	if newConfig.Tunnels != nil {
+		for name := range newConfig.Tunnels {
+			newTunnelsMap[name] = true
+		}
+	}
+
+	// Remove tunnels that are no longer in the config
+	for name := range tm.tunnels {
+		if !newTunnelsMap[name] {
+			log.Printf("[TunnelManager] Removing tunnel '%s' as it is no longer in the configuration.", name)
+			// This will prevent new connections, and existing ones will fail eventually.
+			delete(tm.tunnels, name)
+		}
+	}
+
+	// Add new tunnels and update existing ones
+	if newConfig.Tunnels != nil {
+		for name, tConfig := range newConfig.Tunnels {
+			if existingTunnel, exists := tm.tunnels[name]; !exists {
+				// This is a new tunnel
+				log.Printf("[TunnelManager] Adding new tunnel: %s", name)
+				tm.tunnels[name] = &Tunnel{
+					name:     name,
+					streams:  make(map[string]*StreamPool),
+					password: tConfig.Password,
+				}
+			} else {
+				// Tunnel already exists, just update the password if it has changed
+				if existingTunnel.password != tConfig.Password {
+					log.Printf("[TunnelManager] Updating password for tunnel: %s", name)
+					existingTunnel.password = tConfig.Password
+				}
+			}
+		}
+	}
+	log.Printf("[TunnelManager] Tunnels updated. Total tunnels now: %d", len(tm.tunnels))
+}
+
 // RegisterEndpointStream validates a new stream and adds it to the appropriate pool.
 func (tm *TunnelManager) RegisterEndpointStream(tunnelName, endpointName, password string, stream pb.TunnelService_EstablishServer, remoteAddr string) (*EndpointStream, error) {
 	tm.mu.RLock()

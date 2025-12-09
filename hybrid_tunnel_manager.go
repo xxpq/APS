@@ -79,6 +79,25 @@ func (htm *HybridTunnelManager) SetStatsCollector(statsCollector *StatsCollector
 	}
 }
 
+// UpdateTunnels 动态更新所有底层管理器的隧道配置
+func (htm *HybridTunnelManager) UpdateTunnels(newConfig *Config) {
+	htm.mu.Lock()
+	defer htm.mu.Unlock()
+
+	log.Println("[HYBRID] Updating tunnels for all managers...")
+	htm.config = newConfig // 更新混合管理器持有的配置引用
+
+	if htm.grpcManager != nil {
+		htm.grpcManager.UpdateTunnels(newConfig)
+	}
+	if htm.wsManager != nil {
+		htm.wsManager.UpdateTunnels(newConfig)
+	}
+
+	// 更新混合管理器本身的配置
+	htm.updateConfigFromTunnels()
+}
+
 // RegisterEndpointStream 注册gRPC端点流
 func (htm *HybridTunnelManager) RegisterEndpointStream(tunnelName, endpointName, password string, stream pb.TunnelService_EstablishServer, remoteAddr string) (*EndpointStream, error) {
 	return htm.grpcManager.RegisterEndpointStream(tunnelName, endpointName, password, stream, remoteAddr)

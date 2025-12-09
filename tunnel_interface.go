@@ -25,6 +25,7 @@ type TunnelManagerInterface interface {
 	SetStatsCollector(statsCollector *StatsCollector)
 	GetPoolStats() map[string]interface{}
 	Cleanup()
+	UpdateTunnels(newConfig *Config)
 }
 
 // 确保HybridTunnelManager和TunnelManager都实现这个接口

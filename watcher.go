@@ -75,6 +75,12 @@ func (w *ConfigWatcher) watch() {
 				} else {
 					log.Printf("Config reloaded successfully, synchronizing servers...")
 					
+					// Update tunnel manager with new tunnel configurations
+					if w.serverManager != nil && w.serverManager.tunnelManager != nil {
+						log.Printf("Notifying TunnelManager of configuration changes...")
+						w.serverManager.tunnelManager.UpdateTunnels(w.config)
+					}
+
 					// Re-initialize ACME with the new config
 					InitACME(w.config)
 
