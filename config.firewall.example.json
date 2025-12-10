@@ -1,0 +1,56 @@
+{
+  "servers": {
+    "admin": {
+      "port": 8090,
+      "public": true,
+      "panel": true,
+      "firewall": "internal_only"
+    },
+    "default": {
+      "port": 80,
+      "public": true,
+      "panel": true
+    },
+    "ssl": {
+      "port": 443,
+      "cert": "auto",
+      "public": true,
+      "panel": true,
+      "firewall": "office_access"
+    }
+  },
+  "firewalls": {
+    "internal_only": {
+      "allow": ["127.0.0.1", "192.168.0.0/16", "10.0.0.0/8", "172.16.0.0/12"]
+    },
+    "block_bad_actors": {
+      "block": [
+        "111.32.1.0/24",
+        "192.111.133.1",
+        "192.111.231.175-178",
+        "192.111.231.111-192.111.232.11"
+      ]
+    },
+    "office_access": {
+      "allow": ["203.0.113.0/24", "198.51.100.50-60", "2001:db8::/32"]
+    }
+  },
+  "mappings": [
+    {
+      "from": "http://internal.example.com/*",
+      "to": "http://127.0.0.1:8080/*",
+      "firewall": "internal_only"
+    },
+    {
+      "from": "http://public.example.com/*",
+      "to": "http://127.0.0.1:9090/*",
+      "firewall": "block_bad_actors"
+    },
+    {
+      "from": "tcp://0.0.0.0:2222",
+      "to": "tcp://127.0.0.1:22",
+      "servers": ["ssh_server"],
+      "firewall": "office_access"
+    }
+  ]
+}

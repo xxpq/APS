@@ -129,6 +129,28 @@ func (s *RawTCPServer) handleConnection(clientConn net.Conn) {
 		return
 	}
 
+	// Check firewall rules (server firewall takes priority over mapping firewall)
+	var firewallRule *FirewallRule
+	if s.config.Firewall != "" {
+		firewallRule = GetFirewallRule(s.appConfig, s.config.Firewall)
+		if firewallRule != nil {
+			DebugLog("[FIREWALL] Using server-level firewall rule '%s'", s.config.Firewall)
+		}
+	}
+	if firewallRule == nil && mapping.Firewall != "" {
+		firewallRule = GetFirewallRule(s.appConfig, mapping.Firewall)
+		if firewallRule != nil {
+			DebugLog("[FIREWALL] Using mapping-level firewall rule '%s'", mapping.Firewall)
+		}
+	}
+
+	// Check if client IP is allowed
+	if !CheckFirewall(clientAddr, firewallRule) {
+		log.Printf("[RAW TCP] Connection from %s blocked by firewall", clientAddr)
+		clientConn.Close()
+		return
+	}
+
 	// Parse target URL from mapping
 	toURL := mapping.GetToURL()
 	targetHost, targetPort, useTLS, err := parseTCPURL(toURL)

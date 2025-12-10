@@ -199,6 +199,30 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		userKey = username
 	}
 
+	// Check firewall rules (server firewall takes priority over mapping firewall)
+	var firewallRule *FirewallRule
+	if serverConfig != nil && serverConfig.Firewall != "" {
+		firewallRule = GetFirewallRule(p.config, serverConfig.Firewall)
+		if firewallRule != nil {
+			DebugLog("[FIREWALL] Using server-level firewall rule '%s'", serverConfig.Firewall)
+		}
+	}
+	if firewallRule == nil && mapping != nil && mapping.Firewall != "" {
+		firewallRule = GetFirewallRule(p.config, mapping.Firewall)
+		if firewallRule != nil {
+			DebugLog("[FIREWALL] Using mapping-level firewall rule '%s'", mapping.Firewall)
+		}
+	}
+
+	// Check if client IP is allowed
+	clientIP := getClientIP(r)
+	if !CheckFirewall(clientIP, firewallRule) {
+		isError = true
+		log.Printf("[FIREWALL] Request from %s blocked by firewall", clientIP)
+		http.Error(w, "Forbidden", http.StatusForbidden)
+		return
+	}
+
 	// 获取用户和组级别的Endpoints/Tunnels配置（最高优先级）
 	var userEndpointNames, userTunnelNames []string
 
@@ -233,7 +257,7 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	if !matched && !hasAnyConfig && !r.URL.IsAbs() {
 		isError = true
 		http.NotFound(w, r)
-		log.Printf("[%s] %s (NO MAPPING - 404 Not Found)", r.Method, originalURL)
+		log.Printf("[%s][%s] %s (NO MAPPING - 404 Not Found)", clientIP, r.Method, originalURL)
 		return
 	}
 
@@ -344,19 +368,19 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 
 	if matched {
 		if strings.HasPrefix(targetURL, "file://") {
-			log.Printf("[%s] %s -> [LOCAL] %s", r.Method, originalURL, targetURL)
+			log.Printf("[%s][%s] %s -> [LOCAL] %s", clientIP, r.Method, originalURL, targetURL)
 			p.serveFile(w, r, mapping)
 			return
 		}
-		log.Printf("[%s] %s -> %s (MAPPED)", r.Method, originalURL, targetURL)
+		log.Printf("[%s][%s] %s -> %s (MAPPED)", clientIP, r.Method, originalURL, targetURL)
 	} else if len(userEndpointNames) > 0 || len(userTunnelNames) > 0 {
-		log.Printf("[%s] %s (NO MAPPING - FORWARDED TO USER-LEVEL ENDPOINT/TUNNEL)", r.Method, originalURL)
+		log.Printf("[%s][%s] %s (NO MAPPING - FORWARDED TO USER-LEVEL ENDPOINT/TUNNEL)", clientIP, r.Method, originalURL)
 	} else if len(serverEndpointNames) > 0 || len(serverTunnelNames) > 0 {
-		log.Printf("[%s] %s (NO MAPPING - FORWARDED TO SERVER-LEVEL ENDPOINT/TUNNEL)", r.Method, originalURL)
+		log.Printf("[%s][%s] %s (NO MAPPING - FORWARDED TO SERVER-LEVEL ENDPOINT/TUNNEL)", clientIP, r.Method, originalURL)
 	} else if mapping != nil && (len(mapping.endpointNames) > 0 || len(mapping.tunnelNames) > 0) {
-		log.Printf("[%s] %s (NO MAPPING - FORWARDED TO MAPPING-LEVEL ENDPOINT/TUNNEL)", r.Method, originalURL)
+		log.Printf("[%s][%s] %s (NO MAPPING - FORWARDED TO MAPPING-LEVEL ENDPOINT/TUNNEL)", clientIP, r.Method, originalURL)
 	} else {
-		log.Printf("[%s] %s (NO MAPPING)", r.Method, originalURL)
+		log.Printf("[%s][%s] %s (NO MAPPING)", clientIP, r.Method, originalURL)
 	}
 
 	var requestBody io.Reader = r.Body

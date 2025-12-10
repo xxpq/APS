@@ -38,6 +38,7 @@ type Config struct {
 	P12s        map[string]*P12Config    `json:"p12s,omitempty"`
 	Scripting   *ScriptingConfig         `json:"scripting,omitempty"`
 	StaticCache *StaticCacheConfig       `json:"static_cache,omitempty"` // 静态文件缓存配置
+	Firewalls   map[string]*FirewallRule `json:"firewalls,omitempty"`    // 防火墙规则组配置
 	Mappings    []Mapping                `json:"mappings"`
 	mu          sync.RWMutex
 }
@@ -370,14 +371,15 @@ type ViaConfig struct {
 }
 
 type Mapping struct {
-	From    interface{} `json:"from"` // 可以是字符串或 EndpointConfig 对象
-	To      interface{} `json:"to"`   // 可以是字符串或 EndpointConfig 对象
-	Via     *ViaConfig  `json:"via,omitempty"`
-	Servers interface{} `json:"servers,omitempty"` // string or []string
-	Cc      []string    `json:"cc,omitempty"`
-	P12     string      `json:"p12,omitempty"` // 引用 p12s 的 key
-	Auth    *RuleAuth   `json:"auth,omitempty"`
-	Dump    string      `json:"dump,omitempty"`
+	From     interface{} `json:"from"` // 可以是字符串或 EndpointConfig 对象
+	To       interface{} `json:"to"`   // 可以是字符串或 EndpointConfig 对象
+	Via      *ViaConfig  `json:"via,omitempty"`
+	Servers  interface{} `json:"servers,omitempty"` // string or []string
+	Cc       []string    `json:"cc,omitempty"`
+	P12      string      `json:"p12,omitempty"` // 引用 p12s 的 key
+	Auth     *RuleAuth   `json:"auth,omitempty"`
+	Dump     string      `json:"dump,omitempty"`
+	Firewall string      `json:"firewall,omitempty"` // 引用 firewalls 的 key
 	ConnectionPolicies
 	TrafficPolicies
 
@@ -407,6 +409,7 @@ type ListenConfig struct {
 	Tunnels   interface{} `json:"tunnels,omitempty"`   // string or []string
 	Public    *bool       `json:"public,omitempty"`    // true: 0.0.0.0:port, false: 127.0.0.1:port (default true)
 	Panel     *bool       `json:"panel,omitempty"`     // true: register /.api & /.admin, false: do not (default false)
+	Firewall  string      `json:"firewall,omitempty"`  // 引用 firewalls 的 key
 	ConnectionPolicies
 	TrafficPolicies
 }
@@ -795,6 +798,18 @@ func processConfig(config *Config) error {
 
 	config.Mappings = validMappings
 	log.Printf("Loaded %d valid mapping rules (filtered from %d total)", len(validMappings), len(config.Mappings))
+
+	// Parse and initialize firewall rules
+	if config.Firewalls != nil {
+		for name, rule := range config.Firewalls {
+			if err := ParseFirewallRule(rule); err != nil {
+				log.Printf("[FIREWALL] Warning: failed to parse firewall rule '%s': %v", name, err)
+			} else {
+				log.Printf("[FIREWALL] Loaded firewall rule '%s'", name)
+			}
+		}
+	}
+
 	return nil
 }
 
