@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"io"
-	"log"
 	"net"
 	"sync"
 	"time"
@@ -231,41 +230,41 @@ func (tm *TCPTunnelManager) SendRequestStream(ctx context.Context, tunnelName, e
 	}
 
 	// Wait for response header
-	log.Printf("[TCP TUNNEL] Waiting for response header for request %s", requestID)
+	DebugLog("[TCP TUNNEL] Waiting for response header for request %s", requestID)
 	var headerBytes []byte
 	select {
 	case msg := <-pending.responseChan:
-		log.Printf("[TCP TUNNEL] Received message type %d for request %s", msg.Type, requestID)
+		DebugLog("[TCP TUNNEL] Received message type %d for request %s", msg.Type, requestID)
 		if msg.Type == MsgTypeResponseHeader {
 			var header ResponseHeaderPayloadTCP
 			if err := msg.ParseJSON(&header); err != nil {
-				log.Printf("[TCP TUNNEL] Failed to parse response header for %s: %v", requestID, err)
+				DebugLog("[TCP TUNNEL] Failed to parse response header for %s: %v", requestID, err)
 				pipeWriter.CloseWithError(err)
 				return nil, nil, err
 			}
 			headerBytes, err = decrypt(header.Header, tm.config.Tunnels[tunnelName].Password)
 			if err != nil {
-				log.Printf("[TCP TUNNEL] Failed to decrypt response header for %s: %v", requestID, err)
+				DebugLog("[TCP TUNNEL] Failed to decrypt response header for %s: %v", requestID, err)
 				pipeWriter.CloseWithError(err)
 				return nil, nil, err
 			}
-			log.Printf("[TCP TUNNEL] Successfully received and decrypted response header for %s (%d bytes)", requestID, len(headerBytes))
+			DebugLog("[TCP TUNNEL] Successfully received and decrypted response header for %s (%d bytes)", requestID, len(headerBytes))
 		} else {
-			log.Printf("[TCP TUNNEL] Unexpected response type %d for %s", msg.Type, requestID)
+			DebugLog("[TCP TUNNEL] Unexpected response type %d for %s", msg.Type, requestID)
 			pipeWriter.CloseWithError(errors.New("unexpected response type"))
 			return nil, nil, errors.New("unexpected response type")
 		}
 	case <-ctx.Done():
-		log.Printf("[TCP TUNNEL] Context cancelled while waiting for response header for %s", requestID)
+		DebugLog("[TCP TUNNEL] Context cancelled while waiting for response header for %s", requestID)
 		pipeWriter.CloseWithError(ctx.Err())
 		return nil, nil, ctx.Err()
 	}
 
 	// Start goroutine to handle response chunks
-	log.Printf("[TCP TUNNEL] Starting response streaming goroutine for %s", requestID)
+	DebugLog("[TCP TUNNEL] Starting response streaming goroutine for %s", requestID)
 	go func() {
 		defer func() {
-			log.Printf("[TCP TUNNEL] Response streaming goroutine finished for %s", requestID)
+			DebugLog("[TCP TUNNEL] Response streaming goroutine finished for %s", requestID)
 			// Clean up pending request after goroutine completes
 			ep.mu.Lock()
 			delete(ep.pendingRequests, requestID)
@@ -276,10 +275,10 @@ func (tm *TCPTunnelManager) SendRequestStream(ctx context.Context, tunnelName, e
 			select {
 			case msg, ok := <-pending.responseChan:
 				if !ok {
-					log.Printf("[TCP TUNNEL] Response channel closed for %s", requestID)
+					DebugLog("[TCP TUNNEL] Response channel closed for %s", requestID)
 					return
 				}
-				log.Printf("[TCP TUNNEL] Received chunk message type %d for %s", msg.Type, requestID)
+				DebugLog("[TCP TUNNEL] Received chunk message type %d for %s", msg.Type, requestID)
 				switch msg.Type {
 				case MsgTypeResponseChunk:
 					var chunk ResponseChunkPayloadTCP

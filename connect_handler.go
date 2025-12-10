@@ -37,7 +37,7 @@ func (p *MapRemoteProxy) shouldInterceptHost(hostname string) bool {
 	for _, mapping := range mappings {
 		fromURL := mapping.GetFromURL()
 		if strings.HasPrefix(fromURL, "https://"+hostname) {
-			log.Printf("[DEBUG] Host %s matches mapping pattern %s", hostname, fromURL)
+			DebugLog("[DEBUG] Host %s matches mapping pattern %s", hostname, fromURL)
 			return true
 		}
 	}

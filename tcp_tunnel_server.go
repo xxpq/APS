@@ -92,7 +92,7 @@ func (s *TCPTunnelServer) Start(addr string) error {
 	s.listener = listener
 	s.running = true
 
-	log.Printf("[TCP TUNNEL] Server listening on %s", addr)
+	DebugLog("[TCP TUNNEL] Server listening on %s", addr)
 
 	go s.acceptLoop()
 
@@ -134,7 +134,7 @@ func (s *TCPTunnelServer) acceptLoop() {
 			if !running {
 				return
 			}
-			log.Printf("[TCP TUNNEL] Accept error: %v", err)
+			DebugLog("[TCP TUNNEL] Accept error: %v", err)
 			continue
 		}
 
@@ -146,7 +146,7 @@ func (s *TCPTunnelServer) acceptLoop() {
 func (s *TCPTunnelServer) handleConnection(conn net.Conn) {
 	tc := NewTunnelConn(conn)
 	remoteAddr := conn.RemoteAddr().String()
-	log.Printf("[TCP TUNNEL] New connection from %s", remoteAddr)
+	DebugLog("[TCP TUNNEL] New connection from %s", remoteAddr)
 
 	// Set read deadline for registration
 	conn.SetReadDeadline(time.Now().Add(30 * time.Second))
@@ -154,13 +154,13 @@ func (s *TCPTunnelServer) handleConnection(conn net.Conn) {
 	// Read first message - must be registration
 	msg, err := tc.ReadMessage()
 	if err != nil {
-		log.Printf("[TCP TUNNEL] Failed to read registration from %s: %v", remoteAddr, err)
+		DebugLog("[TCP TUNNEL] Failed to read registration from %s: %v", remoteAddr, err)
 		tc.Close()
 		return
 	}
 
 	if msg.Type != MsgTypeRegister {
-		log.Printf("[TCP TUNNEL] Expected registration message, got type %d from %s", msg.Type, remoteAddr)
+		DebugLog("[TCP TUNNEL] Expected registration message, got type %d from %s", msg.Type, remoteAddr)
 		tc.SendJSON(MsgTypeRegisterAck, RegisterAckPayload{
 			Success: false,
 			Error:   "first message must be registration",
@@ -172,7 +172,7 @@ func (s *TCPTunnelServer) handleConnection(conn net.Conn) {
 	// Parse registration
 	var reg RegisterPayload
 	if err := msg.ParseJSON(&reg); err != nil {
-		log.Printf("[TCP TUNNEL] Invalid registration payload from %s: %v", remoteAddr, err)
+		DebugLog("[TCP TUNNEL] Invalid registration payload from %s: %v", remoteAddr, err)
 		tc.SendJSON(MsgTypeRegisterAck, RegisterAckPayload{
 			Success: false,
 			Error:   "invalid registration payload",
@@ -187,7 +187,7 @@ func (s *TCPTunnelServer) handleConnection(conn net.Conn) {
 	s.mu.RUnlock()
 
 	if !exists {
-		log.Printf("[TCP TUNNEL] Tunnel '%s' not found from %s", reg.TunnelName, remoteAddr)
+		DebugLog("[TCP TUNNEL] Tunnel '%s' not found from %s", reg.TunnelName, remoteAddr)
 		tc.SendJSON(MsgTypeRegisterAck, RegisterAckPayload{
 			Success: false,
 			Error:   "tunnel not found",
@@ -197,7 +197,7 @@ func (s *TCPTunnelServer) handleConnection(conn net.Conn) {
 	}
 
 	if tunnelConfig.Password != "" && tunnelConfig.Password != reg.Password {
-		log.Printf("[TCP TUNNEL] Invalid password for tunnel '%s' from %s", reg.TunnelName, remoteAddr)
+		DebugLog("[TCP TUNNEL] Invalid password for tunnel '%s' from %s", reg.TunnelName, remoteAddr)
 		tc.SendJSON(MsgTypeRegisterAck, RegisterAckPayload{
 			Success: false,
 			Error:   "invalid password",
@@ -231,13 +231,13 @@ func (s *TCPTunnelServer) handleConnection(conn net.Conn) {
 
 	// Send registration acknowledgement
 	if err := tc.SendJSON(MsgTypeRegisterAck, RegisterAckPayload{Success: true}); err != nil {
-		log.Printf("[TCP TUNNEL] Failed to send registration ack to %s: %v", remoteAddr, err)
+		DebugLog("[TCP TUNNEL] Failed to send registration ack to %s: %v", remoteAddr, err)
 		tc.Close()
 		s.unregisterEndpoint(endpoint.ID)
 		return
 	}
 
-	log.Printf("[TCP TUNNEL] Endpoint '%s' connected to tunnel '%s' (ID: %s)",
+	DebugLog("[TCP TUNNEL] Endpoint '%s' connected to tunnel '%s' (ID: %s)",
 		reg.EndpointName, reg.TunnelName, endpoint.ID)
 
 	// Notify tunnel manager
@@ -252,7 +252,7 @@ func (s *TCPTunnelServer) handleConnection(conn net.Conn) {
 	// Wait for endpoint to disconnect
 	<-endpoint.done
 
-	log.Printf("[TCP TUNNEL] Endpoint '%s' disconnected (ID: %s)", reg.EndpointName, endpoint.ID)
+	DebugLog("[TCP TUNNEL] Endpoint '%s' disconnected (ID: %s)", reg.EndpointName, endpoint.ID)
 	s.unregisterEndpoint(endpoint.ID)
 }
 
@@ -347,7 +347,7 @@ func (ep *TCPEndpoint) writeLoop() {
 		select {
 		case msg := <-ep.sendChan:
 			if err := ep.Conn.WriteMessage(msg); err != nil {
-				log.Printf("[TCP TUNNEL] Write error to endpoint %s: %v", ep.ID, err)
+				DebugLog("[TCP TUNNEL] Write error to endpoint %s: %v", ep.ID, err)
 				ep.Close()
 				return
 			}
@@ -371,7 +371,7 @@ func (ep *TCPEndpoint) readLoop(server *TCPTunnelServer) {
 		msg, err := ep.Conn.ReadMessage()
 		if err != nil {
 			if err != io.EOF {
-				log.Printf("[TCP TUNNEL] Read error from endpoint %s: %v", ep.ID, err)
+				DebugLog("[TCP TUNNEL] Read error from endpoint %s: %v", ep.ID, err)
 			}
 			return
 		}
@@ -393,14 +393,14 @@ func (ep *TCPEndpoint) readLoop(server *TCPTunnelServer) {
 		case MsgTypeProxyClose:
 			ep.handleProxyClose(msg)
 		default:
-			log.Printf("[TCP TUNNEL] Unknown message type %d from endpoint %s", msg.Type, ep.ID)
+			DebugLog("[TCP TUNNEL] Unknown message type %d from endpoint %s", msg.Type, ep.ID)
 		}
 	}
 }
 
 // handleResponseMessage handles response messages
 func (ep *TCPEndpoint) handleResponseMessage(msg *TunnelMessage) {
-	log.Printf("[TCP TUNNEL] Endpoint %s received response message type %d", ep.ID, msg.Type)
+	DebugLog("[TCP TUNNEL] Endpoint %s received response message type %d", ep.ID, msg.Type)
 
 	// Parse based on message type
 	var requestID string
@@ -408,42 +408,42 @@ func (ep *TCPEndpoint) handleResponseMessage(msg *TunnelMessage) {
 	case MsgTypeResponseHeader:
 		var payload ResponseHeaderPayloadTCP
 		if err := msg.ParseJSON(&payload); err != nil {
-			log.Printf("[TCP TUNNEL] Invalid response header: %v", err)
+			DebugLog("[TCP TUNNEL] Invalid response header: %v", err)
 			return
 		}
 		requestID = payload.ID
 	case MsgTypeResponseChunk:
 		var payload ResponseChunkPayloadTCP
 		if err := msg.ParseJSON(&payload); err != nil {
-			log.Printf("[TCP TUNNEL] Invalid response chunk: %v", err)
+			DebugLog("[TCP TUNNEL] Invalid response chunk: %v", err)
 			return
 		}
 		requestID = payload.ID
 	case MsgTypeResponseEnd:
 		var payload ResponseEndPayloadTCP
 		if err := msg.ParseJSON(&payload); err != nil {
-			log.Printf("[TCP TUNNEL] Invalid response end: %v", err)
+			DebugLog("[TCP TUNNEL] Invalid response end: %v", err)
 			return
 		}
 		requestID = payload.ID
 	}
 
-	log.Printf("[TCP TUNNEL] Routing response message type %d for request %s", msg.Type, requestID)
+	DebugLog("[TCP TUNNEL] Routing response message type %d for request %s", msg.Type, requestID)
 
 	ep.mu.Lock()
 	pending, ok := ep.pendingRequests[requestID]
 	ep.mu.Unlock()
 
 	if !ok {
-		log.Printf("[TCP TUNNEL] WARNING: No pending request found for %s, message dropped", requestID)
+		DebugLog("[TCP TUNNEL] WARNING: No pending request found for %s, message dropped", requestID)
 		return
 	}
 
 	select {
 	case pending.responseChan <- msg:
-		log.Printf("[TCP TUNNEL] Successfully routed message type %d for request %s", msg.Type, requestID)
+		DebugLog("[TCP TUNNEL] Successfully routed message type %d for request %s", msg.Type, requestID)
 	default:
-		log.Printf("[TCP TUNNEL] Response channel full for request %s", requestID)
+		DebugLog("[TCP TUNNEL] Response channel full for request %s", requestID)
 	}
 }
 
@@ -451,7 +451,7 @@ func (ep *TCPEndpoint) handleResponseMessage(msg *TunnelMessage) {
 func (ep *TCPEndpoint) handleProxyConnectAck(msg *TunnelMessage) {
 	var payload ProxyConnectAckPayload
 	if err := msg.ParseJSON(&payload); err != nil {
-		log.Printf("[TCP TUNNEL] Invalid proxy connect ack: %v", err)
+		DebugLog("[TCP TUNNEL] Invalid proxy connect ack: %v", err)
 		return
 	}
 
@@ -460,18 +460,18 @@ func (ep *TCPEndpoint) handleProxyConnectAck(msg *TunnelMessage) {
 	ep.mu.Unlock()
 
 	if !ok {
-		log.Printf("[TCP TUNNEL] Proxy connection %s not found for ack", payload.ConnectionID)
+		DebugLog("[TCP TUNNEL] Proxy connection %s not found for ack", payload.ConnectionID)
 		return
 	}
 
 	if payload.Success {
-		log.Printf("[TCP TUNNEL] Proxy connection %s established", payload.ConnectionID)
+		DebugLog("[TCP TUNNEL] Proxy connection %s established", payload.ConnectionID)
 		select {
 		case pc.connectAck <- nil:
 		default:
 		}
 	} else {
-		log.Printf("[TCP TUNNEL] Proxy connection %s failed: %s", payload.ConnectionID, payload.Error)
+		DebugLog("[TCP TUNNEL] Proxy connection %s failed: %s", payload.ConnectionID, payload.Error)
 		select {
 		case pc.connectAck <- errors.New(payload.Error):
 		default:
@@ -483,7 +483,7 @@ func (ep *TCPEndpoint) handleProxyConnectAck(msg *TunnelMessage) {
 func (ep *TCPEndpoint) handleProxyData(msg *TunnelMessage) {
 	var payload ProxyDataPayload
 	if err := msg.ParseJSON(&payload); err != nil {
-		log.Printf("[TCP TUNNEL] Invalid proxy data: %v", err)
+		DebugLog("[TCP TUNNEL] Invalid proxy data: %v", err)
 		return
 	}
 
@@ -505,7 +505,7 @@ func (ep *TCPEndpoint) handleProxyData(msg *TunnelMessage) {
 
 	// Write data to client connection
 	if _, err := pc.clientConn.Write(payload.Data); err != nil {
-		log.Printf("[TCP TUNNEL] Write to client error for proxy %s: %v", payload.ConnectionID, err)
+		DebugLog("[TCP TUNNEL] Write to client error for proxy %s: %v", payload.ConnectionID, err)
 		ep.closeProxyConnection(payload.ConnectionID, "write error")
 	}
 }
@@ -514,11 +514,11 @@ func (ep *TCPEndpoint) handleProxyData(msg *TunnelMessage) {
 func (ep *TCPEndpoint) handleProxyClose(msg *TunnelMessage) {
 	var payload ProxyClosePayload
 	if err := msg.ParseJSON(&payload); err != nil {
-		log.Printf("[TCP TUNNEL] Invalid proxy close: %v", err)
+		DebugLog("[TCP TUNNEL] Invalid proxy close: %v", err)
 		return
 	}
 
-	log.Printf("[TCP TUNNEL] Received proxy close for %s: %s", payload.ConnectionID, payload.Reason)
+	DebugLog("[TCP TUNNEL] Received proxy close for %s: %s", payload.ConnectionID, payload.Reason)
 	ep.closeProxyConnection(payload.ConnectionID, payload.Reason)
 }
 
@@ -604,7 +604,7 @@ func generateRequestID() string {
 // proxyClientReadLoop reads data from client and sends to endpoint
 func (ep *TCPEndpoint) proxyClientReadLoop(connectionID string, pc *tcpProxyConnection) {
 	defer func() {
-		log.Printf("[TCP TUNNEL] Proxy client read loop ended for %s", connectionID)
+		DebugLog("[TCP TUNNEL] Proxy client read loop ended for %s", connectionID)
 
 		// Send close to endpoint
 		ep.SendJSON(MsgTypeProxyClose, ProxyClosePayload{
@@ -631,13 +631,13 @@ func (ep *TCPEndpoint) proxyClientReadLoop(connectionID string, pc *tcpProxyConn
 				ConnectionID: connectionID,
 				Data:         buf[:n],
 			}); err != nil {
-				log.Printf("[TCP TUNNEL] Send to endpoint error for proxy %s: %v", connectionID, err)
+				DebugLog("[TCP TUNNEL] Send to endpoint error for proxy %s: %v", connectionID, err)
 				return
 			}
 		}
 		if err != nil {
 			if err != io.EOF {
-				log.Printf("[TCP TUNNEL] Client read error for proxy %s: %v", connectionID, err)
+				DebugLog("[TCP TUNNEL] Client read error for proxy %s: %v", connectionID, err)
 			}
 			return
 		}

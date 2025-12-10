@@ -1,7 +1,6 @@
 package main
 
 import (
-	"log"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -236,7 +235,7 @@ func (p *MapRemoteProxy) calculateMatchScore(mapping *Mapping, r *http.Request, 
 }
 
 func (p *MapRemoteProxy) matchAndReplace(originalURL, fromPattern, toPattern string) (bool, string) {
-	log.Printf("[DEBUG] Trying to match: %s with pattern: %s", originalURL, fromPattern)
+	DebugLog("[DEBUG] Trying to match: %s with pattern: %s", originalURL, fromPattern)
 
 	if matched, newURL := p.tryRegexMatch(originalURL, fromPattern, toPattern); matched {
 		return true, newURL
@@ -244,19 +243,19 @@ func (p *MapRemoteProxy) matchAndReplace(originalURL, fromPattern, toPattern str
 
 	parsedOriginal, err := url.Parse(originalURL)
 	if err != nil {
-		log.Printf("[DEBUG] Failed to parse original URL: %v", err)
+		DebugLog("[DEBUG] Failed to parse original URL: %v", err)
 		return false, originalURL
 	}
 
 	parsedFrom, err := url.Parse(fromPattern)
 	if err != nil {
-		log.Printf("[DEBUG] Failed to parse from pattern: %v", err)
+		DebugLog("[DEBUG] Failed to parse from pattern: %v", err)
 		return false, originalURL
 	}
 
-	log.Printf("[DEBUG] Original - Scheme: %s, Host: %s, Path: %s",
+	DebugLog("[DEBUG] Original - Scheme: %s, Host: %s, Path: %s",
 		parsedOriginal.Scheme, parsedOriginal.Host, parsedOriginal.Path)
-	log.Printf("[DEBUG] Pattern  - Scheme: %s, Host: %s, Path: %s",
+	DebugLog("[DEBUG] Pattern  - Scheme: %s, Host: %s, Path: %s",
 		parsedFrom.Scheme, parsedFrom.Host, parsedFrom.Path)
 
 	// Scheme match
@@ -273,12 +272,12 @@ func (p *MapRemoteProxy) matchAndReplace(originalURL, fromPattern, toPattern str
 	}
 
 	if !schemeMatch {
-		log.Printf("[DEBUG] Scheme mismatch: original=%s, pattern=%s", parsedOriginal.Scheme, parsedFrom.Scheme)
+		DebugLog("[DEBUG] Scheme mismatch: original=%s, pattern=%s", parsedOriginal.Scheme, parsedFrom.Scheme)
 		return false, originalURL
 	}
 
 	if parsedOriginal.Host != parsedFrom.Host {
-		log.Printf("[DEBUG] Host mismatch: %s != %s", parsedOriginal.Host, parsedFrom.Host)
+		DebugLog("[DEBUG] Host mismatch: %s != %s", parsedOriginal.Host, parsedFrom.Host)
 		return false, originalURL
 	}
 
@@ -293,9 +292,9 @@ func (p *MapRemoteProxy) matchAndReplace(originalURL, fromPattern, toPattern str
 		fromPathPrefix := strings.TrimSuffix(fromPath, "*")
 
 		if fromPathPrefix == "" || fromPathPrefix == "/" {
-			log.Printf("[DEBUG] Root wildcard match - matches any path")
+			DebugLog("[DEBUG] Root wildcard match - matches any path")
 		} else {
-			log.Printf("[DEBUG] Wildcard match - checking if %s starts with %s", originalPath, fromPathPrefix)
+			DebugLog("[DEBUG] Wildcard match - checking if %s starts with %s", originalPath, fromPathPrefix)
 		}
 
 		if fromPathPrefix == "" || fromPathPrefix == "/" || strings.HasPrefix(originalPath, fromPathPrefix) {
@@ -331,11 +330,11 @@ func (p *MapRemoteProxy) matchAndReplace(originalURL, fromPattern, toPattern str
 				Fragment: parsedOriginal.Fragment,
 			}
 
-			log.Printf("[DEBUG] ✓ Wildcard matched! New URL: %s", newURL.String())
+			DebugLog("[DEBUG] ✓ Wildcard matched! New URL: %s", newURL.String())
 			return true, newURL.String()
 		}
 	} else {
-		log.Printf("[DEBUG] Exact match - checking if %s == %s", originalPath, fromPath)
+		DebugLog("[DEBUG] Exact match - checking if %s == %s", originalPath, fromPath)
 		if originalPath == fromPath || (originalPath == "/" && fromPath == "") || (originalPath == "" && fromPath == "/") {
 			parsedTo, err := url.Parse(toPattern)
 			if err != nil {
@@ -350,12 +349,12 @@ func (p *MapRemoteProxy) matchAndReplace(originalURL, fromPattern, toPattern str
 				Fragment: parsedOriginal.Fragment,
 			}
 
-			log.Printf("[DEBUG] ✓ Exact matched! New URL: %s", newURL.String())
+			DebugLog("[DEBUG] ✓ Exact matched! New URL: %s", newURL.String())
 			return true, newURL.String()
 		}
 	}
 
-	log.Printf("[DEBUG] ✗ No match")
+	DebugLog("[DEBUG] ✗ No match")
 	return false, originalURL
 }
 
@@ -368,7 +367,7 @@ func (p *MapRemoteProxy) tryRegexMatch(originalURL, fromPattern, toPattern strin
 
 	re, err := regexp.Compile(fromPattern)
 	if err != nil {
-		log.Printf("[DEBUG] Not a valid regex pattern: %v", err)
+		DebugLog("[DEBUG] Not a valid regex pattern: %v", err)
 		return false, originalURL
 	}
 
@@ -377,7 +376,7 @@ func (p *MapRemoteProxy) tryRegexMatch(originalURL, fromPattern, toPattern strin
 	}
 
 	newURL := re.ReplaceAllString(originalURL, toPattern)
-	log.Printf("[DEBUG] ✓ Regex matched! %s -> %s", originalURL, newURL)
+	DebugLog("[DEBUG] ✓ Regex matched! %s -> %s", originalURL, newURL)
 	return true, newURL
 }
 

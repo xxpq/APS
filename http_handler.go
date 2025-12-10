@@ -830,9 +830,9 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if policies.Quality < 1.0 {
-		log.Printf("[%s] %s - %d (%d bytes, throttled)", r.Method, originalURL, resp.StatusCode, bytesSent)
+		log.Printf("[%s][%s] %s - %d (%d bytes, throttled)", clientIP, r.Method, originalURL, resp.StatusCode, bytesSent)
 	} else {
-		log.Printf("[%s] %s - %d (%d bytes)", r.Method, originalURL, resp.StatusCode, bytesSent)
+		log.Printf("[%s][%s] %s - %d (%d bytes)", clientIP, r.Method, originalURL, resp.StatusCode, bytesSent)
 	}
 }
 

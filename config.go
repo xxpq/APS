@@ -840,6 +840,7 @@ func (c *Config) Reload(filename string) (map[string]*ListenConfig, error) {
 	c.Mappings = newConfig.Mappings
 	c.Auth = newConfig.Auth
 	c.Debug = newConfig.Debug
+	c.Firewalls = newConfig.Firewalls // Add firewall hot reload
 	c.mu.Unlock()
 
 	// 更新全局debug模式标志
@@ -854,6 +855,14 @@ func (c *Config) Reload(filename string) (map[string]*ListenConfig, error) {
 	log.Printf("Configuration reloaded: %d valid mapping rules", len(newConfig.Mappings))
 	for _, mapping := range c.Mappings {
 		log.Printf("  Rule: %s -> %s on servers: %v", mapping.GetFromURL(), mapping.GetToURL(), mapping.serverNames)
+	}
+
+	// Log firewall rules reload
+	if newConfig.Firewalls != nil && len(newConfig.Firewalls) > 0 {
+		log.Printf("Firewall rules reloaded: %d rule groups", len(newConfig.Firewalls))
+		for name := range newConfig.Firewalls {
+			log.Printf("  Firewall: %s", name)
+		}
 	}
 
 	return oldServers, nil
