@@ -80,22 +80,10 @@ func (pc *ProxyConfig) UnmarshalJSON(data []byte) error {
 }
 
 type TunnelConfig struct {
-	Servers       []string             `json:"servers"`
-	Password      string               `json:"password,omitempty"` // AES key for encryption
-	Auth          *RuleAuth            `json:"auth,omitempty"`
-	WebSocketPool *WebSocketPoolConfig `json:"websocket_pool,omitempty"` // WebSocket连接池配置
+	Servers  []string  `json:"servers"`
+	Password string    `json:"password,omitempty"` // AES key for encryption
+	Auth     *RuleAuth `json:"auth,omitempty"`
 	TrafficPolicies
-}
-
-// WebSocketPoolConfig WebSocket连接池配置
-type WebSocketPoolConfig struct {
-	Enabled           bool `json:"enabled,omitempty"`            // 是否启用WebSocket连接池
-	PoolSize          int  `json:"pool_size,omitempty"`          // 连接池大小，默认为3
-	MaxPoolSize       int  `json:"max_pool_size,omitempty"`      // 最大连接池大小，默认为10
-	IdleTimeout       int  `json:"idle_timeout,omitempty"`       // 连接闲置超时时间（秒），默认为300
-	MaxLifetime       int  `json:"max_lifetime,omitempty"`       // 连接最大生命周期（秒），默认为1800
-	FallbackEnabled   bool `json:"fallback_enabled,omitempty"`   // 是否启用gRPC到WebSocket的fallback
-	FallbackThreshold int  `json:"fallback_threshold,omitempty"` // gRPC失败多少次后启用fallback
 }
 
 type ScriptingConfig struct {

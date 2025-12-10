@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"io"
+	"net"
 	"time"
 
 	pb "aps/tunnelpb"
@@ -17,6 +18,7 @@ type TunnelManagerInterface interface {
 
 	// 通用隧道操作方法
 	SendRequestStream(ctx context.Context, tunnelName, endpointName string, reqPayload *RequestPayload) (io.ReadCloser, []byte, error)
+	SendProxyConnect(ctx context.Context, tunnelName, endpointName string, host string, port int, useTLS bool, clientConn net.Conn) error
 	GetRandomEndpointFromTunnels(tunnelNames []string) (string, string, error)
 	FindTunnelForEndpoint(endpointName string) (string, bool)
 	GetEndpointsInfo(tunnelName string) map[string]*EndpointInfo

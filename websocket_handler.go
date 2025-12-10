@@ -1,7 +1,11 @@
 package main
 
 import (
+	"context"
+	"crypto/tls"
+	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"sync"
@@ -49,12 +53,6 @@ func (p *MapRemoteProxy) handleWebSocket(w http.ResponseWriter, r *http.Request)
 		})
 	}()
 
-	// Check if this is a tunnel WebSocket connection
-	if r.URL.Path == "/.tunnel" {
-		p.handleTunnelWebSocket(w, r)
-		return
-	}
-
 	// Auth check
 	_, user, username := p.checkAuth(r, nil) // Mapping will be checked later
 	if user != nil {
@@ -91,7 +89,7 @@ func (p *MapRemoteProxy) handleWebSocket(w http.ResponseWriter, r *http.Request)
 	}
 	if targetWsURL.Scheme == "https" {
 		targetWsURL.Scheme = "wss"
-	} else {
+	} else if targetWsURL.Scheme == "http" {
 		targetWsURL.Scheme = "ws"
 	}
 
@@ -106,15 +104,136 @@ func (p *MapRemoteProxy) handleWebSocket(w http.ResponseWriter, r *http.Request)
 
 	log.Printf("[WS] Client connection upgraded for %s", originalURL)
 
-	// Dial the server connection
-	serverHeader := http.Header{}
-	copyHeaders(serverHeader, r.Header)
+	// Check if we need to route through tunnel
+	var tunnelName, endpointName string
+	isTunnelRequest := false
 
-	serverConn, _, err := websocket.DefaultDialer.Dial(targetWsURL.String(), serverHeader)
-	if err != nil {
-		isError = true
-		log.Printf("[WS] Failed to dial server %s: %v", targetWsURL.String(), err)
-		return
+	if mapping != nil && len(mapping.endpointNames) > 0 {
+		isTunnelRequest = true
+		randomEndpoint := mapping.endpointNames[0] // Just use the first one for now
+		if len(mapping.endpointNames) > 1 {
+			randomEndpoint = mapping.endpointNames[time.Now().UnixNano()%int64(len(mapping.endpointNames))]
+		}
+
+		foundTunnel, ok := p.tunnelManager.FindTunnelForEndpoint(randomEndpoint)
+		if !ok {
+			isError = true
+			log.Printf("[WS] Endpoint '%s' not found in any active tunnel", randomEndpoint)
+			return
+		}
+		tunnelName = foundTunnel
+		endpointName = randomEndpoint
+		tunnelKey = tunnelName
+		log.Printf("[WS] Will route WebSocket through tunnel '%s' to endpoint '%s'", tunnelName, endpointName)
+	} else if mapping != nil && len(mapping.tunnelNames) > 0 {
+		isTunnelRequest = true
+		foundTunnel, foundEndpoint, err := p.tunnelManager.GetRandomEndpointFromTunnels(mapping.tunnelNames)
+		if err != nil {
+			isError = true
+			log.Printf("[WS] %v", err)
+			return
+		}
+		tunnelName = foundTunnel
+		endpointName = foundEndpoint
+		tunnelKey = tunnelName
+		log.Printf("[WS] Will route WebSocket through tunnel '%s' to endpoint '%s'", tunnelName, endpointName)
+	}
+
+	var serverConn *websocket.Conn
+
+	if isTunnelRequest {
+		// Route WebSocket through tunnel using TCP proxy
+		log.Printf("[WS] Routing WebSocket to %s through tunnel", targetWsURL.String())
+
+		// Determine host and port
+		host := targetWsURL.Hostname()
+		portStr := targetWsURL.Port()
+		port := 80
+		if portStr != "" {
+			fmt.Sscanf(portStr, "%d", &port)
+		} else if targetWsURL.Scheme == "wss" {
+			port = 443
+		}
+
+		// IMPORTANT: Do NOT let endpoint handle TLS!
+		// The WebSocket dialer will handle TLS over the tunneled raw TCP connection.
+		// If we set useTLS=true here, endpoint would do TLS and then dialer would try
+		// TLS again, causing double encryption and handshake failure.
+		useTLS := false
+
+		// Create a pipe for the proxy connection
+		// We need to use net.Pipe() to create an in-memory connection
+		clientSide, serverSide := newWebSocketProxyPipe()
+
+		// Start the proxy connection through tunnel
+		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+		defer cancel()
+
+		err = p.tunnelManager.SendProxyConnect(ctx, tunnelName, endpointName, host, port, useTLS, serverSide)
+		if err != nil {
+			isError = true
+			log.Printf("[WS] Failed to establish proxy connection through tunnel: %v", err)
+			clientSide.Close()
+			serverSide.Close()
+			return
+		}
+
+		log.Printf("[WS] Proxy connection established through tunnel to %s:%d (TLS handled by dialer)", host, port)
+
+		// Now we need to perform WebSocket handshake over the proxy connection
+		// Build the WebSocket handshake request
+		wsPath := targetWsURL.Path
+		if targetWsURL.RawQuery != "" {
+			wsPath += "?" + targetWsURL.RawQuery
+		}
+		if wsPath == "" {
+			wsPath = "/"
+		}
+
+		dialer := websocket.Dialer{
+			NetDial: func(network, addr string) (net.Conn, error) {
+				return clientSide, nil
+			},
+			TLSClientConfig: &tls.Config{
+				InsecureSkipVerify: true,
+				ServerName:         host,
+			},
+		}
+
+		serverHeader := http.Header{}
+		copyHeaders(serverHeader, r.Header)
+
+		serverConn, _, err = dialer.Dial(targetWsURL.String(), serverHeader)
+		if err != nil {
+			isError = true
+			log.Printf("[WS] Failed to complete WebSocket handshake through tunnel: %v", err)
+			clientSide.Close()
+			return
+		}
+
+		log.Printf("[WS] WebSocket connection established through tunnel to %s", targetWsURL.String())
+	} else {
+		// Direct connection (original behavior)
+		serverHeader := http.Header{}
+		copyHeaders(serverHeader, r.Header)
+
+		// Check if insecure is set
+		dialer := websocket.DefaultDialer
+		if mapping != nil {
+			toConfig := mapping.GetToConfig()
+			if toConfig != nil && toConfig.Insecure != nil && *toConfig.Insecure {
+				dialer = &websocket.Dialer{
+					TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+				}
+			}
+		}
+
+		serverConn, _, err = dialer.Dial(targetWsURL.String(), serverHeader)
+		if err != nil {
+			isError = true
+			log.Printf("[WS] Failed to dial server %s: %v", targetWsURL.String(), err)
+			return
+		}
 	}
 	defer serverConn.Close()
 
@@ -232,30 +351,8 @@ func processWebSocketMessage(msg []byte, direction string, rules []WebSocketMess
 	return modifiedMsg, drop
 }
 
-// handleTunnelWebSocket handles WebSocket connections for tunnel communication
-func (p *MapRemoteProxy) handleTunnelWebSocket(w http.ResponseWriter, r *http.Request) {
-	log.Printf("[WS] Handling tunnel WebSocket connection")
-
-	// Get tunnel and endpoint information from headers
-	tunnelName := r.Header.Get("X-Tunnel-Name")
-	endpointName := r.Header.Get("X-Endpoint-Name")
-	// tunnelPassword := r.Header.Get("X-Tunnel-Password") // Not used here, but passed to wsManager
-	apsVersion := r.Header.Get("X-Aps-Tunnel")
-
-	if tunnelName == "" || endpointName == "" {
-		log.Printf("[WS] Missing required headers for tunnel connection")
-		http.Error(w, "Missing required headers", http.StatusBadRequest)
-		return
-	}
-
-	log.Printf("[WS] Tunnel connection request: tunnel=%s, endpoint=%s, version=%s", tunnelName, endpointName, apsVersion)
-
-	// Check if we have a hybrid tunnel manager that can handle WebSocket connections
-	if hybridTM, ok := p.tunnelManager.(*HybridTunnelManager); ok && hybridTM.wsManager != nil {
-		// Delegate to the WebSocket pool manager
-		hybridTM.wsManager.HandleWebSocketUpgrade(w, r)
-	} else {
-		log.Printf("[WS] WebSocket manager not available for tunnel connection")
-		http.Error(w, "WebSocket tunnel not available", http.StatusServiceUnavailable)
-	}
+// newWebSocketProxyPipe creates a bidirectional in-memory connection pair
+// for WebSocket proxy through tunnel. Returns clientSide and serverSide connections.
+func newWebSocketProxyPipe() (net.Conn, net.Conn) {
+	return net.Pipe()
 }

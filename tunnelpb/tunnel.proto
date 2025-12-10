@@ -20,6 +20,10 @@ message ServerToEndpoint {
     Request request = 2;
     Cancel cancel = 3;
     Heartbeat heartbeat = 4;
+    // Proxy connection messages (for reverse proxy mode)
+    ProxyConnect proxy_connect = 5;
+    ProxyData proxy_data = 6;
+    ProxyClose proxy_close = 7;
   }
 }
 
@@ -29,6 +33,10 @@ message EndpointToServer {
     RegistrationRequest registration = 1;
     Response response = 2;
     Heartbeat heartbeat = 3;
+    // Proxy connection messages (for reverse proxy mode)
+    ProxyConnectAck proxy_connect_ack = 4;
+    ProxyData proxy_data = 5;
+    ProxyClose proxy_close = 6;
   }
 }
 
@@ -57,6 +65,10 @@ message Response {
     // This data will be encrypted by the client before sending.
     bytes data = 2;
     string error = 3;
+    // Streaming response support
+    ResponseHeader header = 4;
+    DataChunk chunk = 5;
+    StreamEnd end = 6;
   }
 }
 
@@ -68,6 +80,52 @@ message Cancel {
 // Heartbeat is a message to check if the connection is still alive.
 message Heartbeat {
   int64 timestamp = 1;
+}
+
+// ===== Proxy Connection Messages (for reverse proxy mode) =====
+
+// ProxyConnect is sent by APS to endpoint to request a TCP connection to target
+message ProxyConnect {
+  string connection_id = 1;  // Unique ID for this proxy connection
+  string host = 2;           // Target hostname
+  int32 port = 3;            // Target port
+  bool tls = 4;              // Whether to use TLS for the connection
+}
+
+// ProxyConnectAck is sent by endpoint to APS to acknowledge connection result
+message ProxyConnectAck {
+  string connection_id = 1;  // Correlates with ProxyConnect
+  bool success = 2;          // Whether connection was successful
+  string error = 3;          // Error message if failed
+}
+
+// ProxyData is sent in both directions for data transfer
+message ProxyData {
+  string connection_id = 1;  // Correlates with ProxyConnect
+  bytes data = 2;            // Raw TCP data
+}
+
+// ProxyClose is sent to close a proxy connection
+message ProxyClose {
+  string connection_id = 1;  // Correlates with ProxyConnect
+  string reason = 2;         // Optional close reason
+}
+
+// ===== Streaming Response Support =====
+
+// ResponseHeader contains the HTTP response headers
+message ResponseHeader {
+  bytes header = 1;  // Encrypted HTTP response header bytes
+}
+
+// DataChunk contains a chunk of response body data
+message DataChunk {
+  bytes data = 1;  // Encrypted chunk of body data
+}
+
+// StreamEnd marks the end of a streaming response
+message StreamEnd {
+  string error = 1;  // Optional error message if stream ended with error
 }
 
 // RelayService provides relay functionality for multi-hop connections

@@ -11,6 +11,7 @@ import (
 	"io"
 	"log"
 	"math/rand"
+	"net"
 	"sync"
 	"time"
 
@@ -22,11 +23,12 @@ import (
 
 // TunnelManager manages all active tunnel connections from endpoints
 type TunnelManager struct {
-	mu             sync.RWMutex
-	tunnels        map[string]*Tunnel            // tunnelName -> Tunnel
-	pendingIndex   map[string]*pendingIndexEntry // requestID -> entry for O(1) lookup
-	config         *Config
-	statsCollector *StatsCollector // 统一的统计收集器
+	mu               sync.RWMutex
+	tunnels          map[string]*Tunnel            // tunnelName -> Tunnel
+	pendingIndex     map[string]*pendingIndexEntry // requestID -> entry for O(1) lookup
+	proxyConnections map[string]*proxyConnection   // connectionID -> proxyConnection for TCP proxy
+	config           *Config
+	statsCollector   *StatsCollector // 统一的统计收集器
 }
 
 // pendingIndexEntry 用于快速定位请求对应的stream和pending信息
@@ -34,6 +36,16 @@ type pendingIndexEntry struct {
 	stream   *EndpointStream
 	pending  *pendingRequest
 	password string
+}
+
+// proxyConnection represents an active TCP proxy connection through the tunnel
+type proxyConnection struct {
+	connID     string
+	conn       net.Conn        // The client-side connection (browser -> APS)
+	stream     *EndpointStream // The gRPC stream to endpoint
+	connectAck chan error      // Channel to signal connection result
+	closed     bool
+	mu         sync.Mutex
 }
 
 // Tunnel represents a named tunnel with multiple endpoint connections
@@ -72,10 +84,11 @@ type EndpointStream struct {
 
 func NewTunnelManager(config *Config, statsCollector *StatsCollector) *TunnelManager {
 	tm := &TunnelManager{
-		tunnels:        make(map[string]*Tunnel),
-		pendingIndex:   make(map[string]*pendingIndexEntry),
-		config:         config,
-		statsCollector: statsCollector,
+		tunnels:          make(map[string]*Tunnel),
+		pendingIndex:     make(map[string]*pendingIndexEntry),
+		proxyConnections: make(map[string]*proxyConnection),
+		config:           config,
+		statsCollector:   statsCollector,
 	}
 	if config.Tunnels != nil {
 		for name, tConfig := range config.Tunnels {
@@ -211,81 +224,185 @@ func (tm *TunnelManager) UnregisterEndpointStream(tunnelName, endpointName, stre
 // HandleIncomingMessage processes a message received from an endpoint stream.
 // 使用全局索引进行O(1)查找，避免三重嵌套锁遍历
 func (tm *TunnelManager) HandleIncomingMessage(msg *pb.EndpointToServer) {
+	// Handle response messages (existing logic)
 	if resp := msg.GetResponse(); resp != nil {
-		requestID := resp.GetId()
+		tm.handleResponse(resp)
+		return
+	}
 
-		// 使用全局索引直接查找 - O(1)复杂度
-		tm.mu.RLock()
-		entry, ok := tm.pendingIndex[requestID]
-		tm.mu.RUnlock()
+	// Handle proxy connection acknowledgement
+	if ack := msg.GetProxyConnectAck(); ack != nil {
+		tm.handleProxyConnectAck(ack)
+		return
+	}
 
-		if !ok {
-			// 请求可能已经被取消或超时清理
+	// Handle proxy data from endpoint
+	if data := msg.GetProxyData(); data != nil {
+		tm.handleProxyData(data)
+		return
+	}
+
+	// Handle proxy close from endpoint
+	if close := msg.GetProxyClose(); close != nil {
+		tm.handleProxyClose(close)
+		return
+	}
+}
+
+// handleResponse handles Response messages (refactored from HandleIncomingMessage)
+func (tm *TunnelManager) handleResponse(resp *pb.Response) {
+	requestID := resp.GetId()
+
+	// 使用全局索引直接查找 - O(1)复杂度
+	tm.mu.RLock()
+	entry, ok := tm.pendingIndex[requestID]
+	tm.mu.RUnlock()
+
+	if !ok {
+		// 请求可能已经被取消或超时清理
+		return
+	}
+
+	pending := entry.pending
+	stream := entry.stream
+	password := entry.password
+
+	// 更新活动时间
+	stream.Mu.Lock()
+	stream.LastActivityTime = time.Now()
+	stream.Mu.Unlock()
+
+	switch content := resp.Content.(type) {
+	case *pb.Response_Header:
+		// This is the first part of a stream, pass it to the waiting channel.
+		select {
+		case pending.responseChan <- resp:
+		default:
+			log.Printf("[STREAM %s] Warning: response channel full, header dropped", requestID)
+		}
+	case *pb.Response_Chunk:
+		// This is a body chunk, decrypt and write to the pipe.
+		decryptedChunk, err := decrypt(content.Chunk.GetData(), password)
+		if err != nil {
+			log.Printf("[STREAM %s] Error decrypting chunk: %v", requestID, err)
+			pending.pipeWriter.CloseWithError(err)
 			return
 		}
-
-		pending := entry.pending
-		stream := entry.stream
-		password := entry.password
-
-		// 更新活动时间
+		if _, err := pending.pipeWriter.Write(decryptedChunk); err != nil {
+			log.Printf("[STREAM %s] Error writing to pipe: %v", requestID, err)
+			pending.pipeWriter.CloseWithError(err)
+			return
+		}
+	case *pb.Response_End:
+		// End of stream.
+		if content.End.GetError() != "" {
+			err := errors.New(content.End.GetError())
+			log.Printf("[STREAM %s] Received stream error from endpoint: %v", requestID, err)
+			pending.pipeWriter.CloseWithError(err)
+		} else {
+			pending.pipeWriter.Close()
+		}
+		// 清理全局索引
+		tm.mu.Lock()
+		delete(tm.pendingIndex, requestID)
+		tm.mu.Unlock()
+		// 清理stream本地映射
 		stream.Mu.Lock()
-		stream.LastActivityTime = time.Now()
+		delete(stream.PendingRequests, requestID)
 		stream.Mu.Unlock()
+	case *pb.Response_Error:
+		// Handle non-streaming error for backward compatibility or immediate errors
+		select {
+		case pending.responseChan <- resp:
+		default:
+			log.Printf("[STREAM %s] Warning: response channel full, error dropped", requestID)
+		}
+		// 清理全局索引
+		tm.mu.Lock()
+		delete(tm.pendingIndex, requestID)
+		tm.mu.Unlock()
+		// 清理stream本地映射
+		stream.Mu.Lock()
+		delete(stream.PendingRequests, requestID)
+		stream.Mu.Unlock()
+	}
+}
 
-		switch content := resp.Content.(type) {
-		case *pb.Response_Header:
-			// This is the first part of a stream, pass it to the waiting channel.
-			select {
-			case pending.responseChan <- resp:
-			default:
-				log.Printf("[STREAM %s] Warning: response channel full, header dropped", requestID)
-			}
-		case *pb.Response_Chunk:
-			// This is a body chunk, decrypt and write to the pipe.
-			decryptedChunk, err := decrypt(content.Chunk.GetData(), password)
-			if err != nil {
-				log.Printf("[STREAM %s] Error decrypting chunk: %v", requestID, err)
-				pending.pipeWriter.CloseWithError(err)
-				return
-			}
-			if _, err := pending.pipeWriter.Write(decryptedChunk); err != nil {
-				log.Printf("[STREAM %s] Error writing to pipe: %v", requestID, err)
-				pending.pipeWriter.CloseWithError(err)
-				return
-			}
-		case *pb.Response_End:
-			// End of stream.
-			if content.End.GetError() != "" {
-				err := errors.New(content.End.GetError())
-				log.Printf("[STREAM %s] Received stream error from endpoint: %v", requestID, err)
-				pending.pipeWriter.CloseWithError(err)
-			} else {
-				pending.pipeWriter.Close()
-			}
-			// 清理全局索引
-			tm.mu.Lock()
-			delete(tm.pendingIndex, requestID)
-			tm.mu.Unlock()
-			// 清理stream本地映射
-			stream.Mu.Lock()
-			delete(stream.PendingRequests, requestID)
-			stream.Mu.Unlock()
-		case *pb.Response_Error:
-			// Handle non-streaming error for backward compatibility or immediate errors
-			select {
-			case pending.responseChan <- resp:
-			default:
-				log.Printf("[STREAM %s] Warning: response channel full, error dropped", requestID)
-			}
-			// 清理全局索引
-			tm.mu.Lock()
-			delete(tm.pendingIndex, requestID)
-			tm.mu.Unlock()
-			// 清理stream本地映射
-			stream.Mu.Lock()
-			delete(stream.PendingRequests, requestID)
-			stream.Mu.Unlock()
+// handleProxyConnectAck handles ProxyConnectAck from endpoint
+func (tm *TunnelManager) handleProxyConnectAck(ack *pb.ProxyConnectAck) {
+	connID := ack.GetConnectionId()
+
+	tm.mu.RLock()
+	proxyConn, ok := tm.proxyConnections[connID]
+	tm.mu.RUnlock()
+
+	if !ok {
+		log.Printf("[PROXY %s] Connection not found for ack", connID)
+		return
+	}
+
+	if ack.GetSuccess() {
+		log.Printf("[PROXY %s] Connection established successfully", connID)
+		proxyConn.connectAck <- nil
+	} else {
+		errMsg := ack.GetError()
+		log.Printf("[PROXY %s] Connection failed: %s", connID, errMsg)
+		proxyConn.connectAck <- errors.New(errMsg)
+	}
+}
+
+// handleProxyData handles ProxyData from endpoint
+func (tm *TunnelManager) handleProxyData(data *pb.ProxyData) {
+	connID := data.GetConnectionId()
+
+	tm.mu.RLock()
+	proxyConn, ok := tm.proxyConnections[connID]
+	tm.mu.RUnlock()
+
+	if !ok {
+		log.Printf("[PROXY %s] Connection not found for data", connID)
+		return
+	}
+
+	proxyConn.mu.Lock()
+	if proxyConn.closed {
+		proxyConn.mu.Unlock()
+		return
+	}
+	proxyConn.mu.Unlock()
+
+	// Write data to client connection
+	_, err := proxyConn.conn.Write(data.GetData())
+	if err != nil {
+		log.Printf("[PROXY %s] Write to client error: %v", connID, err)
+		tm.closeProxyConnection(connID, "write error")
+	}
+}
+
+// handleProxyClose handles ProxyClose from endpoint
+func (tm *TunnelManager) handleProxyClose(close *pb.ProxyClose) {
+	connID := close.GetConnectionId()
+	reason := close.GetReason()
+	log.Printf("[PROXY %s] Received close from endpoint: %s", connID, reason)
+	tm.closeProxyConnection(connID, reason)
+}
+
+// closeProxyConnection closes a proxy connection and cleans up
+func (tm *TunnelManager) closeProxyConnection(connID string, reason string) {
+	tm.mu.Lock()
+	proxyConn, ok := tm.proxyConnections[connID]
+	if ok {
+		delete(tm.proxyConnections, connID)
+	}
+	tm.mu.Unlock()
+
+	if ok && proxyConn != nil {
+		proxyConn.mu.Lock()
+		proxyConn.closed = true
+		proxyConn.mu.Unlock()
+
+		if proxyConn.conn != nil {
+			proxyConn.conn.Close()
 		}
 	}
 }
@@ -509,6 +626,158 @@ func (tm *TunnelManager) SendRequestStream(ctx context.Context, tunnelName, endp
 		return pipeReader, decryptedHeader, nil
 	case <-ctx.Done():
 		return nil, nil, ctx.Err()
+	}
+}
+
+// SendProxyConnect establishes a TCP proxy connection through the tunnel.
+// The clientConn is the connection from client (browser) to APS.
+// Returns when connection is established or fails.
+func (tm *TunnelManager) SendProxyConnect(ctx context.Context, tunnelName, endpointName string, host string, port int, useTLS bool, clientConn net.Conn) error {
+	tm.mu.RLock()
+	tunnel, exists := tm.tunnels[tunnelName]
+	tm.mu.RUnlock()
+	if !exists {
+		return status.Errorf(codes.NotFound, "tunnel '%s' not found", tunnelName)
+	}
+
+	tunnel.mu.RLock()
+	pool, exists := tunnel.streams[endpointName]
+	if !exists || pool.Size() == 0 {
+		tunnel.mu.RUnlock()
+		return status.Errorf(codes.Unavailable, "endpoint '%s' is not connected to tunnel '%s'", endpointName, tunnelName)
+	}
+	stream := pool.GetStream()
+	tunnel.mu.RUnlock()
+
+	if stream == nil {
+		return status.Errorf(codes.Unavailable, "no available stream for endpoint '%s'", endpointName)
+	}
+
+	connID := generateRequestID()
+
+	// Create proxy connection entry
+	proxyConn := &proxyConnection{
+		connID:     connID,
+		conn:       clientConn,
+		stream:     stream,
+		connectAck: make(chan error, 1),
+		closed:     false,
+	}
+
+	// Register the proxy connection
+	tm.mu.Lock()
+	tm.proxyConnections[connID] = proxyConn
+	tm.mu.Unlock()
+
+	// Send ProxyConnect to endpoint
+	connectMsg := &pb.ServerToEndpoint{
+		Id: connID,
+		Payload: &pb.ServerToEndpoint_ProxyConnect{
+			ProxyConnect: &pb.ProxyConnect{
+				ConnectionId: connID,
+				Host:         host,
+				Port:         int32(port),
+				Tls:          useTLS,
+			},
+		},
+	}
+
+	stream.Mu.Lock()
+	err := stream.Stream.Send(connectMsg)
+	stream.Mu.Unlock()
+
+	if err != nil {
+		tm.closeProxyConnection(connID, "send error")
+		return status.Errorf(codes.Aborted, "failed to send proxy connect: %v", err)
+	}
+
+	// Wait for connection acknowledgement
+	select {
+	case err := <-proxyConn.connectAck:
+		if err != nil {
+			tm.closeProxyConnection(connID, "connect failed")
+			return err
+		}
+	case <-ctx.Done():
+		tm.closeProxyConnection(connID, "context cancelled")
+		return ctx.Err()
+	case <-time.After(30 * time.Second):
+		tm.closeProxyConnection(connID, "connect timeout")
+		return errors.New("proxy connect timeout")
+	}
+
+	// Connection established, start reading from client and forwarding to endpoint
+	go tm.proxyClientReadLoop(connID, stream)
+
+	return nil
+}
+
+// proxyClientReadLoop reads data from client connection and sends to endpoint
+func (tm *TunnelManager) proxyClientReadLoop(connID string, stream *EndpointStream) {
+	tm.mu.RLock()
+	proxyConn, ok := tm.proxyConnections[connID]
+	tm.mu.RUnlock()
+
+	if !ok {
+		return
+	}
+
+	defer func() {
+		log.Printf("[PROXY %s] Client read loop ended", connID)
+
+		// Send close to endpoint
+		stream.Mu.Lock()
+		stream.Stream.Send(&pb.ServerToEndpoint{
+			Id: connID,
+			Payload: &pb.ServerToEndpoint_ProxyClose{
+				ProxyClose: &pb.ProxyClose{
+					ConnectionId: connID,
+					Reason:       "client connection closed",
+				},
+			},
+		})
+		stream.Mu.Unlock()
+
+		tm.closeProxyConnection(connID, "client closed")
+	}()
+
+	buf := make([]byte, 32*1024) // 32KB buffer
+	for {
+		proxyConn.mu.Lock()
+		closed := proxyConn.closed
+		proxyConn.mu.Unlock()
+		if closed {
+			return
+		}
+
+		n, err := proxyConn.conn.Read(buf)
+		if n > 0 {
+			// Send data to endpoint
+			dataMsg := &pb.ServerToEndpoint{
+				Id: connID,
+				Payload: &pb.ServerToEndpoint_ProxyData{
+					ProxyData: &pb.ProxyData{
+						ConnectionId: connID,
+						Data:         buf[:n],
+					},
+				},
+			}
+
+			stream.Mu.Lock()
+			sendErr := stream.Stream.Send(dataMsg)
+			stream.Mu.Unlock()
+
+			if sendErr != nil {
+				log.Printf("[PROXY %s] Send to endpoint error: %v", connID, sendErr)
+				return
+			}
+		}
+		if err != nil {
+			if err != io.EOF {
+				log.Printf("[PROXY %s] Client read error: %v", connID, err)
+			}
+			return
+		}
 	}
 }
 

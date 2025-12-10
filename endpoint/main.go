@@ -15,6 +15,7 @@ import (
 	"io"
 	"log"
 	"math"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -34,7 +35,6 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/metadata"
-	"google.golang.org/protobuf/proto"
 )
 
 var (
@@ -43,7 +43,6 @@ var (
 	tunnelName     = flag.String("tunnel", "", "name of the tunnel to connect to (must be defined in server config)")
 	tunnelPassword = flag.String("password", "", "tunnel password for encryption")
 	debug          = flag.Bool("debug", false, "enable debug logging")
-	transportMode  = flag.String("transport", "mix", "transport mode: grpc, ws, or mix (default: mix)")
 	relayMode      = flag.String("relay-mode", "direct", "relay mode: direct, relay, or hybrid (default: direct)")
 	relayEndpoints = flag.String("relays", "", "comma-separated list of relay endpoints (e.g., 'relay1:18081,relay2:18081')")
 	install        = flag.Bool("install", false, "install system service")
@@ -52,10 +51,11 @@ var (
 	stop           = flag.Bool("stop", false, "stop system service")
 	restart        = flag.Bool("restart", false, "restart system service")
 
-	activeRequests sync.Map   // Stores map[string]context.CancelFunc
-	streamMu       sync.Mutex // 保护gRPC stream.Send的并发调用
-	relayManager   *RelayManager
-	logger         service.Logger
+	activeRequests   sync.Map   // Stores map[string]context.CancelFunc
+	proxyConnections sync.Map   // Stores map[string]net.Conn for proxy connections
+	streamMu         sync.Mutex // 保护gRPC stream.Send的并发调用
+	relayManager     *RelayManager
+	logger           service.Logger
 )
 
 var sharedClient = &http.Client{
@@ -397,21 +397,7 @@ func runClientSession(ctx context.Context) bool {
 		log.Printf("Relay connection failed, falling back to direct connection")
 	}
 
-	switch *transportMode {
-	case "grpc":
-		return runGRPCSession(ctx)
-	case "ws":
-		return runWebSocketSession(ctx)
-	case "mix":
-		if success := runGRPCSession(ctx); !success {
-			log.Printf("gRPC connection failed, falling back to WebSocket")
-			return runWebSocketSession(ctx)
-		}
-		return true
-	default:
-		log.Printf("Invalid transport mode: %s, using mix mode", *transportMode)
-		return runGRPCSession(ctx)
-	}
+	return runGRPCSession(ctx)
 }
 
 func runGRPCSession(ctx context.Context) bool {
@@ -499,315 +485,6 @@ func runGRPCSession(ctx context.Context) bool {
 	}
 }
 
-func runWebSocketSession(ctx context.Context) bool {
-	log.Printf("Connecting to WebSocket server at %s", *serverAddr)
-	wsClient := NewWebSocketClient(*serverAddr, *tunnelName, *name, *tunnelPassword, *debug)
-	if err := wsClient.Connect(); err != nil {
-		log.Printf("Failed to connect to WebSocket: %v", err)
-		return true
-	}
-	defer wsClient.Disconnect()
-	log.Println("Successfully established WebSocket connection.")
-
-	permanentErrorChan := make(chan error, 1)
-	streamEnded := make(chan struct{})
-
-	go func() {
-		defer close(streamEnded)
-		pingTicker := time.NewTicker(30 * time.Second)
-		defer pingTicker.Stop()
-
-		for {
-			select {
-			case <-ctx.Done():
-				log.Println("Context cancelled, stopping WebSocket receive loop.")
-				return
-			case <-pingTicker.C:
-				if !wsClient.IsConnected() {
-					log.Printf("WebSocket connection detected as disconnected, stopping receive loop.")
-					return
-				}
-				if err := wsClient.Send([]byte("ping")); err != nil {
-					log.Printf("WebSocket ping failed, connection likely broken: %v", err)
-					return
-				}
-			default:
-				messageChan := make(chan []byte, 1)
-				errChan := make(chan error, 1)
-				go func() {
-					message, err := wsClient.Receive()
-					if err != nil {
-						errChan <- err
-						return
-					}
-					messageChan <- message
-				}()
-
-				select {
-				case message := <-messageChan:
-					var msg pb.ServerToEndpoint
-					if err := proto.Unmarshal(message, &msg); err != nil {
-						log.Printf("Error unmarshaling WebSocket message: %v", err)
-						continue
-					}
-					go handleServerMessageWebSocket(wsClient, &msg)
-				case err := <-errChan:
-					if err.Error() == "context cancelled" {
-						return
-					}
-					log.Printf("Error receiving from WebSocket: %v", err)
-					return
-				case <-time.After(5 * time.Second):
-					if !wsClient.IsConnected() {
-						log.Printf("WebSocket connection timeout and not connected, stopping receive loop.")
-						return
-					}
-				}
-			}
-		}
-	}()
-
-	select {
-	case <-permanentErrorChan:
-		return false
-	case <-streamEnded:
-		log.Printf("WebSocket connection ended.")
-		return true
-	case <-ctx.Done():
-		log.Printf("Context cancelled, closing WebSocket connection.")
-		return false
-	}
-}
-
-func handleServerMessageWebSocket(wsClient *WebSocketClient, msg *pb.ServerToEndpoint) {
-	requestID := msg.GetId()
-	switch payload := msg.Payload.(type) {
-	case *pb.ServerToEndpoint_Request:
-		// 使用goroutine异步处理请求，避免串行阻塞
-		go handleRequestWebSocket(wsClient, requestID, payload.Request)
-	case *pb.ServerToEndpoint_Cancel:
-		log.Printf("[CANCEL] Received cancellation for request %s", requestID)
-		if cancelFunc, ok := activeRequests.Load(requestID); ok {
-			cancelFunc.(context.CancelFunc)()
-			activeRequests.Delete(requestID)
-		}
-	}
-}
-
-func handleRequestWebSocket(wsClient *WebSocketClient, requestID string, reqPayload *pb.Request) {
-	ctx, cancel := context.WithCancel(context.Background())
-	activeRequests.Store(requestID, cancel)
-	defer func() {
-		cancel()
-		activeRequests.Delete(requestID)
-	}()
-
-	if *debug {
-		log.Printf("[DEBUG %s] Handling WebSocket request, URL: %s, DataLen: %d", requestID, reqPayload.GetUrl(), len(reqPayload.GetData()))
-	}
-
-	decryptedData, err := decrypt(reqPayload.GetData(), *tunnelPassword)
-	if err != nil {
-		log.Printf("[ERROR %s] Error decrypting request: %v", requestID, err)
-		sendStreamErrorResponseWebSocket(wsClient, requestID, "decryption failed")
-		return
-	}
-
-	req, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(decryptedData)))
-	if err != nil {
-		log.Printf("[ERROR %s] Error reading request: %v", requestID, err)
-		sendStreamErrorResponseWebSocket(wsClient, requestID, "cannot read request")
-		return
-	}
-
-	if *debug {
-		var headers bytes.Buffer
-		req.Header.Write(&headers)
-		log.Printf("[DEBUG %s] Decrypted request headers:\n%s", requestID, headers.String())
-	}
-
-	targetURL, err := url.Parse(reqPayload.GetUrl())
-	if err != nil {
-		log.Printf("[ERROR %s] Error parsing target URL: %v", requestID, err)
-		sendStreamErrorResponseWebSocket(wsClient, requestID, "invalid target URL")
-		return
-	}
-	req.URL = targetURL
-	// req.Host is already correctly set by http.ReadRequest from the Host header.
-	// We should not overwrite it with the IP address from targetURL.Host.
-	req.RequestURI = ""
-	req = req.WithContext(ctx)
-
-	log.Printf("Forwarding WebSocket request %s to %s (Host: %s)", requestID, req.URL.String(), req.Host)
-
-	// Create a custom client to handle SNI and insecure connections for HTTPS requests.
-	client := sharedClient
-	if req.URL.Scheme == "https" {
-		customTransport := sharedClient.Transport.(*http.Transport).Clone()
-		if customTransport.TLSClientConfig != nil {
-			customTransport.TLSClientConfig = customTransport.TLSClientConfig.Clone()
-		} else {
-			customTransport.TLSClientConfig = &tls.Config{}
-		}
-
-		// Set SNI from the Host header
-		serverName := req.Host
-		if strings.Contains(serverName, ":") {
-			serverName = strings.Split(serverName, ":")[0]
-		}
-		customTransport.TLSClientConfig.ServerName = serverName
-
-		// Check for an "X-Aps-Insecure" header to control InsecureSkipVerify.
-		// This header is added by the proxy if "insecure: true" is set in the mapping.
-		if insecureHeader := req.Header.Get("X-Aps-Insecure"); insecureHeader == "true" {
-			customTransport.TLSClientConfig.InsecureSkipVerify = true
-			if *debug {
-				log.Printf("[DEBUG %s] InsecureSkipVerify enabled by X-Aps-Insecure header.", requestID)
-			}
-		}
-		// We can now remove the header as it's served its purpose
-		req.Header.Del("X-Aps-Insecure")
-
-		client = &http.Client{
-			Transport:     customTransport,
-			CheckRedirect: sharedClient.CheckRedirect,
-		}
-		if *debug {
-			log.Printf("[DEBUG %s] Custom TLS configured for host: %s, Insecure: %v", requestID, serverName, customTransport.TLSClientConfig.InsecureSkipVerify)
-		}
-	}
-
-	resp, err := client.Do(req)
-	if err != nil {
-		if errors.Is(err, context.Canceled) {
-			log.Printf("[CANCEL %s] Request was cancelled locally.", requestID)
-			return
-		}
-		log.Printf("[ERROR %s] Error executing request: %v", requestID, err)
-		sendStreamErrorResponseWebSocket(wsClient, requestID, err.Error())
-		return
-	}
-	defer resp.Body.Close()
-
-	if *debug {
-		log.Printf("[DEBUG %s] Received response: %s", requestID, resp.Status)
-		var headers bytes.Buffer
-		resp.Header.Write(&headers)
-		log.Printf("[DEBUG %s] Response headers:\n%s", requestID, headers.String())
-	}
-
-	// --- Start of Streaming Logic ---
-
-	// 1. Send the response header first.
-	headerBytes, err := httputil.DumpResponse(resp, false) // false means do not include body
-	if err != nil {
-		log.Printf("[ERROR %s] Error dumping response headers: %v", requestID, err)
-		sendStreamErrorResponseWebSocket(wsClient, requestID, "cannot dump response headers")
-		return
-	}
-
-	encryptedHeader, err := encrypt(headerBytes, *tunnelPassword)
-	if err != nil {
-		log.Printf("[ERROR %s] Error encrypting response header: %v", requestID, err)
-		sendStreamErrorResponseWebSocket(wsClient, requestID, "header encryption failed")
-		return
-	}
-
-	if err := sendResponsePartWebSocket(wsClient, requestID, &pb.Response{
-		Id:      requestID,
-		Content: &pb.Response_Header{Header: &pb.ResponseHeader{Header: encryptedHeader}},
-	}); err != nil {
-		log.Printf("[ERROR %s] Error sending response header: %v", requestID, err)
-		return
-	}
-	if *debug {
-		log.Printf("[DEBUG %s] Sent response header, len: %d", requestID, len(encryptedHeader))
-	}
-
-	// 2. Stream the response body in chunks.
-	buf := make([]byte, 128*1024) // 128KB chunks for better throughput
-	for {
-		n, err := resp.Body.Read(buf)
-		if n > 0 {
-			encryptedChunk, encErr := encrypt(buf[:n], *tunnelPassword)
-			if encErr != nil {
-				log.Printf("[ERROR %s] Error encrypting response chunk: %v", requestID, encErr)
-				sendStreamErrorResponseWebSocket(wsClient, requestID, "chunk encryption failed")
-				return
-			}
-			if err := sendResponsePartWebSocket(wsClient, requestID, &pb.Response{
-				Id:      requestID,
-				Content: &pb.Response_Chunk{Chunk: &pb.DataChunk{Data: encryptedChunk}},
-			}); err != nil {
-				log.Printf("[ERROR %s] Error sending response chunk: %v", requestID, err)
-				return // Stop streaming if we can't send
-			}
-			if *debug {
-				log.Printf("[DEBUG %s] Sent response chunk, len: %d", requestID, len(encryptedChunk))
-			}
-		}
-		if err == io.EOF {
-			break // End of body
-		}
-		if err != nil {
-			log.Printf("[ERROR %s] Error reading response body: %v", requestID, err)
-			sendStreamErrorResponseWebSocket(wsClient, requestID, "error reading response body")
-			return
-		}
-	}
-
-	// 3. Send the end-of-stream message.
-	if err := sendResponsePartWebSocket(wsClient, requestID, &pb.Response{
-		Id:      requestID,
-		Content: &pb.Response_End{End: &pb.StreamEnd{}},
-	}); err != nil {
-		log.Printf("[ERROR %s] Error sending end-of-stream: %v", requestID, err)
-		return
-	}
-	if *debug {
-		log.Printf("[DEBUG %s] Sent end-of-stream message.", requestID)
-	}
-	// --- End of Streaming Logic ---
-}
-
-func sendResponsePartWebSocket(wsClient *WebSocketClient, requestID string, respPayload *pb.Response) error {
-	msg := &pb.EndpointToServer{
-		Payload: &pb.EndpointToServer_Response{
-			Response: respPayload,
-		},
-	}
-	data, err := proto.Marshal(msg)
-	if err != nil {
-		log.Printf("Error marshaling WebSocket response part for request %s: %v", requestID, err)
-		return err
-	}
-	if err := wsClient.Send(data); err != nil {
-		log.Printf("Error sending WebSocket response part for request %s: %v", requestID, err)
-		return err
-	}
-	return nil
-}
-
-func sendStreamErrorResponseWebSocket(wsClient *WebSocketClient, requestID string, errorMsg string) {
-	log.Printf("Sending WebSocket stream error for request %s: %s", requestID, errorMsg)
-	err := sendResponsePartWebSocket(wsClient, requestID, &pb.Response{
-		Id:      requestID,
-		Content: &pb.Response_End{End: &pb.StreamEnd{Error: errorMsg}},
-	})
-	if err != nil {
-		log.Printf("Failed to send stream error response for %s: %v", requestID, err)
-	}
-}
-
-// Deprecated: use sendStreamErrorResponseWebSocket instead for streaming.
-func sendErrorResponseWebSocket(wsClient *WebSocketClient, requestID string, errorMsg string) {
-	log.Printf("Sending WebSocket error response for request %s: %s", requestID, errorMsg)
-	err := sendResponsePartWebSocket(wsClient, requestID, &pb.Response{Id: requestID, Content: &pb.Response_Error{Error: errorMsg}})
-	if err != nil {
-		log.Printf("Failed to send error response for %s: %v", requestID, err)
-	}
-}
-
 func isPermanentError(err error) bool {
 	if err == nil {
 		return false
@@ -840,6 +517,15 @@ func handleServerMessage(stream pb.TunnelService_EstablishClient, msg *pb.Server
 			cancelFunc.(context.CancelFunc)()
 			activeRequests.Delete(requestID)
 		}
+	case *pb.ServerToEndpoint_ProxyConnect:
+		// Handle proxy connection request from APS
+		go handleProxyConnect(stream, payload.ProxyConnect)
+	case *pb.ServerToEndpoint_ProxyData:
+		// Handle proxy data from APS
+		handleProxyData(payload.ProxyData)
+	case *pb.ServerToEndpoint_ProxyClose:
+		// Handle proxy close from APS
+		handleProxyClose(payload.ProxyClose)
 	}
 }
 
@@ -1053,6 +739,154 @@ func sendErrorResponse(stream pb.TunnelService_EstablishClient, requestID string
 	err := sendResponsePart(stream, requestID, &pb.Response{Id: requestID, Content: &pb.Response_Error{Error: errorMsg}})
 	if err != nil {
 		log.Printf("Failed to send error response for %s: %v", requestID, err)
+	}
+}
+
+// ===== Proxy Connection Handlers =====
+
+// handleProxyConnect establishes a TCP connection to the target server
+func handleProxyConnect(stream pb.TunnelService_EstablishClient, req *pb.ProxyConnect) {
+	connID := req.GetConnectionId()
+	host := req.GetHost()
+	port := req.GetPort()
+	useTLS := req.GetTls()
+
+	address := fmt.Sprintf("%s:%d", host, port)
+	log.Printf("[PROXY %s] Connecting to %s (TLS: %v)", connID, address, useTLS)
+
+	// Establish TCP connection to target
+	var conn net.Conn
+	var err error
+
+	if useTLS {
+		// TLS connection
+		tlsConfig := &tls.Config{
+			ServerName:         host,
+			InsecureSkipVerify: true, // Allow self-signed certs, similar to existing behavior
+		}
+		conn, err = tls.DialWithDialer(&net.Dialer{Timeout: 30 * time.Second}, "tcp", address, tlsConfig)
+	} else {
+		// Plain TCP connection
+		conn, err = net.DialTimeout("tcp", address, 30*time.Second)
+	}
+
+	// Send connection acknowledgement
+	ack := &pb.ProxyConnectAck{
+		ConnectionId: connID,
+		Success:      err == nil,
+	}
+	if err != nil {
+		ack.Error = err.Error()
+		log.Printf("[PROXY %s] Connection failed: %v", connID, err)
+	} else {
+		log.Printf("[PROXY %s] Connection established to %s", connID, address)
+		// Store the connection
+		proxyConnections.Store(connID, conn)
+
+		// Start reading from the connection
+		go proxyReadLoop(stream, connID, conn)
+	}
+
+	// Send ack message
+	streamMu.Lock()
+	sendErr := stream.Send(&pb.EndpointToServer{
+		Payload: &pb.EndpointToServer_ProxyConnectAck{
+			ProxyConnectAck: ack,
+		},
+	})
+	streamMu.Unlock()
+
+	if sendErr != nil {
+		log.Printf("[PROXY %s] Failed to send connect ack: %v", connID, sendErr)
+		if conn != nil {
+			conn.Close()
+			proxyConnections.Delete(connID)
+		}
+	}
+}
+
+// handleProxyData writes data to the target connection
+func handleProxyData(data *pb.ProxyData) {
+	connID := data.GetConnectionId()
+
+	connVal, ok := proxyConnections.Load(connID)
+	if !ok {
+		log.Printf("[PROXY %s] Connection not found for data", connID)
+		return
+	}
+
+	conn := connVal.(net.Conn)
+	_, err := conn.Write(data.GetData())
+	if err != nil {
+		log.Printf("[PROXY %s] Write error: %v", connID, err)
+		conn.Close()
+		proxyConnections.Delete(connID)
+	}
+}
+
+// handleProxyClose closes a proxy connection
+func handleProxyClose(close *pb.ProxyClose) {
+	connID := close.GetConnectionId()
+	reason := close.GetReason()
+
+	log.Printf("[PROXY %s] Closing connection: %s", connID, reason)
+
+	connVal, ok := proxyConnections.Load(connID)
+	if ok {
+		conn := connVal.(net.Conn)
+		conn.Close()
+		proxyConnections.Delete(connID)
+	}
+}
+
+// proxyReadLoop reads data from target connection and sends to APS
+func proxyReadLoop(stream pb.TunnelService_EstablishClient, connID string, conn net.Conn) {
+	defer func() {
+		log.Printf("[PROXY %s] Read loop ended", connID)
+		conn.Close()
+		proxyConnections.Delete(connID)
+
+		// Notify APS that connection is closed
+		streamMu.Lock()
+		stream.Send(&pb.EndpointToServer{
+			Payload: &pb.EndpointToServer_ProxyClose{
+				ProxyClose: &pb.ProxyClose{
+					ConnectionId: connID,
+					Reason:       "connection closed by endpoint",
+				},
+			},
+		})
+		streamMu.Unlock()
+	}()
+
+	buf := make([]byte, 32*1024) // 32KB buffer
+	for {
+		n, err := conn.Read(buf)
+		if n > 0 {
+			data := &pb.ProxyData{
+				ConnectionId: connID,
+				Data:         buf[:n],
+			}
+
+			streamMu.Lock()
+			sendErr := stream.Send(&pb.EndpointToServer{
+				Payload: &pb.EndpointToServer_ProxyData{
+					ProxyData: data,
+				},
+			})
+			streamMu.Unlock()
+
+			if sendErr != nil {
+				log.Printf("[PROXY %s] Send error: %v", connID, sendErr)
+				return
+			}
+		}
+		if err != nil {
+			if err != io.EOF {
+				log.Printf("[PROXY %s] Read error: %v", connID, err)
+			}
+			return
+		}
 	}
 }
 

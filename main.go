@@ -319,12 +319,6 @@ func createServerHandler(serverName string, mappings []*Mapping, serverConfig *L
 	// 根据隧道管理器类型注册不同的服务
 	if hybridTM, ok := tunnelManager.(*HybridTunnelManager); ok {
 		pb.RegisterTunnelServiceServer(grpcServer, &TunnelServiceServer{tunnelManager: hybridTM.grpcManager})
-
-		// 注册WebSocket处理器
-		mux.HandleFunc("/.tunnel", func(w http.ResponseWriter, r *http.Request) {
-			hybridTM.wsManager.HandleWebSocketUpgrade(w, r)
-		})
-		log.Println("WebSocket tunnel endpoint registered at '/.tunnel'")
 	} else if tm, ok := tunnelManager.(*TunnelManager); ok {
 		pb.RegisterTunnelServiceServer(grpcServer, &TunnelServiceServer{tunnelManager: tm})
 	}
