@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"io/ioutil"
 	"log"
 	"net/http"
 	"os/exec"
@@ -188,7 +187,7 @@ func (s *ScriptRunner) scriptDataToResponse(data ScriptData, origResp *http.Resp
 		Status:     data.Status,
 		Proto:      data.Proto,
 		Header:     data.Headers,
-		Body:       ioutil.NopCloser(strings.NewReader(data.Body)),
+		Body:       io.NopCloser(strings.NewReader(data.Body)),
 	}
 	newResp.ContentLength = int64(len(data.Body))
 

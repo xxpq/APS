@@ -138,8 +138,10 @@ func (tc *TunnelConn) ReadMessage() (*TunnelMessage, error) {
 	}
 	tc.closedMu.RUnlock()
 
-	// Read header (5 bytes: 4 length + 1 type)
-	header := make([]byte, headerSize)
+	// Use pooled header buffer
+	header := GetHeaderBuffer()
+	defer PutHeaderBuffer(header)
+
 	_, err := io.ReadFull(tc.conn, header)
 	if err != nil {
 		return nil, err
@@ -153,7 +155,7 @@ func (tc *TunnelConn) ReadMessage() (*TunnelMessage, error) {
 
 	msgType := header[4]
 
-	// Read payload
+	// Read payload - allocate exact size needed (can't pool variable sizes easily)
 	payload := make([]byte, length)
 	if length > 0 {
 		_, err = io.ReadFull(tc.conn, payload)

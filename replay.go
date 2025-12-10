@@ -3,8 +3,6 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"io"
-	"io/ioutil"
 	"log"
 	"net/http"
 	"net/url"
@@ -42,11 +40,14 @@ func (rm *ReplayManager) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body, err := io.ReadAll(r.Body)
+	buf := GetBytesBuffer()
+	defer PutBytesBuffer(buf)
+	_, err := buf.ReadFrom(r.Body)
 	if err != nil {
 		http.Error(w, "Failed to read request body", http.StatusInternalServerError)
 		return
 	}
+	body := buf.Bytes()
 
 	var harData har.HAR
 	if err := json.Unmarshal(body, &harData); err != nil {
@@ -89,8 +90,11 @@ func (rm *ReplayManager) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(resp.StatusCode)
 
 	// Copy body
-	replayedBody, _ := ioutil.ReadAll(resp.Body)
-	w.Write(replayedBody)
+	// Copy body
+	respBuf := GetBytesBuffer()
+	defer PutBytesBuffer(respBuf)
+	respBuf.ReadFrom(resp.Body)
+	w.Write(respBuf.Bytes())
 }
 
 // replayRequest reconstructs and sends a request based on a HAR entry.

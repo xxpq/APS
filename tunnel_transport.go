@@ -10,6 +10,10 @@ import (
 	"net/http/httputil"
 )
 
+// mappingContextKey 是用于存储mapping对象的context键
+// 这个常量也在http_handler.go中定义，保持一致性
+const mappingContextKey = "mapping"
+
 // TunnelRoundTripper implements http.RoundTripper to send requests via a tunnel
 type TunnelRoundTripper struct {
 	tunnelManager TunnelManagerInterface

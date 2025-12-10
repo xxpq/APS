@@ -615,7 +615,8 @@ func (ep *TCPEndpoint) proxyClientReadLoop(connectionID string, pc *tcpProxyConn
 		ep.closeProxyConnection(connectionID, "client closed")
 	}()
 
-	buf := make([]byte, 32*1024)
+	buf := GetMediumBuffer()
+	defer PutMediumBuffer(buf)
 	for {
 		pc.mu.Lock()
 		closed := pc.closed

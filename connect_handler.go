@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"crypto/tls"
 	"fmt"
 	"io"
@@ -59,7 +58,7 @@ func (p *MapRemoteProxy) handleConnectWithMITM(w http.ResponseWriter, r *http.Re
 	}
 	defer clientConn.Close()
 
-	_, err = clientConn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n"))
+	_, err = clientConn.Write(connectEstablishedResponse)
 	if err != nil {
 		log.Printf("Error writing 200 OK to client: %v", err)
 		return
@@ -79,7 +78,8 @@ func (p *MapRemoteProxy) handleConnectWithMITM(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	reader := bufio.NewReader(tlsClientConn)
+	reader := GetBufioReader(tlsClientConn)
+	defer PutBufioReader(reader)
 	for {
 		req, err := http.ReadRequest(reader)
 		if err != nil {
@@ -207,7 +207,7 @@ func (p *MapRemoteProxy) handleConnectTunnel(w http.ResponseWriter, r *http.Requ
 	}
 	defer clientConn.Close()
 
-	_, err = clientConn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n"))
+	_, err = clientConn.Write(connectEstablishedResponse)
 	if err != nil {
 		isError = true
 		log.Printf("Error writing 200 OK to client: %v", err)
@@ -230,7 +230,8 @@ func (p *MapRemoteProxy) handleConnectTunnel(w http.ResponseWriter, r *http.Requ
 	}
 
 	var bytesSent, bytesRecv int64
-	done := make(chan struct{}, 2)
+	done := GetDoneChannel()
+	defer PutDoneChannel(done)
 
 	go func() {
 		// client -> destination (upload)

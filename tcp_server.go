@@ -260,7 +260,7 @@ func parseTCPURL(rawURL string) (host string, port int, useTLS bool, err error) 
 
 // forwardDirect forwards the connection directly to the target
 func (s *RawTCPServer) forwardDirect(clientConn net.Conn, targetHost string, targetPort int) {
-	targetAddr := fmt.Sprintf("%s:%d", targetHost, targetPort)
+	targetAddr := net.JoinHostPort(targetHost, strconv.Itoa(targetPort))
 	log.Printf("[RAW TCP] Forwarding to %s (direct)", targetAddr)
 
 	targetConn, err := net.DialTimeout("tcp", targetAddr, 30*time.Second)
@@ -323,7 +323,8 @@ func (s *RawTCPServer) forwardViaProxy(clientConn net.Conn, mapping *Mapping, ta
 	}
 
 	// Read response (simple check for 200)
-	buf := make([]byte, 1024)
+	buf := GetSmallBuffer()
+	defer PutSmallBuffer(buf)
 	n, err := proxyConn.Read(buf)
 	if err != nil {
 		log.Printf("[RAW TCP] Failed to read CONNECT response: %v", err)
@@ -439,7 +440,9 @@ func (s *RawTCPServer) bidirectionalCopy(conn1, conn2 net.Conn) {
 	// conn1 -> conn2 (upload from client perspective)
 	go func() {
 		defer wg.Done()
-		n, err := io.Copy(conn2, conn1)
+		buf := GetMediumBuffer()
+		defer PutMediumBuffer(buf)
+		n, err := io.CopyBuffer(conn2, conn1, buf)
 		bytesRecv = n
 		if err != nil && !isClosedConnError(err) {
 			log.Printf("[RAW TCP] Copy conn1->conn2 error: %v", err)
@@ -450,7 +453,9 @@ func (s *RawTCPServer) bidirectionalCopy(conn1, conn2 net.Conn) {
 	// conn2 -> conn1 (download from client perspective)
 	go func() {
 		defer wg.Done()
-		n, err := io.Copy(conn1, conn2)
+		buf := GetMediumBuffer()
+		defer PutMediumBuffer(buf)
+		n, err := io.CopyBuffer(conn1, conn2, buf)
 		bytesSent = n
 		if err != nil && !isClosedConnError(err) {
 			log.Printf("[RAW TCP] Copy conn2->conn1 error: %v", err)
@@ -480,16 +485,16 @@ func isClosedConnError(err error) bool {
 }
 
 // waitForClose waits for a connection to be closed
-func waitForClose(conn net.Conn) {
-	buf := make([]byte, 1)
-	for {
-		conn.SetReadDeadline(time.Now().Add(1 * time.Second))
-		_, err := conn.Read(buf)
-		if err != nil {
-			return
-		}
-	}
-}
+// func waitForClose(conn net.Conn) {
+// 	buf := make([]byte, 1)
+// 	for {
+// 		conn.SetReadDeadline(time.Now().Add(1 * time.Second))
+// 		_, err := conn.Read(buf)
+// 		if err != nil {
+// 			return
+// 		}
+// 	}
+// }
 
 // encodeBase64 encodes a string to base64
 func encodeBase64(s string) string {

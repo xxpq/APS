@@ -18,6 +18,25 @@ import (
 	"time"
 )
 
+// Local buffer pools for the endpoint client
+var (
+	mediumBufPool = sync.Pool{New: func() any { return make([]byte, 32*1024) }}
+	largeBufPool  = sync.Pool{New: func() any { return make([]byte, 128*1024) }}
+)
+
+func GetMediumBuffer() []byte { return mediumBufPool.Get().([]byte) }
+func PutMediumBuffer(b []byte) {
+	if cap(b) >= 32*1024 {
+		mediumBufPool.Put(b[:32*1024])
+	}
+}
+func GetLargeBuffer() []byte { return largeBufPool.Get().([]byte) }
+func PutLargeBuffer(b []byte) {
+	if cap(b) >= 128*1024 {
+		largeBufPool.Put(b[:128*1024])
+	}
+}
+
 // TCP Tunnel Protocol Message Types (must match APS side)
 const (
 	MsgTypeRegister        uint8 = 0x01
@@ -399,7 +418,8 @@ func handleTCPRequest(tc *TunnelConn, msg *TunnelMessage) {
 	}
 
 	// Stream body
-	buf := make([]byte, 128*1024)
+	buf := GetLargeBuffer()
+	defer PutLargeBuffer(buf)
 	for {
 		n, err := resp.Body.Read(buf)
 		if n > 0 {
@@ -527,7 +547,8 @@ func tcpProxyReadLoop(tc *TunnelConn, connID string, conn net.Conn) {
 		})
 	}()
 
-	buf := make([]byte, 32*1024)
+	buf := GetMediumBuffer()
+	defer PutMediumBuffer(buf)
 	for {
 		n, err := conn.Read(buf)
 		if n > 0 {

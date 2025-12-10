@@ -9,6 +9,15 @@ import (
 	"time"
 )
 
+// pendingRequestPool provides reusable pending request objects
+var pendingRequestPool = sync.Pool{
+	New: func() any {
+		return &tcpPendingRequest{
+			responseChan: make(chan *TunnelMessage, 10),
+		}
+	},
+}
+
 // TCPTunnelManager manages TCP tunnel endpoints and provides proxy functionality
 type TCPTunnelManager struct {
 	mu      sync.RWMutex
@@ -203,10 +212,9 @@ func (tm *TCPTunnelManager) SendRequestStream(ctx context.Context, tunnelName, e
 	pipeReader, pipeWriter := io.Pipe()
 
 	// Register pending request
-	pending := &tcpPendingRequest{
-		responseChan: make(chan *TunnelMessage, 10),
-		pipeWriter:   pipeWriter,
-	}
+	pending := pendingRequestPool.Get().(*tcpPendingRequest)
+	// Reset fields if needed (channel is reused)
+	pending.pipeWriter = pipeWriter
 
 	ep.mu.Lock()
 	ep.pendingRequests[requestID] = pending
@@ -270,6 +278,13 @@ func (tm *TCPTunnelManager) SendRequestStream(ctx context.Context, tunnelName, e
 			delete(ep.pendingRequests, requestID)
 			ep.mu.Unlock()
 			pipeWriter.Close()
+
+			// Drain channel before putting back
+			for len(pending.responseChan) > 0 {
+				<-pending.responseChan
+			}
+			pending.pipeWriter = nil
+			pendingRequestPool.Put(pending)
 		}()
 		for {
 			select {

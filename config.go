@@ -858,7 +858,7 @@ func (c *Config) Reload(filename string) (map[string]*ListenConfig, error) {
 	}
 
 	// Log firewall rules reload
-	if newConfig.Firewalls != nil && len(newConfig.Firewalls) > 0 {
+	if len(newConfig.Firewalls) > 0 {
 		log.Printf("Firewall rules reloaded: %d rule groups", len(newConfig.Firewalls))
 		for name := range newConfig.Firewalls {
 			log.Printf("  Firewall: %s", name)

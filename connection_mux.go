@@ -137,14 +137,10 @@ func isTunnelProtocol(header []byte) bool {
 		return false
 	}
 
-	// Check if first byte looks like ASCII HTTP method
-	// HTTP methods: G(ET), P(OST/UT), H(EAD), D(ELETE), O(PTIONS), C(ONNECT), T(RACE)
+	// Check if first byte looks like ASCII HTTP method using O(1) lookup
 	firstByte := header[0]
-	httpMethods := []byte{'G', 'P', 'H', 'D', 'O', 'C', 'T'}
-	for _, m := range httpMethods {
-		if firstByte == m {
-			return false // Looks like HTTP
-		}
+	if httpMethodFirstBytes[firstByte] {
+		return false // Looks like HTTP
 	}
 
 	// Stricter check for Tunnel Protocol
@@ -155,31 +151,9 @@ func isTunnelProtocol(header []byte) bool {
 		return false
 	}
 
-	// Check if message type is valid tunnel type
+	// Check if message type is valid tunnel type using O(1) lookup
 	msgType := header[4]
-	validTypes := []byte{
-		MsgTypeRegister,
-		MsgTypeRegisterAck,
-		MsgTypeRequest,
-		MsgTypeResponse,
-		MsgTypeResponseHeader,
-		MsgTypeResponseChunk,
-		MsgTypeResponseEnd,
-		MsgTypeProxyConnect,
-		MsgTypeProxyConnectAck,
-		MsgTypeProxyData,
-		MsgTypeProxyClose,
-		MsgTypeHeartbeat,
-		MsgTypeCancel,
-	}
-
-	for _, t := range validTypes {
-		if msgType == t {
-			return true
-		}
-	}
-
-	return false
+	return validTunnelTypes[msgType]
 }
 
 // ChannelListener implements net.Listener using a channel

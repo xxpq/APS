@@ -30,12 +30,12 @@ var (
 	}
 
 	// byteSlicePool 复用 32KB byte 切片用于 I/O 操作
-	byteSlicePool = sync.Pool{
-		New: func() interface{} {
-			b := make([]byte, 32*1024)
-			return &b
-		},
-	}
+	// byteSlicePool = sync.Pool{
+	// 	New: func() interface{} {
+	// 		b := make([]byte, 32*1024)
+	// 		return &b
+	// 	},
+	// }
 
 	// counterWriterPool 复用 ByteCounterWriter
 	counterWriterPool = sync.Pool{
@@ -60,14 +60,14 @@ func putBuffer(buf *bytes.Buffer) {
 }
 
 // getByteSlice 从池中获取 byte 切片
-func getByteSlice() *[]byte {
-	return byteSlicePool.Get().(*[]byte)
-}
+// func getByteSlice() *[]byte {
+// 	return byteSlicePool.Get().(*[]byte)
+// }
 
 // putByteSlice 归还 byte 切片到池中
-func putByteSlice(b *[]byte) {
-	byteSlicePool.Put(b)
-}
+// func putByteSlice(b *[]byte) {
+// 	byteSlicePool.Put(b)
+// }
 
 // getCounterWriter 从池中获取 ByteCounterWriter
 func getCounterWriter(w io.Writer) *ByteCounterWriter {
@@ -443,7 +443,9 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if mapping != nil {
-		ctx := context.WithValue(r.Context(), "mapping", mapping)
+		type ctxKeyMapping struct{}
+
+		ctx := context.WithValue(r.Context(), ctxKeyMapping{}, mapping)
 		proxyReq = proxyReq.WithContext(ctx)
 	}
 
@@ -518,7 +520,7 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 					query.Set(key, value)
 				}
 				parsedURL.RawQuery = query.Encode()
-				targetURL = parsedURL.String()
+				// 更新 proxyReq.URL 后无需再更新 targetURL，因为后续直接使用 proxyReq.URL
 				proxyReq.URL = parsedURL
 			}
 			if fromConfig.Proxy != nil {

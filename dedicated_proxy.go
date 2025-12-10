@@ -10,7 +10,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"time"
 )
@@ -342,7 +341,7 @@ func (p *DedicatedProxy) modifyRequestBody(r *http.Request) ([]byte, error) {
 
 	// Match
 	if fromConfig.Match != "" {
-		re, err := regexp.Compile(fromConfig.Match)
+		re, err := GetOrCompileRegex(fromConfig.Match)
 		if err != nil {
 			log.Printf("[DEDICATED:%d] Invalid match regex in 'from' config: %v", p.port, err)
 			return body, nil
@@ -361,7 +360,7 @@ func (p *DedicatedProxy) modifyRequestBody(r *http.Request) ([]byte, error) {
 	if len(fromConfig.Replace) > 0 {
 		tempBody := string(body)
 		for key, value := range fromConfig.Replace {
-			re, err := regexp.Compile(key)
+			re, err := GetOrCompileRegex(key)
 			if err != nil {
 				log.Printf("[DEDICATED:%d] Invalid replace regex in 'from' config: %v", p.port, err)
 				continue
@@ -406,7 +405,7 @@ func (p *DedicatedProxy) modifyResponseBody(resp *http.Response) ([]byte, error)
 
 	// Match
 	if toConfig.Match != "" {
-		re, err := regexp.Compile(toConfig.Match)
+		re, err := GetOrCompileRegex(toConfig.Match)
 		if err != nil {
 			log.Printf("[DEDICATED:%d] Invalid match regex in 'to' config: %v", p.port, err)
 			return body, nil
@@ -425,7 +424,7 @@ func (p *DedicatedProxy) modifyResponseBody(resp *http.Response) ([]byte, error)
 	if len(toConfig.Replace) > 0 {
 		tempBody := string(body)
 		for key, value := range toConfig.Replace {
-			re, err := regexp.Compile(key)
+			re, err := GetOrCompileRegex(key)
 			if err != nil {
 				log.Printf("[DEDICATED:%d] Invalid replace regex in 'to' config: %v", p.port, err)
 				continue
