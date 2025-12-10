@@ -81,6 +81,14 @@ func (s *RawTCPServer) Stop() error {
 	return nil
 }
 
+// UpdateMappings updates the mappings for this server (for config hot reload)
+func (s *RawTCPServer) UpdateMappings(mappings []*Mapping) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.mappings = mappings
+	log.Printf("[RAW TCP] Server '%s' mappings updated (%d mappings)", s.name, len(mappings))
+}
+
 // acceptLoop accepts incoming connections
 func (s *RawTCPServer) acceptLoop() {
 	for {
@@ -147,18 +155,53 @@ func (s *RawTCPServer) handleConnection(clientConn net.Conn) {
 
 // findMapping finds a matching mapping for this TCP server
 func (s *RawTCPServer) findMapping() *Mapping {
+	// First, try to find a mapping explicitly assigned to this server
 	for _, m := range s.mappings {
-		// Check if the mapping is for this server
 		for _, serverName := range m.serverNames {
 			if serverName == s.name {
-				// Verify from URL is tcp://
 				fromURL := m.GetFromURL()
 				if strings.HasPrefix(fromURL, "tcp://") {
+					log.Printf("[RAW TCP] Found explicit mapping for server '%s': %s -> %s", s.name, fromURL, m.GetToURL())
 					return m
 				}
 			}
 		}
 	}
+
+	// If no explicit mapping, try to match by port
+	// This handles the case where mapping doesn't specify servers
+	serverPort := s.config.Port
+	for _, m := range s.mappings {
+		fromURL := m.GetFromURL()
+		if !strings.HasPrefix(fromURL, "tcp://") {
+			continue
+		}
+
+		// Parse the from URL to get the port
+		u, err := url.Parse(fromURL)
+		if err != nil {
+			continue
+		}
+
+		portStr := u.Port()
+		if portStr == "" {
+			continue
+		}
+
+		mappingPort, err := strconv.Atoi(portStr)
+		if err != nil {
+			continue
+		}
+
+		// If ports match, use this mapping
+		if mappingPort == serverPort {
+			log.Printf("[RAW TCP] Found port-based mapping for server '%s' (port %d): %s -> %s",
+				s.name, serverPort, fromURL, m.GetToURL())
+			return m
+		}
+	}
+
+	log.Printf("[RAW TCP] No matching mapping found for server '%s' (port %d)", s.name, serverPort)
 	return nil
 }
 
@@ -302,6 +345,7 @@ func (s *RawTCPServer) forwardViaTunnel(clientConn net.Conn, mapping *Mapping, t
 	defer cancel()
 
 	// Pass client IP for security audit logging on endpoint
+	log.Printf("[RAW TCP] Calling SendProxyConnect for %s:%d", targetHost, targetPort)
 	done, err := s.tunnelManager.SendProxyConnect(ctx, tunnelName, endpointName, targetHost, targetPort, useTLS, clientConn, clientAddr)
 	if err != nil {
 		log.Printf("[RAW TCP] Tunnel proxy connect failed: %v", err)
@@ -309,7 +353,7 @@ func (s *RawTCPServer) forwardViaTunnel(clientConn net.Conn, mapping *Mapping, t
 		return
 	}
 
-	log.Printf("[RAW TCP] Tunnel proxy connection established, data flow started")
+	log.Printf("[RAW TCP] Tunnel proxy connection established, waiting for data flow completion")
 
 	// Wait for the tunnel manager to signal that the connection is done
 	// The done channel will be closed when:
@@ -317,7 +361,7 @@ func (s *RawTCPServer) forwardViaTunnel(clientConn net.Conn, mapping *Mapping, t
 	// 2. The endpoint closes the connection
 	// 3. An error occurs
 	<-done
-	log.Printf("[RAW TCP] Tunnel connection closed")
+	log.Printf("[RAW TCP] Tunnel connection closed (client: %s)", clientAddr)
 }
 
 // getTunnelAndEndpoint gets the tunnel and endpoint names from mapping configuration

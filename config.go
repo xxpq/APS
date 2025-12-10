@@ -14,12 +14,23 @@ import (
 	"time"
 )
 
+// IsDebugMode 全局debug模式标志
+var IsDebugMode bool = false
+
+// DebugLog 只在debug模式下输出日志
+func DebugLog(format string, args ...interface{}) {
+	if IsDebugMode {
+		log.Printf(format, args...)
+	}
+}
+
 func init() {
 	// 初始化随机数生成器
 	// rand.Seed(time.Now().UnixNano())
 }
 
 type Config struct {
+	Debug       *bool                    `json:"debug,omitempty"` // Debug模式开关
 	Servers     map[string]*ListenConfig `json:"servers"`
 	Proxies     map[string]*ProxyConfig  `json:"proxies,omitempty"`
 	Tunnels     map[string]*TunnelConfig `json:"tunnels,omitempty"`
@@ -614,6 +625,14 @@ func LoadConfig(filename string) (*Config, error) {
 		return nil, err
 	}
 
+	// 设置全局debug模式标志
+	if config.Debug != nil && *config.Debug {
+		IsDebugMode = true
+		log.Println("[CONFIG] Debug mode enabled")
+	} else {
+		IsDebugMode = false
+	}
+
 	return &config, nil
 }
 
@@ -702,16 +721,33 @@ func processConfig(config *Config) error {
 		// 解析 server names
 		mapping.serverNames = parseStringOrArray(mapping.Servers)
 		if len(mapping.serverNames) == 0 {
-			// If no servers are specified, this mapping applies to ALL servers.
-			// This is a common use case for global rules.
-			// We will populate serverNames with all available server names.
-			for name := range config.Servers {
-				mapping.serverNames = append(mapping.serverNames, name)
+			// For TCP mappings (tcp://), don't assign to all servers
+			// They will be matched by port at runtime
+			isTCPMapping := false
+			if len(fromConfig.URLs) > 0 {
+				firstURL := fromConfig.URLs[0]
+				if strings.HasPrefix(firstURL, "tcp://") || strings.HasPrefix(firstURL, "tcps://") {
+					isTCPMapping = true
+				}
 			}
-			if len(mapping.serverNames) == 0 {
-				log.Printf("Warning: mapping %d skipped - 'servers' is not specified and no servers are defined", i+1)
-				continue
+
+			if !isTCPMapping {
+				// For HTTP/HTTPS mappings, if no servers are specified, this mapping applies to ALL servers.
+				// This is a common use case for global rules.
+				for name := range config.Servers {
+					// Only assign to non-rawTCP servers
+					if serverConfig, ok := config.Servers[name]; ok {
+						if !serverConfig.RawTCP {
+							mapping.serverNames = append(mapping.serverNames, name)
+						}
+					}
+				}
+				if len(mapping.serverNames) == 0 {
+					log.Printf("Warning: mapping %d skipped - 'servers' is not specified and no HTTP/HTTPS servers are defined", i+1)
+					continue
+				}
 			}
+			// For TCP mappings, leave serverNames empty - they will be matched by port at runtime
 		} else {
 			// 验证 server names 是否存在
 			for _, name := range mapping.serverNames {
@@ -788,7 +824,17 @@ func (c *Config) Reload(filename string) (map[string]*ListenConfig, error) {
 	c.Scripting = newConfig.Scripting
 	c.Mappings = newConfig.Mappings
 	c.Auth = newConfig.Auth
+	c.Debug = newConfig.Debug
 	c.mu.Unlock()
+
+	// 更新全局debug模式标志
+	if newConfig.Debug != nil && *newConfig.Debug {
+		IsDebugMode = true
+		log.Println("[CONFIG] Debug mode enabled")
+	} else {
+		IsDebugMode = false
+		log.Println("[CONFIG] Debug mode disabled")
+	}
 
 	log.Printf("Configuration reloaded: %d valid mapping rules", len(newConfig.Mappings))
 	for _, mapping := range c.Mappings {

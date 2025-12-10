@@ -1,15 +1,50 @@
 {
   "servers": {
-    "default": {
+    "admin": {
       "port": 8090,
       "public": true,
       "panel": true
+    },
+    "default": {
+      "port": 80,
+      "public": true,
+      "panel": true
+    },
+    "mstsc_sucdri_my_pc": {
+      "port": 3389,
+      "rawTCP": true,
+      "public": true
+    },
+    "mstsc_sucdri_ssh": {
+      "port": 2222,
+      "rawTCP": true,
+      "public": true
+    },
+    "mstsc_sucdri_windows": {
+      "port": 3690,
+      "rawTCP": true,
+      "public": true
+    },
+    "ssl": {
+      "port": 443,
+      "cert": "acme",
+      "public": true,
+      "panel": true
+    },
+    "sucdri_esxi": {
+      "port": 5000,
+      "rawTCP": true,
+      "public": true
     }
   },
   "tunnels": {
     "dev": {
       "servers": ["default"],
       "password": "test"
+    },
+    "sucdri": {
+      "servers": ["default"],
+      "password": "sucdri"
     }
   },
   "auth": {
@@ -20,7 +55,105 @@
       }
     }
   },
+  "static_cache": {
+    "enabled": true
+  },
   "mappings": [
+    {
+      "from": ["http://a.l-l.cn/*", "https://a.l-l.cn/*"],
+      "to": "http://ip.sb/*"
+    },
+    {
+      "from": ["http://shkc.p-q.co/*", "https://shkc.p-q.co/*"],
+      "to": "http://127.0.0.1:7788/*"
+    },
+    {
+      "from": [
+        "http://www.gysubway-video.top/*",
+        "https://www.gysubway-video.top/*"
+      ],
+      "to": "http://127.0.0.1:8080/*"
+    },
+    {
+      "from": ["https://bt.jy.sucdri.p-q.co/*"],
+      "to": "http://127.0.0.1:13682/*"
+    },
+    {
+      "from": "https://git.sucdri.p-q.co/*",
+      "to": "http://10.1.105.222:30010/*",
+      "via": {
+        "endpoints": "cjy_server"
+      }
+    },
+    {
+      "from": "tcp://0.0.0.0:2222",
+      "to": "tcp://10.6.10.58:22",
+      "via": {
+        "endpoints": "cjy_server"
+      },
+      "servers": ["mstsc_sucdri_ssh"]
+    },
+    {
+      "from": "tcp://0.0.0.0:3690",
+      "to": "tcp://10.1.105.222:3389",
+      "via": {
+        "endpoints": "my_pc"
+      }
+    },
+    {
+      "from": "tcp://0.0.0.0:5000",
+      "to": "tcp://10.1.105.33:443",
+      "via": {
+        "endpoints": "cjy_server"
+      }
+    },
+    {
+      "from": ["https://vps.sucdri.p-q.co/*"],
+      "to": {
+        "insecure": true,
+        "url": "https://10.1.105.33/*"
+      },
+      "via": {
+        "endpoints": "cjy_server"
+      }
+    },
+    {
+      "from": "tcp://0.0.0.0:3389",
+      "to": "tcp://127.0.0.1:3389",
+      "via": {
+        "endpoints": "my_pc"
+      },
+      "servers": ["mstsc_sucdri_my_pc"]
+    },
+    {
+      "from": ["https://test.jy.sucdri.p-q.co/*"],
+      "to": "https://bt.jy.sucdri.p-q.co/*",
+      "via": {
+        "endpoints": "my_pc"
+      }
+    },
+    {
+      "from": [
+        "http://sucdri.p-q.co/geoserver/*",
+        "https://sucdri.p-q.co/geoserver/*"
+      ],
+      "to": {
+        "headers": {
+          "access-control-allow-origin": "http://sucdri.p-q.co",
+          "content-security-policy": null,
+          "cross-origin-opener-policy": null,
+          "cross-origin-resource-policy": null,
+          "x-frame-options": null
+        },
+        "replace": {
+          "http://10.1.24.223:8089": "/"
+        },
+        "url": "http://10.1.24.223:8089/geoserver/*"
+      },
+      "via": {
+        "endpoints": "my_pc"
+      }
+    },
     {
       "from": {
         "proxy": "socks5://127.0.0.1:7890",
@@ -35,13 +168,12 @@
           "x-frame-options": null
         },
         "replace": {
-          "https://pairs.lv": "http://ekpay.top:8090",
           "https://api.pairs.lv": "http://api.ekpay.top:8090"
         },
         "url": "http://10.1.24.223:8089/geoserver/*"
       },
       "via": {
-        "endpoints": "test_dev"
+        "endpoints": "sucdri"
       }
     }
   ]

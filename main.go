@@ -8,8 +8,11 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
+	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -73,8 +76,27 @@ func (sm *ServerManager) Start(name string, serverConfig *ListenConfig, isACMEEn
 	serverMappings := make(map[string][]*Mapping)
 	for i := range sm.config.Mappings {
 		mapping := &sm.config.Mappings[i]
+		// First, add mappings that explicitly specify this server
 		for _, serverName := range mapping.serverNames {
 			serverMappings[serverName] = append(serverMappings[serverName], mapping)
+		}
+
+		// For rawTCP servers, also match by port if no explicit server assignment
+		if serverConfig.RawTCP && len(mapping.serverNames) == 0 {
+			fromURL := mapping.GetFromURL()
+			if strings.HasPrefix(fromURL, "tcp://") {
+				// Parse the from URL to get the port
+				if u, err := url.Parse(fromURL); err == nil {
+					if portStr := u.Port(); portStr != "" {
+						if mappingPort, err := strconv.Atoi(portStr); err == nil {
+							if mappingPort == serverConfig.Port {
+								serverMappings[name] = append(serverMappings[name], mapping)
+								log.Printf("[RAW TCP] Auto-assigned mapping %s to server '%s' (port %d)", fromURL, name, serverConfig.Port)
+							}
+						}
+					}
+				}
+			}
 		}
 	}
 
@@ -87,7 +109,7 @@ func (sm *ServerManager) Start(name string, serverConfig *ListenConfig, isACMEEn
 			return
 		}
 		sm.tcpServers[name] = tcpServer
-		log.Printf("[RAW TCP] Server '%s' started on port %d", name, serverConfig.Port)
+		log.Printf("[RAW TCP] Server '%s' started on port %d with %d mappings", name, serverConfig.Port, len(serverMappings[name]))
 		return
 	}
 
@@ -140,6 +162,69 @@ func (sm *ServerManager) Stop(name string) {
 		}
 		delete(sm.tcpServers, name)
 		log.Printf("TCP Server '%s' stopped.", name)
+	}
+}
+
+// UpdateRawTCPMappings updates mappings for all rawTCP servers (for config hot reload)
+func (sm *ServerManager) UpdateRawTCPMappings() {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	// Re-calculate mappings for all servers using the same logic as server startup
+	serverMappings := make(map[string][]*Mapping)
+
+	// First, collect mappings that explicitly specify servers
+	for i := range sm.config.Mappings {
+		mapping := &sm.config.Mappings[i]
+		for _, serverName := range mapping.serverNames {
+			serverMappings[serverName] = append(serverMappings[serverName], mapping)
+		}
+	}
+
+	// Then, for each rawTCP server, also match TCP mappings by port
+	for name, tcpServer := range sm.tcpServers {
+		serverPort := tcpServer.config.Port
+
+		// Look for TCP mappings without explicit server assignment that match this port
+		for i := range sm.config.Mappings {
+			mapping := &sm.config.Mappings[i]
+
+			// Skip if already assigned via serverNames
+			if len(mapping.serverNames) > 0 {
+				continue
+			}
+
+			fromURL := mapping.GetFromURL()
+			if !strings.HasPrefix(fromURL, "tcp://") {
+				continue
+			}
+
+			// Parse the from URL to get the port
+			u, err := url.Parse(fromURL)
+			if err != nil {
+				continue
+			}
+
+			portStr := u.Port()
+			if portStr == "" {
+				continue
+			}
+
+			mappingPort, err := strconv.Atoi(portStr)
+			if err != nil {
+				continue
+			}
+
+			// If ports match, add this mapping
+			if mappingPort == serverPort {
+				serverMappings[name] = append(serverMappings[name], mapping)
+			}
+		}
+	}
+
+	// Update each rawTCP server's mappings
+	for name, tcpServer := range sm.tcpServers {
+		tcpServer.UpdateMappings(serverMappings[name])
 	}
 }
 

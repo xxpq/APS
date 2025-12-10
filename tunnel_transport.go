@@ -63,7 +63,7 @@ func (t *TunnelRoundTripper) roundTripViaTunnel(req *http.Request, mapping *Mapp
 	}
 
 	// Send the request via the tunnel manager's gRPC stream
-	log.Printf("[TUNNEL] Sending request for %s via tunnel '%s' to endpoint '%s'", req.URL.String(), tunnelName, endpointName)
+	DebugLog("[TUNNEL] Sending request for %s via tunnel '%s' to endpoint '%s'", req.URL.String(), tunnelName, endpointName)
 	bodyStream, headerBytes, err := t.tunnelManager.SendRequestStream(req.Context(), tunnelName, endpointName, reqPayload)
 	if err != nil {
 		log.Printf("[TUNNEL] Request via tunnel failed: %v. Falling back to direct connection.", err)

@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"io"
-	"log"
 	"net"
 	"sync"
 	"time"
@@ -60,7 +59,7 @@ func (htm *HybridTunnelManager) UpdateTunnels(newConfig *Config) {
 	htm.mu.Lock()
 	defer htm.mu.Unlock()
 
-	log.Println("[TUNNEL] Updating tunnels...")
+	DebugLog("[TUNNEL] Updating tunnels...")
 	htm.config = newConfig
 }
 
@@ -123,7 +122,7 @@ func (htm *HybridTunnelManager) GetPoolStats() map[string]interface{} {
 
 // Cleanup 清理资源
 func (htm *HybridTunnelManager) Cleanup() {
-	log.Println("[TUNNEL] Cleaning up tunnel manager")
+	DebugLog("[TUNNEL] Cleaning up tunnel manager")
 
 	if htm.tcpManager != nil {
 		htm.tcpManager.Stop()

@@ -1,103 +1,177 @@
 {
   "servers": {
+    "admin": {
+      "port": 8090,
+      "public": true,
+      "panel": true
+    },
     "default": {
-      "port": 3000,
-      "cert": "auto",
-      "auth": {
-        "groups": ["admins"]
-      },
-      "dump": "default_server.har"
+      "port": 80,
+      "public": true,
+      "panel": true
     },
-    "api_server": {
-      "port": 8081,
-      "cert": "auto"
+    "mstsc_sucdri_my_pc": {
+      "port": 3389,
+      "rawTCP": true,
+      "public": true
     },
-    "local_dev": {
-      "port": 8083
+    "mstsc_sucdri_ssh": {
+      "port": 2222,
+      "rawTCP": true,
+      "public": true
     },
-    "openai_specific": {
-      "port": 8088,
-      "auth": {
-        "users": ["dev_user"]
-      }
+    "mstsc_sucdri_windows": {
+      "port": 3690,
+      "rawTCP": true,
+      "public": true
+    },
+    "ssl": {
+      "port": 443,
+      "cert": "acme",
+      "public": true,
+      "panel": true
+    },
+    "sucdri_esxi": {
+      "port": 5000,
+      "rawTCP": true,
+      "public": true
     }
   },
-  "proxies": {
-    "us_proxies": [
-      "http://proxy1.example.com:8080",
-      "http://proxy2.example.com:8080"
-    ],
-    "eu_proxies": [
-      "http://eu-proxy1.example.com:9090",
-      "http://eu-proxy2.example.com:9090"
-    ]
+  "tunnels": {
+    "dev": {
+      "servers": ["default"],
+      "password": "test"
+    },
+    "sucdri": {
+      "servers": ["default"],
+      "password": "sucdri"
+    }
   },
   "auth": {
     "users": {
-      "admin_user": {
-        "password": "admin_password",
-        "groups": ["admins"]
-      },
-      "dev_user": {
-        "password": "dev_password",
-        "dump": "dev_user.har"
-      },
-      "guest_user": {
-        "password": "guest_password",
-        "groups": ["guests"]
-      }
-    },
-    "groups": {
-      "admins": {
-        "users": ["admin_user"],
-        "dump": "admins_group.har"
-      },
-      "guests": {
-        "users": ["guest_user"]
+      "admin": {
+        "password": "admin",
+        "admin": true
       }
     }
   },
+  "static_cache": {
+    "enabled": true
+  },
   "mappings": [
     {
-      "comment": "示例1: 简单的 API 转发，需要 admin 组权限",
-      "servers": "api_server",
-      "from": "https://api.example.com/v1*",
-      "to": "https://backend.example.com/api/v1*",
-      "proxy": "us_proxies",
-      "auth": {
-        "groups": ["admins"]
-      },
-      "dump": "api_example.har"
+      "from": ["http://a.l-l.cn/*", "https://a.l-l.cn/*"],
+      "to": "http://ip.sb/*"
     },
     {
-      "comment": "示例2: 绑定到多个监听服务，dev_user 或 guest 组有权限",
-      "servers": ["default", "api_server"],
-      "from": "https://multi.example.com/*",
-      "to": "https://backend.multi.com/*",
-      "proxy": ["us_proxies", "eu_proxies"],
-      "auth": {
-        "users": ["dev_user"],
-        "groups": ["guests"]
+      "from": ["http://shkc.p-q.co/*", "https://shkc.p-q.co/*"],
+      "to": "http://127.0.0.1:7788/*"
+    },
+    {
+      "from": [
+        "http://www.gysubway-video.top/*",
+        "https://www.gysubway-video.top/*"
+      ],
+      "to": "http://127.0.0.1:8080/*"
+    },
+    {
+      "from": ["https://bt.jy.sucdri.p-q.co/*"],
+      "to": "http://127.0.0.1:13682/*"
+    },
+    {
+      "from": "https://git.sucdri.p-q.co/*",
+      "to": "http://10.1.105.222:30010/*",
+      "via": {
+        "endpoints": "cjy_server"
       }
     },
     {
-      "comment": "示例3: 本地静态文件服务，无需认证",
-      "servers": "local_dev",
-      "from": "/static/*",
-      "local": "./static/*"
+      "from": "tcp://0.0.0.0:5000",
+      "to": "tcp://10.1.105.33:443",
+      "via": {
+        "endpoints": "cjy_server"
+      }
     },
     {
-      "comment": "示例4: OpenAI 请求转发，只有 dev_user 有权限",
-      "servers": "openai_specific",
-      "from": {
-        "url": "https://api.openai.com/v1*",
-        "headers": {
-          "Authorization": "Bearer sk-your-token"
-        }
+      "from": "tcp://0.0.0.0:2222",
+      "to": "tcp://10.6.10.58:22",
+      "via": {
+        "endpoints": "cjy_server"
+      }
+    },
+    {
+      "from": "tcp://0.0.0.0:3690",
+      "to": "tcp://10.1.105.222:3389",
+      "via": {
+        "endpoints": "cjy_server"
+      }
+    },
+    {
+      "from": ["https://vps.sucdri.p-q.co/*"],
+      "to": {
+        "insecure": true,
+        "url": "https://10.1.105.33/*"
       },
-      "to": "https://p-q.p-q.co/v1*",
-      "auth": {
-        "users": ["dev_user"]
+      "via": {
+        "endpoints": "cjy_server"
+      }
+    },
+    {
+      "from": "tcp://0.0.0.0:3389",
+      "to": "tcp://127.0.0.1:3389",
+      "via": {
+        "endpoints": "my_pc"
+      }
+    },
+    {
+      "from": ["https://test.jy.sucdri.p-q.co/*"],
+      "to": "https://bt.jy.sucdri.p-q.co/*",
+      "via": {
+        "endpoints": "my_pc"
+      }
+    },
+    {
+      "from": [
+        "http://sucdri.p-q.co/geoserver/*",
+        "https://sucdri.p-q.co/geoserver/*"
+      ],
+      "to": {
+        "headers": {
+          "access-control-allow-origin": "http://sucdri.p-q.co",
+          "content-security-policy": null,
+          "cross-origin-opener-policy": null,
+          "cross-origin-resource-policy": null,
+          "x-frame-options": null
+        },
+        "replace": {
+          "http://10.1.24.223:8089": "/"
+        },
+        "url": "http://10.1.24.223:8089/geoserver/*"
+      },
+      "via": {
+        "endpoints": "my_pc"
+      }
+    },
+    {
+      "from": {
+        "proxy": "socks5://127.0.0.1:7890",
+        "url": "http://8.159.132.172:8090/geoserver/*"
+      },
+      "to": {
+        "headers": {
+          "access-control-allow-origin": "http://10.1.24.223:8083",
+          "content-security-policy": null,
+          "cross-origin-opener-policy": null,
+          "cross-origin-resource-policy": null,
+          "x-frame-options": null
+        },
+        "replace": {
+          "https://api.pairs.lv": "http://api.ekpay.top:8090"
+        },
+        "url": "http://10.1.24.223:8089/geoserver/*"
+      },
+      "via": {
+        "endpoints": "sucdri"
       }
     }
   ]

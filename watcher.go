@@ -54,7 +54,7 @@ func (w *ConfigWatcher) watch() {
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 
-	log.Printf("Config file watcher started for: %s", w.filename)
+	DebugLog("Config file watcher started for: %s", w.filename)
 
 	for {
 		select {
@@ -73,11 +73,11 @@ func (w *ConfigWatcher) watch() {
 				if err != nil {
 					log.Printf("Error reloading config: %v", err)
 				} else {
-					log.Printf("Config reloaded successfully, synchronizing servers...")
-					
+					DebugLog("Config reloaded successfully, synchronizing servers...")
+
 					// Update tunnel manager with new tunnel configurations
 					if w.serverManager != nil && w.serverManager.tunnelManager != nil {
-						log.Printf("Notifying TunnelManager of configuration changes...")
+						DebugLog("Notifying TunnelManager of configuration changes...")
 						w.serverManager.tunnelManager.UpdateTunnels(w.config)
 					}
 
@@ -121,7 +121,7 @@ func (w *ConfigWatcher) watch() {
 			}
 
 		case <-w.stopChan:
-			log.Printf("Config file watcher stopped")
+			DebugLog("Config file watcher stopped")
 			return
 		}
 	}
@@ -153,4 +153,8 @@ func (w *ConfigWatcher) syncServers(oldServers, newServers map[string]*ListenCon
 			}
 		}
 	}
+
+	// Update mappings for all rawTCP servers (hot reload without restart)
+	log.Printf("Updating mappings for all rawTCP servers...")
+	w.serverManager.UpdateRawTCPMappings()
 }

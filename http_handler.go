@@ -537,7 +537,7 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		tunnelName = foundTunnel
 		endpointName = randomEndpoint
 		tunnelKey = tunnelName // for stats
-		log.Printf("[TUNNEL] Using user-level endpoint '%s' via tunnel '%s'", endpointName, tunnelName)
+		DebugLog("[TUNNEL] Using user-level endpoint '%s' via tunnel '%s'", endpointName, tunnelName)
 
 	} else if len(userTunnelNames) > 0 {
 		// Priority 2: 用户级别的tunnels配置
@@ -552,7 +552,7 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		tunnelName = foundTunnel
 		endpointName = foundEndpoint
 		tunnelKey = tunnelName // for stats
-		log.Printf("[TUNNEL] Using user-level tunnel '%s' to endpoint '%s'", tunnelName, endpointName)
+		DebugLog("[TUNNEL] Using user-level tunnel '%s' to endpoint '%s'", tunnelName, endpointName)
 
 	} else if len(serverEndpointNames) > 0 {
 		// Priority 3: server级别的endpoints配置
@@ -569,7 +569,7 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		tunnelName = foundTunnel
 		endpointName = randomEndpoint
 		tunnelKey = tunnelName // for stats
-		log.Printf("[TUNNEL] Using server-level endpoint '%s' via tunnel '%s'", endpointName, tunnelName)
+		DebugLog("[TUNNEL] Using server-level endpoint '%s' via tunnel '%s'", endpointName, tunnelName)
 
 	} else if len(serverTunnelNames) > 0 {
 		// Priority 4: server级别的tunnels配置
@@ -584,7 +584,7 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		tunnelName = foundTunnel
 		endpointName = foundEndpoint
 		tunnelKey = tunnelName // for stats
-		log.Printf("[TUNNEL] Using server-level tunnel '%s' to endpoint '%s'", tunnelName, endpointName)
+		DebugLog("[TUNNEL] Using server-level tunnel '%s' to endpoint '%s'", tunnelName, endpointName)
 
 	} else if mapping != nil && len(mapping.endpointNames) > 0 {
 		// Priority 5: mapping级别的endpoints配置（fallback）
@@ -631,7 +631,7 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		log.Printf("[TUNNEL] Forwarding request for %s via tunnel '%s' to endpoint '%s'", originalURL, tunnelName, endpointName)
+		DebugLog("[TUNNEL] Forwarding request for %s via tunnel '%s' to endpoint '%s'", originalURL, tunnelName, endpointName)
 
 		reqPayload := &RequestPayload{
 			URL:  proxyReq.URL.String(),

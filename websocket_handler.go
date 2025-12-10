@@ -34,7 +34,7 @@ func (p *MapRemoteProxy) handleWebSocket(w http.ResponseWriter, r *http.Request)
 	)
 
 	originalURL := p.buildOriginalURL(r)
-	log.Printf("[WS] Handling WebSocket request for %s", originalURL)
+	DebugLog("[WS] Handling WebSocket request for %s", originalURL)
 
 	// Defer the consolidated stats recording
 	defer func() {
@@ -103,7 +103,7 @@ func (p *MapRemoteProxy) handleWebSocket(w http.ResponseWriter, r *http.Request)
 	}
 	defer clientConn.Close()
 
-	log.Printf("[WS] Client connection upgraded for %s", originalURL)
+	DebugLog("[WS] Client connection upgraded for %s", originalURL)
 
 	// Check if we need to route through tunnel
 	var tunnelName, endpointName string
@@ -125,7 +125,7 @@ func (p *MapRemoteProxy) handleWebSocket(w http.ResponseWriter, r *http.Request)
 		tunnelName = foundTunnel
 		endpointName = randomEndpoint
 		tunnelKey = tunnelName
-		log.Printf("[WS] Will route WebSocket through tunnel '%s' to endpoint '%s'", tunnelName, endpointName)
+		DebugLog("[WS] Will route WebSocket through tunnel '%s' to endpoint '%s'", tunnelName, endpointName)
 	} else if mapping != nil && len(mapping.tunnelNames) > 0 {
 		isTunnelRequest = true
 		foundTunnel, foundEndpoint, err := p.tunnelManager.GetRandomEndpointFromTunnels(mapping.tunnelNames)
@@ -137,14 +137,14 @@ func (p *MapRemoteProxy) handleWebSocket(w http.ResponseWriter, r *http.Request)
 		tunnelName = foundTunnel
 		endpointName = foundEndpoint
 		tunnelKey = tunnelName
-		log.Printf("[WS] Will route WebSocket through tunnel '%s' to endpoint '%s'", tunnelName, endpointName)
+		DebugLog("[WS] Will route WebSocket through tunnel '%s' to endpoint '%s'", tunnelName, endpointName)
 	}
 
 	var serverConn *websocket.Conn
 
 	if isTunnelRequest {
 		// Route WebSocket through tunnel using TCP proxy
-		log.Printf("[WS] Routing WebSocket to %s through tunnel", targetWsURL.String())
+		DebugLog("[WS] Routing WebSocket to %s through tunnel", targetWsURL.String())
 
 		// Determine host and port
 		host := targetWsURL.Hostname()
@@ -180,7 +180,7 @@ func (p *MapRemoteProxy) handleWebSocket(w http.ResponseWriter, r *http.Request)
 			return
 		}
 
-		log.Printf("[WS] Proxy connection established through tunnel to %s:%d (APS handles TLS: %v)", host, port, useTLS)
+		DebugLog("[WS] Proxy connection established through tunnel to %s:%d (APS handles TLS: %v)", host, port, useTLS)
 
 		// Now we need to perform WebSocket handshake over the proxy connection
 		// Build the WebSocket handshake request
@@ -231,7 +231,7 @@ func (p *MapRemoteProxy) handleWebSocket(w http.ResponseWriter, r *http.Request)
 				InsecureSkipVerify: insecureMode,
 				ServerName:         serverName,
 			}
-			log.Printf("[WS] TLS config: ServerName=%s, InsecureSkipVerify=%v (original: %s, target: %s)",
+			DebugLog("[WS] TLS config: ServerName=%s, InsecureSkipVerify=%v (original: %s, target: %s)",
 				serverName, insecureMode, r.Host, host)
 		}
 
@@ -256,7 +256,7 @@ func (p *MapRemoteProxy) handleWebSocket(w http.ResponseWriter, r *http.Request)
 		}
 		serverHeader.Set("Origin", targetOrigin)
 
-		log.Printf("[WS] Dialing target with URL: %s, Origin: %s (original Host: %s)", targetWsURL.String(), targetOrigin, r.Host)
+		DebugLog("[WS] Dialing target with URL: %s, Origin: %s (original Host: %s)", targetWsURL.String(), targetOrigin, r.Host)
 
 		serverConn, _, err = dialer.Dial(targetWsURL.String(), serverHeader)
 		if err != nil {
@@ -266,7 +266,7 @@ func (p *MapRemoteProxy) handleWebSocket(w http.ResponseWriter, r *http.Request)
 			return
 		}
 
-		log.Printf("[WS] WebSocket connection established through tunnel to %s", targetWsURL.String())
+		DebugLog("[WS] WebSocket connection established through tunnel to %s", targetWsURL.String())
 	} else {
 		// Direct connection (original behavior)
 		serverHeader := http.Header{}
@@ -292,7 +292,7 @@ func (p *MapRemoteProxy) handleWebSocket(w http.ResponseWriter, r *http.Request)
 	}
 	defer serverConn.Close()
 
-	log.Printf("[WS] Connection established to backend %s", targetWsURL.String())
+	DebugLog("[WS] Connection established to backend %s", targetWsURL.String())
 
 	var wsConfig *WebSocketConfig
 	if mapping != nil {
@@ -328,7 +328,7 @@ func (p *MapRemoteProxy) handleWebSocket(w http.ResponseWriter, r *http.Request)
 	}()
 
 	wg.Wait()
-	log.Printf("[WS] Connection closed for %s", originalURL)
+	DebugLog("[WS] Connection closed for %s", originalURL)
 }
 
 // proxyWebSocketMessages reads messages from the source, processes them, and writes to the destination.
