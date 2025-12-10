@@ -4,30 +4,46 @@ import (
 	"crypto/md5"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
+
+	"github.com/andybalholm/brotli"
 )
 
 // CacheEntry 缓存条目，包含响应头和body
 type CacheEntry struct {
-	Headers    map[string][]string `json:"headers"`
-	StatusCode int                 `json:"status_code"`
-	Body       []byte              `json:"body"`
+	Headers      map[string][]string `json:"headers"`
+	StatusCode   int                 `json:"status_code"`
+	Body         []byte              `json:"body"`
+	IsCompressed bool                `json:"is_compressed,omitempty"` // body是否已br压缩
+	ETag         string              `json:"etag,omitempty"`          // ETag缓存标识
+	LastModified string              `json:"last_modified,omitempty"` // 最后修改时间
 }
 
 // StaticCacheManager 管理静态文件缓存
 type StaticCacheManager struct {
-	cacheDir   string
-	ttl        time.Duration
-	extensions map[string]bool
-	mu         sync.RWMutex
-	enabled    bool
-	stopChan   chan struct{}
+	cacheDir      string
+	ttl           time.Duration
+	extensions    map[string]bool
+	mu            sync.RWMutex
+	enabled       bool
+	stopChan      chan struct{}
+	memCache      sync.Map // 内存热缓存: URL -> *memCacheEntry
+	memEntryCount int64    // 当前内存缓存条目数（原子操作）
+	maxMemEntries int      // 内存缓存最大条目数
+}
+
+// memCacheEntry 内存缓存条目（包含过期时间）
+type memCacheEntry struct {
+	entry     *CacheEntry
+	expiresAt time.Time
 }
 
 // 支持缓存的静态文件扩展名
@@ -48,7 +64,7 @@ func NewStaticCacheManager(config *StaticCacheConfig) *StaticCacheManager {
 
 	cacheDir := config.CacheDir
 	if cacheDir == "" {
-		cacheDir = "./cache"
+		cacheDir = ".cache"
 	}
 
 	ttl := time.Duration(config.TTL) * time.Second
@@ -63,17 +79,32 @@ func NewStaticCacheManager(config *StaticCacheConfig) *StaticCacheManager {
 	}
 
 	// 构建扩展名映射
+	// 如果配置了 FileType，使用配置的；否则使用默认值
 	extensions := make(map[string]bool)
-	for _, ext := range defaultCacheExtensions {
-		extensions["."+ext] = true
+	var extList []string
+	if len(config.FileType) > 0 {
+		extList = config.FileType
+		log.Printf("[CACHE] Using custom file types from config: %v", extList)
+	} else {
+		extList = defaultCacheExtensions
+		log.Printf("[CACHE] Using default file types (%d extensions)", len(extList))
+	}
+	for _, ext := range extList {
+		// 确保扩展名以点开头
+		if !strings.HasPrefix(ext, ".") {
+			extensions["."+ext] = true
+		} else {
+			extensions[ext] = true
+		}
 	}
 
 	manager := &StaticCacheManager{
-		cacheDir:   cacheDir,
-		ttl:        ttl,
-		extensions: extensions,
-		enabled:    true,
-		stopChan:   make(chan struct{}),
+		cacheDir:      cacheDir,
+		ttl:           ttl,
+		extensions:    extensions,
+		enabled:       true,
+		stopChan:      make(chan struct{}),
+		maxMemEntries: 1000, // 默认最多 1000 个内存缓存条目
 	}
 
 	// 启动定期清理协程
@@ -108,12 +139,24 @@ func (m *StaticCacheManager) GetCachePath(cacheKey string) string {
 	return filepath.Join(m.cacheDir, cacheKey)
 }
 
-// Get 获取缓存内容
+// Get 获取缓存内容（优先从内存热缓存获取）
 func (m *StaticCacheManager) Get(fullURL string) (*CacheEntry, bool) {
 	if !m.enabled {
 		return nil, false
 	}
 
+	// 优先检查内存热缓存
+	if cached, ok := m.memCache.Load(fullURL); ok {
+		memEntry := cached.(*memCacheEntry)
+		if time.Now().Before(memEntry.expiresAt) {
+			return memEntry.entry, true
+		}
+		// 过期则从内存中删除
+		m.memCache.Delete(fullURL)
+		atomic.AddInt64(&m.memEntryCount, -1)
+	}
+
+	// 内存未命中，从磁盘读取
 	cacheKey := m.GetCacheKey(fullURL)
 	cachePath := m.GetCachePath(cacheKey)
 
@@ -145,43 +188,137 @@ func (m *StaticCacheManager) Get(fullURL string) (*CacheEntry, bool) {
 		return nil, false
 	}
 
-	log.Printf("[CACHE] HIT: %s", fullURL)
+	// 磁盘命中后写入内存热缓存
+	m.addToMemCache(fullURL, &entry)
+
 	return &entry, true
 }
 
-// Set 保存缓存内容
+// Set 保存缓存内容（同时写入内存和磁盘，异步Brotli压缩）
 func (m *StaticCacheManager) Set(fullURL string, headers http.Header, statusCode int, body []byte) error {
 	if !m.enabled {
 		return nil
 	}
 
-	cacheKey := m.GetCacheKey(fullURL)
-	cachePath := m.GetCachePath(cacheKey)
+	// 生成 ETag (基于内容的MD5哈希)
+	hash := md5.Sum(body)
+	etag := fmt.Sprintf(`"%s"`, hex.EncodeToString(hash[:]))
 
-	// 创建缓存条目
-	entry := CacheEntry{
-		Headers:    headers,
-		StatusCode: statusCode,
-		Body:       body,
+	// 生成 Last-Modified
+	lastModified := time.Now().UTC().Format(http.TimeFormat)
+
+	// 创建未压缩的缓存条目（立即写入内存供即时使用）
+	uncompressedEntry := &CacheEntry{
+		Headers:      headers,
+		StatusCode:   statusCode,
+		Body:         body,
+		IsCompressed: false,
+		ETag:         etag,
+		LastModified: lastModified,
 	}
 
-	// 序列化
-	data, err := json.Marshal(entry)
-	if err != nil {
-		log.Printf("[CACHE] Failed to marshal cache entry: %v", err)
-		return err
-	}
+	// 立即写入内存热缓存（未压缩版本，供当前请求后续使用）
+	m.addToMemCache(fullURL, uncompressedEntry)
 
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	// 异步进行Brotli压缩并写入磁盘
+	go func() {
+		originalSize := len(body)
 
-	if err := os.WriteFile(cachePath, data, 0644); err != nil {
-		log.Printf("[CACHE] Failed to write cache file %s: %v", cachePath, err)
-		return err
-	}
+		// Brotli 压缩
+		compressedBody, err := compressWithBrotli(body)
+		if err != nil {
+			log.Printf("[CACHE] Failed to compress with brotli: %v", err)
+			compressedBody = body // 压缩失败使用原始数据
+		}
 
-	log.Printf("[CACHE] STORED: %s (%d bytes)", fullURL, len(body))
+		// 判断压缩是否有效（压缩后至少节省10%空间）
+		useCompression := err == nil && len(compressedBody) < originalSize*9/10
+
+		// 创建最终缓存条目
+		entry := &CacheEntry{
+			Headers:      headers,
+			StatusCode:   statusCode,
+			ETag:         etag,
+			LastModified: lastModified,
+		}
+
+		if useCompression {
+			entry.Body = compressedBody
+			entry.IsCompressed = true
+			log.Printf("[CACHE] Compressed: %s (%d -> %d bytes, %.1f%%)",
+				fullURL, originalSize, len(compressedBody),
+				float64(len(compressedBody))/float64(originalSize)*100)
+		} else {
+			entry.Body = body
+			entry.IsCompressed = false
+		}
+
+		// 更新内存热缓存为压缩版本
+		m.addToMemCache(fullURL, entry)
+
+		// 写入磁盘
+		cacheKey := m.GetCacheKey(fullURL)
+		cachePath := m.GetCachePath(cacheKey)
+
+		data, err := json.Marshal(entry)
+		if err != nil {
+			log.Printf("[CACHE] Failed to marshal cache entry: %v", err)
+			return
+		}
+
+		m.mu.Lock()
+		defer m.mu.Unlock()
+
+		if err := os.WriteFile(cachePath, data, 0644); err != nil {
+			log.Printf("[CACHE] Failed to write cache file %s: %v", cachePath, err)
+			return
+		}
+
+		log.Printf("[CACHE] STORED: %s (%d bytes, compressed=%v)", fullURL, len(entry.Body), entry.IsCompressed)
+	}()
+
 	return nil
+}
+
+// compressWithBrotli 使用Brotli压缩数据
+func compressWithBrotli(data []byte) ([]byte, error) {
+	buf := getBuffer()
+	defer putBuffer(buf)
+
+	writer := brotli.NewWriterLevel(buf, brotli.DefaultCompression)
+	if _, err := writer.Write(data); err != nil {
+		writer.Close()
+		return nil, err
+	}
+	if err := writer.Close(); err != nil {
+		return nil, err
+	}
+
+	// 复制结果（因为buffer会被归还到池中）
+	result := make([]byte, buf.Len())
+	copy(result, buf.Bytes())
+	return result, nil
+}
+
+// addToMemCache 添加条目到内存热缓存
+func (m *StaticCacheManager) addToMemCache(fullURL string, entry *CacheEntry) {
+	// 检查是否超过最大条目数限制
+	currentCount := atomic.LoadInt64(&m.memEntryCount)
+	if currentCount >= int64(m.maxMemEntries) {
+		// 简单随机淘汰策略：删除遇到的第一个条目
+		m.memCache.Range(func(key, value interface{}) bool {
+			m.memCache.Delete(key)
+			atomic.AddInt64(&m.memEntryCount, -1)
+			return false // 只删除一个
+		})
+	}
+
+	// 存储新条目
+	m.memCache.Store(fullURL, &memCacheEntry{
+		entry:     entry,
+		expiresAt: time.Now().Add(m.ttl),
+	})
+	atomic.AddInt64(&m.memEntryCount, 1)
 }
 
 // startCleanupRoutine 启动定期清理过期缓存的协程

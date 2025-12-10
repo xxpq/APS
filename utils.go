@@ -54,14 +54,28 @@ func compileRegex(pattern string) (*regexp.Regexp, error) {
 	return re, nil
 }
 
+// skipHeaders 预定义需要跳过的 header 集合（使用 map 查表替代多次字符串比较）
+var skipHeaders = map[string]struct{}{
+	"Host":                {},
+	"Connection":          {},
+	"Proxy-Connection":    {},
+	"Keep-Alive":          {},
+	"Proxy-Authenticate":  {},
+	"Proxy-Authorization": {},
+	"Te":                  {},
+	"Trailer":             {},
+	"Transfer-Encoding":   {},
+	"Upgrade":             {},
+}
+
 func copyHeaders(dst, src http.Header) {
 	for key, values := range src {
-		// These headers are connection-specific and should not be copied.
-		// gorilla/websocket handles the Sec-WebSocket-* headers.
-		if key == "Host" || key == "Connection" || key == "Proxy-Connection" ||
-			key == "Keep-Alive" || key == "Proxy-Authenticate" || key == "Proxy-Authorization" ||
-			key == "Te" || key == "Trailer" || key == "Transfer-Encoding" || key == "Upgrade" ||
-			strings.HasPrefix(key, "Sec-Websocket-") {
+		// 使用 map 查表替代多次字符串比较
+		if _, skip := skipHeaders[key]; skip {
+			continue
+		}
+		// WebSocket 相关的 header 仍需前缀匹配
+		if strings.HasPrefix(key, "Sec-Websocket-") {
 			continue
 		}
 		for _, value := range values {

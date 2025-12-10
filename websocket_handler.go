@@ -155,11 +155,10 @@ func (p *MapRemoteProxy) handleWebSocket(w http.ResponseWriter, r *http.Request)
 			port = 443
 		}
 
-		// IMPORTANT: Do NOT let endpoint handle TLS!
-		// The WebSocket dialer will handle TLS over the tunneled raw TCP connection.
-		// If we set useTLS=true here, endpoint would do TLS and then dialer would try
-		// TLS again, causing double encryption and handshake failure.
-		useTLS := false
+		// Endpoint is a pure TCP proxy (like SOCKS5) - it just forwards raw bytes
+		// APS handles all TLS/protocol logic
+		// The useTLS field is ignored by endpoint, but we still use correct scheme for logging
+		useTLS := targetWsURL.Scheme == "wss"
 
 		// Create a pipe for the proxy connection
 		// We need to use net.Pipe() to create an in-memory connection
@@ -178,7 +177,7 @@ func (p *MapRemoteProxy) handleWebSocket(w http.ResponseWriter, r *http.Request)
 			return
 		}
 
-		log.Printf("[WS] Proxy connection established through tunnel to %s:%d (TLS handled by dialer)", host, port)
+		log.Printf("[WS] Proxy connection established through tunnel to %s:%d (APS handles TLS: %v)", host, port, useTLS)
 
 		// Now we need to perform WebSocket handshake over the proxy connection
 		// Build the WebSocket handshake request
@@ -190,18 +189,42 @@ func (p *MapRemoteProxy) handleWebSocket(w http.ResponseWriter, r *http.Request)
 			wsPath = "/"
 		}
 
+		// APS handles TLS - WebSocket dialer does TLS handshake over the raw TCP tunnel
 		dialer := websocket.Dialer{
 			NetDial: func(network, addr string) (net.Conn, error) {
 				return clientSide, nil
 			},
-			TLSClientConfig: &tls.Config{
+		}
+		// Only add TLSClientConfig for wss:// connections
+		if useTLS {
+			dialer.TLSClientConfig = &tls.Config{
 				InsecureSkipVerify: true,
 				ServerName:         host,
-			},
+			}
 		}
 
+		// DON'T copy all headers from original request - especially NOT the Host header!
+		// The original Host is for the proxy (vps.sucdri.p-q.co) but target is different (10.1.105.33)
+		// Only copy relevant headers like Authorization, Cookie, etc.
 		serverHeader := http.Header{}
-		copyHeaders(serverHeader, r.Header)
+		// Only copy headers that should be forwarded
+		if auth := r.Header.Get("Authorization"); auth != "" {
+			serverHeader.Set("Authorization", auth)
+		}
+		if cookie := r.Header.Get("Cookie"); cookie != "" {
+			serverHeader.Set("Cookie", cookie)
+		}
+		// Set Origin header to match target - ESXi may check this for CSRF protection
+		targetOrigin := fmt.Sprintf("%s://%s", targetWsURL.Scheme, targetWsURL.Host)
+		// Convert wss to https for Origin header
+		if targetWsURL.Scheme == "wss" {
+			targetOrigin = fmt.Sprintf("https://%s", targetWsURL.Host)
+		} else if targetWsURL.Scheme == "ws" {
+			targetOrigin = fmt.Sprintf("http://%s", targetWsURL.Host)
+		}
+		serverHeader.Set("Origin", targetOrigin)
+
+		log.Printf("[WS] Dialing target with URL: %s, Origin: %s (original Host: %s)", targetWsURL.String(), targetOrigin, r.Host)
 
 		serverConn, _, err = dialer.Dial(targetWsURL.String(), serverHeader)
 		if err != nil {

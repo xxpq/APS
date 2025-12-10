@@ -33,7 +33,6 @@ import (
 	"github.com/kardianos/service"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
-	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/metadata"
 )
 
@@ -408,11 +407,6 @@ func runGRPCSession(ctx context.Context) bool {
 			grpc.MaxCallRecvMsgSize(math.MaxInt64),
 			grpc.MaxCallSendMsgSize(math.MaxInt64),
 		),
-		grpc.WithKeepaliveParams(keepalive.ClientParameters{
-			Time:                10 * time.Second, // ping间隔
-			Timeout:             5 * time.Second,  // ping超时
-			PermitWithoutStream: true,             // 允许无流时ping
-		}),
 	)
 	if err != nil {
 		log.Printf("Failed to connect: %v", err)
@@ -749,26 +743,15 @@ func handleProxyConnect(stream pb.TunnelService_EstablishClient, req *pb.ProxyCo
 	connID := req.GetConnectionId()
 	host := req.GetHost()
 	port := req.GetPort()
-	useTLS := req.GetTls()
+	// Note: tls field is ignored - endpoint is a pure TCP proxy
+	// TLS handling is done by APS, not endpoint
 
 	address := fmt.Sprintf("%s:%d", host, port)
-	log.Printf("[PROXY %s] Connecting to %s (TLS: %v)", connID, address, useTLS)
+	log.Printf("[PROXY %s] Connecting to %s (pure TCP proxy)", connID, address)
 
-	// Establish TCP connection to target
-	var conn net.Conn
-	var err error
-
-	if useTLS {
-		// TLS connection
-		tlsConfig := &tls.Config{
-			ServerName:         host,
-			InsecureSkipVerify: true, // Allow self-signed certs, similar to existing behavior
-		}
-		conn, err = tls.DialWithDialer(&net.Dialer{Timeout: 30 * time.Second}, "tcp", address, tlsConfig)
-	} else {
-		// Plain TCP connection
-		conn, err = net.DialTimeout("tcp", address, 30*time.Second)
-	}
+	// Establish raw TCP connection to target
+	// Endpoint acts as a pure TCP proxy like SOCKS5 - no TLS handling
+	conn, err := net.DialTimeout("tcp", address, 30*time.Second)
 
 	// Send connection acknowledgement
 	ack := &pb.ProxyConnectAck{
@@ -809,6 +792,8 @@ func handleProxyConnect(stream pb.TunnelService_EstablishClient, req *pb.ProxyCo
 func handleProxyData(data *pb.ProxyData) {
 	connID := data.GetConnectionId()
 
+	log.Printf("[PROXY %s] Received %d bytes from APS to write to target", connID, len(data.GetData()))
+
 	connVal, ok := proxyConnections.Load(connID)
 	if !ok {
 		log.Printf("[PROXY %s] Connection not found for data", connID)
@@ -816,11 +801,13 @@ func handleProxyData(data *pb.ProxyData) {
 	}
 
 	conn := connVal.(net.Conn)
-	_, err := conn.Write(data.GetData())
+	n, err := conn.Write(data.GetData())
 	if err != nil {
 		log.Printf("[PROXY %s] Write error: %v", connID, err)
 		conn.Close()
 		proxyConnections.Delete(connID)
+	} else {
+		log.Printf("[PROXY %s] Wrote %d bytes to target", connID, n)
 	}
 }
 
@@ -841,6 +828,8 @@ func handleProxyClose(close *pb.ProxyClose) {
 
 // proxyReadLoop reads data from target connection and sends to APS
 func proxyReadLoop(stream pb.TunnelService_EstablishClient, connID string, conn net.Conn) {
+	log.Printf("[PROXY %s] Starting read loop for target connection", connID)
+
 	defer func() {
 		log.Printf("[PROXY %s] Read loop ended", connID)
 		conn.Close()
@@ -860,9 +849,12 @@ func proxyReadLoop(stream pb.TunnelService_EstablishClient, connID string, conn 
 	}()
 
 	buf := make([]byte, 32*1024) // 32KB buffer
+	readCount := 0
 	for {
 		n, err := conn.Read(buf)
+		readCount++
 		if n > 0 {
+			log.Printf("[PROXY %s] Read %d bytes from target (read #%d)", connID, n, readCount)
 			data := &pb.ProxyData{
 				ConnectionId: connID,
 				Data:         buf[:n],
@@ -883,7 +875,9 @@ func proxyReadLoop(stream pb.TunnelService_EstablishClient, connID string, conn 
 		}
 		if err != nil {
 			if err != io.EOF {
-				log.Printf("[PROXY %s] Read error: %v", connID, err)
+				log.Printf("[PROXY %s] Read error (read #%d): %v", connID, readCount, err)
+			} else {
+				log.Printf("[PROXY %s] Target connection closed (EOF) at read #%d", connID, readCount)
 			}
 			return
 		}

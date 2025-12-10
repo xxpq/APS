@@ -14,10 +14,74 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/crypto/pkcs12"
 )
+
+// 对象池 - 用于高并发场景下复用对象，减少 GC 压力
+var (
+	// bufferPool 复用 bytes.Buffer
+	bufferPool = sync.Pool{
+		New: func() interface{} {
+			return new(bytes.Buffer)
+		},
+	}
+
+	// byteSlicePool 复用 32KB byte 切片用于 I/O 操作
+	byteSlicePool = sync.Pool{
+		New: func() interface{} {
+			b := make([]byte, 32*1024)
+			return &b
+		},
+	}
+
+	// counterWriterPool 复用 ByteCounterWriter
+	counterWriterPool = sync.Pool{
+		New: func() interface{} {
+			return &ByteCounterWriter{}
+		},
+	}
+)
+
+// getBuffer 从池中获取 buffer
+func getBuffer() *bytes.Buffer {
+	buf := bufferPool.Get().(*bytes.Buffer)
+	buf.Reset()
+	return buf
+}
+
+// putBuffer 归还 buffer 到池中（限制大小避免内存泄漏）
+func putBuffer(buf *bytes.Buffer) {
+	if buf.Cap() <= 1024*1024 { // 只回收 <= 1MB 的 buffer
+		bufferPool.Put(buf)
+	}
+}
+
+// getByteSlice 从池中获取 byte 切片
+func getByteSlice() *[]byte {
+	return byteSlicePool.Get().(*[]byte)
+}
+
+// putByteSlice 归还 byte 切片到池中
+func putByteSlice(b *[]byte) {
+	byteSlicePool.Put(b)
+}
+
+// getCounterWriter 从池中获取 ByteCounterWriter
+func getCounterWriter(w io.Writer) *ByteCounterWriter {
+	cw := counterWriterPool.Get().(*ByteCounterWriter)
+	cw.Writer = w
+	cw.BytesWritten = 0
+	return cw
+}
+
+// putCounterWriter 归还 ByteCounterWriter 到池中
+func putCounterWriter(cw *ByteCounterWriter) {
+	cw.Writer = nil
+	counterWriterPool.Put(cw)
+}
 
 func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	// Start timing and basic stats
@@ -67,21 +131,42 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		if cachedEntry, ok := p.staticCache.Get(fullURL); ok {
 			// 缓存命中，直接返回缓存内容（包含原始响应头）
 			for key, values := range cachedEntry.Headers {
-				// 跳过Content-Encoding和Transfer-Encoding，因为缓存的body已是解压后的原始内容
+				// 跳过这些头，我们会自己设置
 				lowerKey := strings.ToLower(key)
-				if lowerKey == "content-encoding" || lowerKey == "transfer-encoding" || lowerKey == "content-length" {
+				if lowerKey == "content-encoding" || lowerKey == "transfer-encoding" ||
+					lowerKey == "content-length" || lowerKey == "cache-control" ||
+					lowerKey == "etag" || lowerKey == "last-modified" {
 					continue
 				}
 				for _, value := range values {
 					w.Header().Add(key, value)
 				}
 			}
+
+			// 设置缓存相关头
 			w.Header().Set("X-Cache", "HIT")
 			w.Header().Set("Content-Length", fmt.Sprintf("%d", len(cachedEntry.Body)))
+
+			// 设置浏览器缓存头（Cache-Control: 1天）
+			w.Header().Set("Cache-Control", "public, max-age=86400")
+
+			// 设置 ETag 和 Last-Modified
+			if cachedEntry.ETag != "" {
+				w.Header().Set("ETag", cachedEntry.ETag)
+			}
+			if cachedEntry.LastModified != "" {
+				w.Header().Set("Last-Modified", cachedEntry.LastModified)
+			}
+
+			// 如果是压缩内容，设置 Content-Encoding: br
+			if cachedEntry.IsCompressed {
+				w.Header().Set("Content-Encoding", "br")
+			}
+
 			w.WriteHeader(cachedEntry.StatusCode)
 			w.Write(cachedEntry.Body)
 			bytesSent = uint64(len(cachedEntry.Body))
-			log.Printf("[CACHE] HIT: %s (%d bytes)", fullURL, len(cachedEntry.Body))
+			log.Printf("[CACHE] HIT: %s (%d bytes, compressed=%v)", fullURL, len(cachedEntry.Body), cachedEntry.IsCompressed)
 			return
 		}
 	}
@@ -700,8 +785,9 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		writer = limitedWriter.(io.Writer)
 	}
 
-	// Use a simple writer wrapper to count bytes written
-	counterWriter := &ByteCounterWriter{Writer: writer}
+	// Use pooled writer wrapper to count bytes written
+	counterWriter := getCounterWriter(writer)
+	defer putCounterWriter(counterWriter)
 	_, err = io.Copy(counterWriter, reader)
 	if err != nil {
 		log.Printf("Error writing response body: %v", err)

@@ -33,14 +33,28 @@ type Config struct {
 
 // StaticCacheConfig 静态文件缓存配置
 type StaticCacheConfig struct {
-	Enabled  bool   `json:"enabled"`             // 是否启用缓存
-	CacheDir string `json:"cache_dir,omitempty"` // 缓存目录，默认 "./cache"
-	TTL      int    `json:"ttl,omitempty"`       // 缓存有效期(秒)，默认 86400 (1天)
+	Enabled  bool     `json:"enabled"`             // 是否启用缓存
+	CacheDir string   `json:"cache_dir,omitempty"` // 缓存目录，默认 ".cache"
+	TTL      int      `json:"ttl,omitempty"`       // 缓存有效期(秒)，默认 86400 (1天)
+	FileType []string `json:"file_type,omitempty"` // 可缓存的文件扩展名，如果指定则覆盖默认值
 }
 
 type DataStore struct {
 	QuotaUsage map[string]*QuotaUsageData `json:"quotaUsage,omitempty"`
 	mu         sync.Mutex
+}
+
+// GetQuotaUsages 批量获取多个 source 的配额使用情况（单次加锁）
+func (ds *DataStore) GetQuotaUsages(sources []string) map[string]*QuotaUsageData {
+	result := make(map[string]*QuotaUsageData, len(sources))
+	ds.mu.Lock()
+	defer ds.mu.Unlock()
+	for _, source := range sources {
+		if usage, ok := ds.QuotaUsage[source]; ok {
+			result[source] = usage
+		}
+	}
+	return result
 }
 
 type QuotaUsageData struct {
