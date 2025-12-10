@@ -343,12 +343,6 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if matched {
-		fromConfig := mapping.GetFromConfig()
-		if fromConfig != nil && fromConfig.GRPC != nil && fromConfig.GRPC.RestToGrpc != nil {
-			log.Printf("[%s] %s -> [REST-to-gRPC] %s", r.Method, originalURL, targetURL)
-			p.handleRestToGrpc(w, r, mapping)
-			return
-		}
 		if strings.HasPrefix(targetURL, "file://") {
 			log.Printf("[%s] %s -> [LOCAL] %s", r.Method, originalURL, targetURL)
 			p.serveFile(w, r, mapping)

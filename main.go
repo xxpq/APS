@@ -6,27 +6,23 @@ import (
 	"flag"
 	"fmt"
 	"log"
-	"math"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
-	"strings"
 	"sync"
 	"syscall"
 	"time"
 
-	pb "aps/tunnelpb"
-
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/h2c"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/keepalive"
 )
 
 // ServerManager manages the lifecycle of multiple HTTP servers.
 type ServerManager struct {
 	servers       map[string]*http.Server
+	tcpServers    map[string]*RawTCPServer  // Raw TCP servers
+	muxes         map[string]*ConnectionMux // Connection multiplexers
 	mu            sync.Mutex
 	wg            sync.WaitGroup
 	config        *Config
@@ -44,6 +40,8 @@ type ServerManager struct {
 func NewServerManager(config *Config, configFile string, dataStore *DataStore, harManager *HarLoggerManager, tunnelManager TunnelManagerInterface, scriptRunner *ScriptRunner, trafficShaper *TrafficShaper, stats *StatsCollector, staticCache *StaticCacheManager, replayManager *ReplayManager) *ServerManager {
 	return &ServerManager{
 		servers:       make(map[string]*http.Server),
+		tcpServers:    make(map[string]*RawTCPServer),
+		muxes:         make(map[string]*ConnectionMux),
 		config:        config,
 		configFile:    configFile,
 		dataStore:     dataStore,
@@ -61,8 +59,13 @@ func (sm *ServerManager) Start(name string, serverConfig *ListenConfig, isACMEEn
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
+	// Check if already running (HTTP or TCP)
 	if _, exists := sm.servers[name]; exists {
 		log.Printf("Server '%s' is already running.", name)
+		return
+	}
+	if _, exists := sm.tcpServers[name]; exists {
+		log.Printf("TCP Server '%s' is already running.", name)
 		return
 	}
 
@@ -75,10 +78,27 @@ func (sm *ServerManager) Start(name string, serverConfig *ListenConfig, isACMEEn
 		}
 	}
 
+	// Check if this is a rawTCP server
+	if serverConfig.RawTCP {
+		tcpServer := NewRawTCPServer(name, serverConfig, sm.config, serverMappings[name],
+			sm.tunnelManager, sm.trafficShaper, sm.stats, sm.dataStore)
+		if err := tcpServer.Start(); err != nil {
+			log.Printf("Failed to start TCP server '%s': %v", name, err)
+			return
+		}
+		sm.tcpServers[name] = tcpServer
+		log.Printf("[RAW TCP] Server '%s' started on port %d", name, serverConfig.Port)
+		return
+	}
+
+	// HTTP server
 	handler := createServerHandler(name, serverMappings[name], serverConfig, sm.config, sm.configFile, sm.dataStore, sm.harManager, sm.tunnelManager, sm.scriptRunner, sm.trafficShaper, sm.stats, sm.staticCache, sm.replayManager, isACMEEnabled)
-	server := startServer(name, serverConfig, handler)
+	server, mux := startServer(name, serverConfig, handler, sm.tunnelManager)
 	if server != nil {
 		sm.servers[name] = server
+		if mux != nil {
+			sm.muxes[name] = mux
+		}
 		sm.wg.Add(1)
 		go func() {
 			defer sm.wg.Done()
@@ -92,6 +112,7 @@ func (sm *ServerManager) Stop(name string) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
+	// Try to stop HTTP server
 	if server, exists := sm.servers[name]; exists {
 		log.Printf("Stopping server '%s'...", name)
 		// Use a context to allow for a graceful shutdown.
@@ -101,16 +122,38 @@ func (sm *ServerManager) Stop(name string) {
 			log.Printf("Error shutting down server '%s': %v", name, err)
 		}
 		delete(sm.servers, name)
+
+		if mux, exists := sm.muxes[name]; exists {
+			mux.Stop()
+			delete(sm.muxes, name)
+		}
+
 		log.Printf("Server '%s' stopped.", name)
+		return
+	}
+
+	// Try to stop TCP server
+	if tcpServer, exists := sm.tcpServers[name]; exists {
+		log.Printf("Stopping TCP server '%s'...", name)
+		if err := tcpServer.Stop(); err != nil {
+			log.Printf("Error stopping TCP server '%s': %v", name, err)
+		}
+		delete(sm.tcpServers, name)
+		log.Printf("TCP Server '%s' stopped.", name)
 	}
 }
 
 func (sm *ServerManager) StopAll() {
 	sm.mu.Lock()
-	names := make([]string, 0, len(sm.servers))
+	names := make([]string, 0, len(sm.servers)+len(sm.tcpServers))
 	for name := range sm.servers {
 		names = append(names, name)
 	}
+	for name := range sm.tcpServers {
+		names = append(names, name)
+	}
+	// Muxes are stopped when their corresponding server is stopped, but we should ensure cleanup
+	// No need to iterate muxes separately as they are keyed by server name
 	sm.mu.Unlock()
 
 	for _, name := range names {
@@ -264,13 +307,7 @@ func createServerHandler(serverName string, mappings []*Mapping, serverConfig *L
 
 		// 注册管理面板处理器
 		adminHandlers := NewAdminHandlers(config, configFile)
-		if hybridTM, ok := tunnelManager.(*HybridTunnelManager); ok {
-			adminHandlers.SetTunnelManager(hybridTM.grpcManager)
-		} else if tm, ok := tunnelManager.(*TunnelManager); ok {
-			adminHandlers.SetTunnelManager(tm)
-		} else {
-			log.Println("Warning: could not set tunnel manager for admin handlers, tunnel info will be unavailable.")
-		}
+		// TCP tunnel manager handles endpoints directly
 		adminHandlers.RegisterHandlers(mux)
 	}
 
@@ -298,59 +335,44 @@ func createServerHandler(serverName string, mappings []*Mapping, serverConfig *L
 		baseHandler = GetACMEHandler(baseHandler)
 	}
 
-	// 创建 gRPC 服务器 - 高并发优化
-	grpcServer := grpc.NewServer(
-		grpc.MaxRecvMsgSize(math.MaxInt64),
-		grpc.MaxSendMsgSize(math.MaxInt64),
-		grpc.NumStreamWorkers(uint32(100)), // 并发流处理worker数
-		grpc.KeepaliveParams(keepalive.ServerParameters{
-			MaxConnectionIdle:     5 * time.Minute,  // 空闲连接超时
-			MaxConnectionAge:      30 * time.Minute, // 连接最大生命周期
-			MaxConnectionAgeGrace: 10 * time.Second, // 优雅关闭等待时间
-			Time:                  30 * time.Second, // keepalive ping间隔
-			Timeout:               10 * time.Second, // keepalive ping超时
-		}),
-		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
-			MinTime:             5 * time.Second, // 客户端ping最小间隔
-			PermitWithoutStream: true,            // 允许无流时ping
-		}),
-	)
-
-	// 根据隧道管理器类型注册不同的服务
-	if hybridTM, ok := tunnelManager.(*HybridTunnelManager); ok {
-		pb.RegisterTunnelServiceServer(grpcServer, &TunnelServiceServer{tunnelManager: hybridTM.grpcManager})
-	} else if tm, ok := tunnelManager.(*TunnelManager); ok {
-		pb.RegisterTunnelServiceServer(grpcServer, &TunnelServiceServer{tunnelManager: tm})
-	}
-
-	// 创建一个分流处理器，根据请求头判断流量导向 gRPC 隧道或 HTTP 处理器
-	grpcOrHttpHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// 检查是否是 gRPC 隧道请求 (只检查是否存在 X-Aps-Tunnel header，具体版本验证在 gRPC handler 中进行)
-		isGrpcTunnel := r.ProtoMajor == 2 &&
-			strings.Contains(r.Header.Get("Content-Type"), "application/grpc") &&
-			r.Header.Get("X-Aps-Tunnel") != ""
-
-		if isGrpcTunnel {
-			grpcServer.ServeHTTP(w, r)
-		} else {
-			baseHandler.ServeHTTP(w, r)
-		}
-	})
-
-	// 使用 h2c 包裹处理器，以支持未加密的 HTTP/2 (h2c)
-	return h2c.NewHandler(grpcOrHttpHandler, &http2.Server{})
+	// 使用 h2c 包裹处理器，以支持 HTTP/2
+	return h2c.NewHandler(baseHandler, &http2.Server{})
 }
 
-func startServer(name string, config *ListenConfig, handler http.Handler) *http.Server {
+func startServer(name string, config *ListenConfig, handler http.Handler, tunnelManager TunnelManagerInterface) (*http.Server, *ConnectionMux) {
 	// Determine bind address based on 'public' (default: true)
 	host := "127.0.0.1"
 	if config.Public == nil || *config.Public {
 		host = "0.0.0.0"
 	}
 	addr := fmt.Sprintf("%s:%d", host, config.Port)
-	server := &http.Server{Addr: addr, Handler: handler}
+	server := &http.Server{Handler: handler}
 
 	log.Printf("Starting server '%s' on %s", name, addr)
+
+	// Create listener manually
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		log.Printf("Failed to listen on %s for server '%s': %v", addr, name, err)
+		return nil, nil
+	}
+
+	// Create ConnectionMux
+	mux := NewConnectionMux(listener)
+
+	// Setup Tunnel Handler
+	mux.SetTunnelHandler(func(conn net.Conn) {
+		tunnelManager.HandleTunnelConnection(conn)
+	})
+
+	// Setup HTTP Handler
+	httpListener := NewChannelListener(listener.Addr())
+	mux.SetHTTPHandler(func(conn net.Conn) {
+		httpListener.Push(conn)
+	})
+
+	// Start Mux
+	go mux.Start()
 
 	if config.Cert != nil {
 		// HTTPS server
@@ -378,13 +400,7 @@ func startServer(name string, config *ListenConfig, handler http.Handler) *http.
 				tlsConfig = acmeTLSConfig
 			}
 
-			listener, err := net.Listen("tcp", addr)
-			if err != nil {
-				log.Printf("Failed to listen on %s for server '%s': %v", addr, name, err)
-				return
-			}
-
-			tlsListener := NewTlsListener(listener, tlsConfig)
+			tlsListener := NewTlsListener(httpListener, tlsConfig)
 			if err := server.Serve(tlsListener); err != nil && err != http.ErrServerClosed {
 				log.Printf("Server '%s' (HTTPS) failed: %v", name, err)
 			}
@@ -392,12 +408,12 @@ func startServer(name string, config *ListenConfig, handler http.Handler) *http.
 	} else {
 		// HTTP server
 		go func() {
-			if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			if err := server.Serve(httpListener); err != nil && err != http.ErrServerClosed {
 				log.Printf("Server '%s' (HTTP) failed: %v", name, err)
 			}
 		}()
 	}
-	return server
+	return server, mux
 }
 func startQuotaPersistence(dataStore *DataStore, trafficShaper *TrafficShaper, dataFile string) {
 	ticker := time.NewTicker(10 * time.Second)

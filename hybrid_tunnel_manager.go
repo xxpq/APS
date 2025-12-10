@@ -8,14 +8,13 @@ import (
 	"net"
 	"sync"
 	"time"
-
-	pb "aps/tunnelpb"
 )
 
-// HybridTunnelManager 管理gRPC隧道的管理器（WebSocket已移除）
+// HybridTunnelManager 管理TCP隧道的管理器
 type HybridTunnelManager struct {
 	mu             sync.RWMutex
-	grpcManager    *TunnelManager
+	tcpManager     *TCPTunnelManager
+	tcpServer      *TCPTunnelServer
 	config         *Config
 	statsCollector *StatsCollector
 }
@@ -27,21 +26,33 @@ func NewHybridTunnelManager(config *Config, statsCollector *StatsCollector) *Hyb
 		statsCollector: statsCollector,
 	}
 
-	// 初始化gRPC隧道管理器
-	htm.grpcManager = NewTunnelManager(config, statsCollector)
+	// 初始化TCP隧道服务器和管理器
+	htm.tcpServer = NewTCPTunnelServer(config)
+	htm.tcpManager = NewTCPTunnelManager(config, htm.tcpServer)
 
 	return htm
+}
+
+// StartTCPServer 启动TCP隧道服务器（可指定端口或使用连接复用器）
+func (htm *HybridTunnelManager) StartTCPServer(addr string) error {
+	if htm.tcpServer == nil {
+		return errors.New("TCP tunnel server not initialized")
+	}
+	return htm.tcpServer.Start(addr)
+}
+
+// HandleTunnelConnection 处理来自连接复用器的隧道连接
+func (htm *HybridTunnelManager) HandleTunnelConnection(conn net.Conn) {
+	if htm.tcpServer != nil {
+		htm.tcpServer.handleConnection(conn)
+	}
 }
 
 // SetStatsCollector 设置统计收集器
 func (htm *HybridTunnelManager) SetStatsCollector(statsCollector *StatsCollector) {
 	htm.mu.Lock()
 	defer htm.mu.Unlock()
-
 	htm.statsCollector = statsCollector
-	if htm.grpcManager != nil {
-		htm.grpcManager.SetStatsCollector(statsCollector)
-	}
 }
 
 // UpdateTunnels 动态更新隧道配置
@@ -51,79 +62,52 @@ func (htm *HybridTunnelManager) UpdateTunnels(newConfig *Config) {
 
 	log.Println("[TUNNEL] Updating tunnels...")
 	htm.config = newConfig
-
-	if htm.grpcManager != nil {
-		htm.grpcManager.UpdateTunnels(newConfig)
-	}
-}
-
-// RegisterEndpointStream 注册gRPC端点流
-func (htm *HybridTunnelManager) RegisterEndpointStream(tunnelName, endpointName, password string, stream pb.TunnelService_EstablishServer, remoteAddr string) (*EndpointStream, error) {
-	return htm.grpcManager.RegisterEndpointStream(tunnelName, endpointName, password, stream, remoteAddr)
-}
-
-// UnregisterEndpointStream 注销gRPC端点流
-func (htm *HybridTunnelManager) UnregisterEndpointStream(tunnelName, endpointName, streamID string) {
-	htm.grpcManager.UnregisterEndpointStream(tunnelName, endpointName, streamID)
-}
-
-// HandleIncomingMessage 处理gRPC传入消息
-func (htm *HybridTunnelManager) HandleIncomingMessage(msg *pb.EndpointToServer) {
-	htm.grpcManager.HandleIncomingMessage(msg)
 }
 
 // SendRequestStream sends a request and returns a stream for the response.
 func (htm *HybridTunnelManager) SendRequestStream(ctx context.Context, tunnelName, endpointName string, reqPayload *RequestPayload) (io.ReadCloser, []byte, error) {
-	if htm.grpcManager != nil {
-		return htm.grpcManager.SendRequestStream(ctx, tunnelName, endpointName, reqPayload)
+	if htm.tcpManager != nil {
+		return htm.tcpManager.SendRequestStream(ctx, tunnelName, endpointName, reqPayload)
 	}
-
 	return nil, nil, errors.New("no available tunnel manager")
 }
 
 // SendProxyConnect establishes a TCP proxy connection through the tunnel.
-func (htm *HybridTunnelManager) SendProxyConnect(ctx context.Context, tunnelName, endpointName string, host string, port int, useTLS bool, clientConn net.Conn) error {
-	if htm.grpcManager != nil {
-		return htm.grpcManager.SendProxyConnect(ctx, tunnelName, endpointName, host, port, useTLS, clientConn)
+func (htm *HybridTunnelManager) SendProxyConnect(ctx context.Context, tunnelName, endpointName string, host string, port int, useTLS bool, clientConn net.Conn, clientIP string) (<-chan struct{}, error) {
+	if htm.tcpManager != nil {
+		return htm.tcpManager.SendProxyConnect(ctx, tunnelName, endpointName, host, port, useTLS, clientConn, clientIP)
 	}
-
-	return errors.New("no available tunnel manager for proxy connection")
+	return nil, errors.New("no available tunnel manager for proxy connection")
 }
 
 // GetRandomEndpointFromTunnels 从隧道中获取随机端点
 func (htm *HybridTunnelManager) GetRandomEndpointFromTunnels(tunnelNames []string) (string, string, error) {
-	if htm.grpcManager != nil {
-		return htm.grpcManager.GetRandomEndpointFromTunnels(tunnelNames)
+	if htm.tcpManager != nil {
+		return htm.tcpManager.GetRandomEndpointFromTunnels(tunnelNames)
 	}
-
 	return "", "", errors.New("no available endpoints found")
 }
 
 // FindTunnelForEndpoint 查找端点所在的隧道
 func (htm *HybridTunnelManager) FindTunnelForEndpoint(endpointName string) (string, bool) {
-	if htm.grpcManager != nil {
-		return htm.grpcManager.FindTunnelForEndpoint(endpointName)
+	if htm.tcpManager != nil {
+		return htm.tcpManager.FindTunnelForEndpoint(endpointName)
 	}
-
 	return "", false
 }
 
 // GetEndpointsInfo 获取端点信息
 func (htm *HybridTunnelManager) GetEndpointsInfo(tunnelName string) map[string]*EndpointInfo {
-	if htm.grpcManager != nil {
-		return htm.grpcManager.GetEndpointsInfo(tunnelName)
+	if htm.tcpManager != nil {
+		return htm.tcpManager.GetEndpointsInfo(tunnelName)
 	}
-
 	return nil
 }
 
 // MeasureEndpointLatency 测量端点延迟
 func (htm *HybridTunnelManager) MeasureEndpointLatency(tunnelName, endpointName string) (time.Duration, error) {
-	if htm.grpcManager != nil {
-		return htm.grpcManager.MeasureEndpointLatency(tunnelName, endpointName)
-	}
-
-	return 0, errors.New("no available tunnel manager for latency measurement")
+	// TODO: Implement latency measurement for TCP tunnel
+	return 0, errors.New("latency measurement not implemented for TCP tunnel")
 }
 
 // GetPoolStats 获取连接池统计信息
@@ -132,11 +116,7 @@ func (htm *HybridTunnelManager) GetPoolStats() map[string]interface{} {
 	defer htm.mu.RUnlock()
 
 	stats := make(map[string]interface{})
-
-	if htm.grpcManager != nil {
-		grpcStats := htm.grpcManager.GetPoolStats()
-		stats["grpc"] = grpcStats
-	}
+	stats["protocol"] = "tcp"
 
 	return stats
 }
@@ -145,7 +125,7 @@ func (htm *HybridTunnelManager) GetPoolStats() map[string]interface{} {
 func (htm *HybridTunnelManager) Cleanup() {
 	log.Println("[TUNNEL] Cleaning up tunnel manager")
 
-	if htm.grpcManager != nil {
-		htm.grpcManager.Cleanup()
+	if htm.tcpManager != nil {
+		htm.tcpManager.Stop()
 	}
 }

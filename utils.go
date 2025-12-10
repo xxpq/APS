@@ -4,8 +4,13 @@ import (
 	"bytes"
 	"compress/gzip"
 	"compress/zlib"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
+	"crypto/sha256"
+	"errors"
 	"io"
-	"math/rand"
+	mrand "math/rand"
 	"net/http"
 	"net/url"
 	"os"
@@ -155,7 +160,7 @@ func pickRandomIP(ips []string) string {
 	if len(ips) == 1 {
 		return ips[0]
 	}
-	return ips[rand.Intn(len(ips))]
+	return ips[mrand.Intn(len(ips))]
 }
 
 // replaceHostWithIP 将URL中的主机名替换为指定的IP地址
@@ -289,4 +294,48 @@ func encodeBodyWithEncoding(body []byte, encoding string) ([]byte, error) {
 	}
 
 	return buf.Bytes(), nil
+}
+
+// encrypt encrypts data using AES-GCM with a key derived from the password
+func encrypt(data []byte, password string) ([]byte, error) {
+	key := sha256.Sum256([]byte(password))
+
+	block, err := aes.NewCipher(key[:])
+	if err != nil {
+		return nil, err
+	}
+
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, err
+	}
+
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err = io.ReadFull(rand.Reader, nonce); err != nil {
+		return nil, err
+	}
+
+	return gcm.Seal(nonce, nonce, data, nil), nil
+}
+
+// decrypt decrypts data using AES-GCM with a key derived from the password
+func decrypt(data []byte, password string) ([]byte, error) {
+	key := sha256.Sum256([]byte(password))
+
+	block, err := aes.NewCipher(key[:])
+	if err != nil {
+		return nil, err
+	}
+
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(data) < gcm.NonceSize() {
+		return nil, errors.New("malformed ciphertext")
+	}
+
+	nonce, ciphertext := data[:gcm.NonceSize()], data[gcm.NonceSize():]
+	return gcm.Open(nil, nonce, ciphertext, nil)
 }

@@ -1,7 +1,18 @@
 {
   "servers": {
-    "default": {
+    "admin": {
       "port": 8090,
+      "public": true,
+      "panel": true
+    },
+    "default": {
+      "port": 80,
+      "public": true,
+      "panel": true
+    },
+    "ssl": {
+      "port": 443,
+      "cert": "acme",
       "public": true,
       "panel": true
     }
@@ -10,6 +21,10 @@
     "dev": {
       "servers": ["default"],
       "password": "test"
+    },
+    "sucdri": {
+      "servers": ["default"],
+      "password": "sucdri"
     }
   },
   "auth": {
@@ -18,12 +33,85 @@
         "password": "admin",
         "admin": true
       }
-    },
-    "groups": null
+    }
+  },
+  "static_cache": {
+    "enabled": true
   },
   "mappings": [
     {
-      "from": "http://8.159.132.172:8090/geoserver/*",
+      "from": ["http://a.l-l.cn/*", "https://a.l-l.cn/*"],
+      "to": "http://ip.sb/*"
+    },
+    {
+      "from": ["http://shkc.p-q.co/*", "https://shkc.p-q.co/*"],
+      "to": "http://127.0.0.1:7788/*"
+    },
+    {
+      "from": [
+        "http://www.gysubway-video.top/*",
+        "https://www.gysubway-video.top/*"
+      ],
+      "to": "http://127.0.0.1:8080/*"
+    },
+    {
+      "from": ["https://bt.jy.sucdri.p-q.co/*"],
+      "to": "http://127.0.0.1:13682/*"
+    },
+    {
+      "from": ["http://git.sucdri.p-q.co/*", "https://git.sucdri.p-q.co/*"],
+      "to": "http://10.1.105.222:3000/*",
+      "via": {
+        "endpoints": "my_pc"
+      }
+    },
+    {
+      "from": ["http://vps.sucdri.p-q.co/*", "https://vps.sucdri.p-q.co/*"],
+      "to": {
+        "insecure": true,
+        "url": "https://10.1.105.33/*"
+      },
+      "via": {
+        "endpoints": "my_pc"
+      }
+    },
+    {
+      "from": ["ws://vps.sucdri.p-q.co/*", "wss://vps.sucdri.p-q.co/*"],
+      "to": {
+        "insecure": true,
+        "url": "wss://10.1.105.33/*"
+      },
+      "via": {
+        "endpoints": "my_pc"
+      }
+    },
+    {
+      "from": [
+        "http://sucdri.p-q.co/geoserver/*",
+        "https://sucdri.p-q.co/geoserver/*"
+      ],
+      "to": {
+        "headers": {
+          "access-control-allow-origin": "http://sucdri.p-q.co",
+          "content-security-policy": null,
+          "cross-origin-opener-policy": null,
+          "cross-origin-resource-policy": null,
+          "x-frame-options": null
+        },
+        "replace": {
+          "http://10.1.24.223:8089": "/"
+        },
+        "url": "http://10.1.24.223:8089/geoserver/*"
+      },
+      "via": {
+        "endpoints": "my_pc"
+      }
+    },
+    {
+      "from": {
+        "proxy": "socks5://127.0.0.1:7890",
+        "url": "http://8.159.132.172:8090/geoserver/*"
+      },
       "to": {
         "headers": {
           "access-control-allow-origin": "http://10.1.24.223:8083",
@@ -32,10 +120,13 @@
           "cross-origin-resource-policy": null,
           "x-frame-options": null
         },
+        "replace": {
+          "https://api.pairs.lv": "http://api.ekpay.top:8090"
+        },
         "url": "http://10.1.24.223:8089/geoserver/*"
       },
       "via": {
-        "endpoints": "test_dev"
+        "endpoints": "sucdri"
       }
     }
   ]

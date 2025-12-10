@@ -6,10 +6,103 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"sync"
+	"time"
 )
+
+// routeCacheEntry represents a cached route match result
+type routeCacheEntry struct {
+	finalURL       string
+	mapping        *Mapping
+	matchedFromURL string
+	expireAt       time.Time
+}
+
+// routeCache provides thread-safe caching for route matches
+type routeCache struct {
+	mu      sync.RWMutex
+	entries map[string]*routeCacheEntry
+	ttl     time.Duration
+}
+
+// Global route cache with 3-minute TTL
+var globalRouteCache = &routeCache{
+	entries: make(map[string]*routeCacheEntry),
+	ttl:     3 * time.Minute,
+}
+
+// get retrieves a cached entry if it exists and hasn't expired
+func (c *routeCache) get(key string) (*routeCacheEntry, bool) {
+	c.mu.RLock()
+	entry, exists := c.entries[key]
+	c.mu.RUnlock()
+
+	if !exists {
+		return nil, false
+	}
+
+	if time.Now().After(entry.expireAt) {
+		// Entry expired, remove it
+		c.mu.Lock()
+		delete(c.entries, key)
+		c.mu.Unlock()
+		return nil, false
+	}
+
+	return entry, true
+}
+
+// set stores a cache entry
+func (c *routeCache) set(key string, finalURL string, mapping *Mapping, matchedFromURL string) {
+	c.mu.Lock()
+	c.entries[key] = &routeCacheEntry{
+		finalURL:       finalURL,
+		mapping:        mapping,
+		matchedFromURL: matchedFromURL,
+		expireAt:       time.Now().Add(c.ttl),
+	}
+	c.mu.Unlock()
+}
+
+// clear removes all cache entries (called on config reload)
+func (c *routeCache) clear() {
+	c.mu.Lock()
+	c.entries = make(map[string]*routeCacheEntry)
+	c.mu.Unlock()
+}
+
+// cleanup removes expired entries (can be called periodically)
+func (c *routeCache) cleanup() {
+	c.mu.Lock()
+	now := time.Now()
+	for key, entry := range c.entries {
+		if now.After(entry.expireAt) {
+			delete(c.entries, key)
+		}
+	}
+	c.mu.Unlock()
+}
+
+// size returns the number of entries in the cache
+func (c *routeCache) size() int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return len(c.entries)
+}
 
 func (p *MapRemoteProxy) mapRequest(r *http.Request) (string, bool, *Mapping, string) {
 	originalURL := p.buildOriginalURL(r)
+
+	// Build cache key: serverName|originalURL|method
+	// Method is included because same URL with different methods may match different rules
+	cacheKey := p.serverName + "|" + originalURL + "|" + r.Method
+
+	// Check cache first
+	if cached, found := globalRouteCache.get(cacheKey); found {
+		return cached.finalURL, true, cached.mapping, cached.matchedFromURL
+	}
+
+	// Cache miss - perform full matching
 	mappings := p.config.GetMappings()
 
 	var bestMatch *Mapping
@@ -31,6 +124,8 @@ func (p *MapRemoteProxy) mapRequest(r *http.Request) (string, bool, *Mapping, st
 	}
 
 	if bestMatch != nil {
+		// Cache the successful match
+		globalRouteCache.set(cacheKey, finalURL, bestMatch, matchedFromURL)
 		return finalURL, true, bestMatch, matchedFromURL
 	}
 
@@ -285,6 +380,7 @@ func (p *MapRemoteProxy) tryRegexMatch(originalURL, fromPattern, toPattern strin
 	log.Printf("[DEBUG] ✓ Regex matched! %s -> %s", originalURL, newURL)
 	return true, newURL
 }
+
 // parseGRPCPath extracts the service and method from a gRPC URL path.
 // The format is expected to be /package.Service/Method.
 // It returns (service, method, ok).

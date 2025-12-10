@@ -10,7 +10,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
@@ -70,7 +69,7 @@ type AdminHandlers struct {
 	configPath    string
 	configMux     sync.RWMutex
 	sessions      *SessionStore
-	tunnelManager *TunnelManager
+	tunnelManager TunnelManagerInterface
 }
 
 // NewAdminHandlers creates a new AdminHandlers instance.
@@ -83,7 +82,7 @@ func NewAdminHandlers(config *Config, configPath string) *AdminHandlers {
 }
 
 // SetTunnelManager sets the tunnel manager reference for endpoint status queries
-func (h *AdminHandlers) SetTunnelManager(tm *TunnelManager) {
+func (h *AdminHandlers) SetTunnelManager(tm TunnelManagerInterface) {
 	h.tunnelManager = tm
 }
 
@@ -191,23 +190,20 @@ func (h *AdminHandlers) handleTunnelEndpoints(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	h.tunnelManager.mu.RLock()
-	tunnel, exists := h.tunnelManager.tunnels[tunnelName]
-	h.tunnelManager.mu.RUnlock()
-
-	if !exists {
+	endpoints := h.tunnelManager.GetEndpointsInfo(tunnelName)
+	if endpoints == nil {
 		http.Error(w, "Tunnel not found", http.StatusNotFound)
 		return
 	}
 
 	type PublicEndpointInfo struct {
-		Name         string         `json:"name"`
-		Online       bool           `json:"online"`
-		RemoteAddr   string         `json:"remoteAddr"`
-		OnlineTime   string         `json:"onlineTime"`
-		LastActivity string         `json:"lastActivity"`
-		Latency      string         `json:"latency"`
-		Stats        *PublicMetrics `json:"stats"`
+		Name         string `json:"name"`
+		Online       bool   `json:"online"`
+		RemoteAddr   string `json:"remoteAddr"`
+		OnlineTime   string `json:"onlineTime"`
+		LastActivity string `json:"lastActivity"`
+		Latency      string `json:"latency"`
+		// Stats        *PublicMetrics `json:"stats"` // Stats temporarily disabled
 	}
 
 	response := struct {
@@ -218,112 +214,28 @@ func (h *AdminHandlers) handleTunnelEndpoints(w http.ResponseWriter, r *http.Req
 		Tunnel:    tunnelName,
 	}
 
-	tunnel.mu.RLock()
-	log.Printf("[DEBUG] handleTunnelEndpoints: Processing tunnel '%s', found %d endpoint pools", tunnelName, len(tunnel.streams))
-	for endpointName, pool := range tunnel.streams {
-		log.Printf("[DEBUG] handleTunnelEndpoints: Processing endpoint '%s', pool has %d streams", endpointName, len(pool.streams))
-		pool.mu.RLock()
-		for _, stream := range pool.streams {
-			stream.Mu.Lock()
-			log.Printf("[DEBUG] handleTunnelEndpoints: Processing stream for endpoint '%s', RemoteAddr: '%s', OnlineTime: '%v', LastActivityTime: '%v'",
-				endpointName, stream.RemoteAddr, stream.OnlineTime, stream.LastActivityTime)
-			
-			// Safely handle stats - always try to get stats if available
-			var publicStats *PublicMetrics
-			if stream.Stats != nil {
-				stats := stream.Stats
-				stats.mutex.Lock()
-				// Create a copy of metrics to avoid holding the lock during JSON marshal
-				requestCount := atomic.LoadUint64(&stats.RequestCount)
-				publicStats = &PublicMetrics{
-					RequestCount: requestCount,
-					Errors:       atomic.LoadUint64(&stats.Errors),
-					BytesSent: PublicNumericMetric{
-						Total: atomic.LoadUint64(&stats.BytesSent.Total),
-						Avg:   0, // Will be calculated if needed
-						Min:   stats.BytesSent.Min,
-						Max:   stats.BytesSent.Max,
-					},
-					BytesRecv: PublicNumericMetric{
-						Total: atomic.LoadUint64(&stats.BytesRecv.Total),
-						Avg:   0, // Will be calculated if needed
-						Min:   stats.BytesRecv.Min,
-						Max:   stats.BytesRecv.Max,
-					},
-					ResponseTime: PublicTimeMetric{
-						TotalMs: float64(atomic.LoadInt64(&stats.ResponseTime.Total)) / 1e6,
-						AvgMs:   0, // Will be calculated if needed
-						MinMs:   stats.ResponseTime.Min / 1e6,
-						MaxMs:   stats.ResponseTime.Max / 1e6,
-					},
-				}
-				// Calculate averages
-				if publicStats.RequestCount > 0 {
-					publicStats.BytesSent.Avg = float64(publicStats.BytesSent.Total) / float64(publicStats.RequestCount)
-					publicStats.BytesRecv.Avg = float64(publicStats.BytesRecv.Total) / float64(publicStats.RequestCount)
-					publicStats.ResponseTime.AvgMs = float64(atomic.LoadInt64(&stats.ResponseTime.Total)) / float64(publicStats.RequestCount) / 1e6
-				}
-				// Calculate QPS
-				if !stats.firstRequestTime.IsZero() && !stats.lastRequestTime.IsZero() {
-					duration := stats.lastRequestTime.Sub(stats.firstRequestTime).Seconds()
-					var currentQPS float64
-					if duration > 1 {
-						currentQPS = float64(publicStats.RequestCount) / duration
-					} else {
-						currentQPS = float64(publicStats.RequestCount)
-					}
-					
-					// 使用内部记录的QPS统计信息，只保留avg、min、max
-					publicStats.QPS = PublicQPSMetric{
-						Avg: stats.QPS.Avg,   // 使用内部记录的平均值
-						Min: stats.QPS.Min,   // 使用内部记录的最小值
-						Max: stats.QPS.Max,   // 使用内部记录的最大值
-					}
-					
-					// 如果内部min值还是-1（未初始化），则设置为当前值
-					if stats.QPS.Min == -1 {
-						publicStats.QPS.Min = currentQPS
-						publicStats.QPS.Avg = currentQPS
-						publicStats.QPS.Max = currentQPS
-					}
-				}
-				stats.mutex.Unlock()
-			}
-
-			// Remove latency measurement to avoid API hanging - latency detection causes channel congestion
-			latencyStr := "-" // Always show "-" for latency to avoid performance issues
-
-			// 显示标准时间格式而不是相对时间
-			onlineTimeStr := "-"
-			if !stream.OnlineTime.IsZero() {
-				onlineTimeStr = stream.OnlineTime.Format("2006-01-02 15:04:05")
-			}
-			
-			lastActivityStr := "-"
-			if !stream.LastActivityTime.IsZero() {
-				lastActivityStr = stream.LastActivityTime.Format("2006-01-02 15:04:05")
-			}
-
-			log.Printf("[DEBUG] handleTunnelEndpoints: Adding endpoint '%s' with RemoteAddr: '%s', OnlineTime: '%s', LastActivity: '%s', Latency: '%s' (measurement disabled)",
-				endpointName, stream.RemoteAddr, onlineTimeStr, lastActivityStr, latencyStr)
-
-			response.Endpoints = append(response.Endpoints, PublicEndpointInfo{
-				Name:         endpointName,
-				Online:       true, // We only iterate over online streams
-				RemoteAddr:   stream.RemoteAddr,
-				OnlineTime:   onlineTimeStr,      // 标准时间格式
-				LastActivity: lastActivityStr,    // 标准时间格式
-				Latency:      latencyStr, // Always "-" to avoid performance issues
-				Stats:        publicStats,
-			})
-			stream.Mu.Unlock()
-			break // Only show info for one stream per endpoint name for simplicity
+	for _, ep := range endpoints {
+		// 显示标准时间格式而不是相对时间
+		onlineTimeStr := "-"
+		if !ep.OnlineTime.IsZero() {
+			onlineTimeStr = ep.OnlineTime.Format("2006-01-02 15:04:05")
 		}
-		pool.mu.RUnlock()
+
+		lastActivityStr := "-"
+		if !ep.LastActivityTime.IsZero() {
+			lastActivityStr = ep.LastActivityTime.Format("2006-01-02 15:04:05")
+		}
+
+		response.Endpoints = append(response.Endpoints, PublicEndpointInfo{
+			Name:         ep.Name,
+			Online:       true,
+			RemoteAddr:   ep.RemoteAddr,
+			OnlineTime:   onlineTimeStr,
+			LastActivity: lastActivityStr,
+			Latency:      "-", // Latency measurement disabled
+			// Stats:        nil, // Stats not yet exposed in EndpointInfo
+		})
 	}
-	tunnel.mu.RUnlock()
-	
-	log.Printf("[DEBUG] handleTunnelEndpoints: Final response has %d endpoints", len(response.Endpoints))
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(response)
@@ -468,12 +380,12 @@ func (h *AdminHandlers) handleUsers(w http.ResponseWriter, r *http.Request) {
 					continue
 				}
 				resp[name] = map[string]interface{}{
-					"admin":  u.Admin,
-					"token":  u.Token,
-					"groups": u.Groups,
-					"dump":   u.Dump,
-					"endpoint": u.Endpoint,
-					"tunnel":   u.Tunnel,
+					"admin":              u.Admin,
+					"token":              u.Token,
+					"groups":             u.Groups,
+					"dump":               u.Dump,
+					"endpoint":           u.Endpoint,
+					"tunnel":             u.Tunnel,
 					"connectionPolicies": u.ConnectionPolicies,
 					"trafficPolicies":    u.TrafficPolicies,
 				}
@@ -652,7 +564,6 @@ func (h *AdminHandlers) handleTunnels(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 	}
 }
-
 
 // ===== 服务器管理 =====
 func (h *AdminHandlers) handleServers(w http.ResponseWriter, r *http.Request) {

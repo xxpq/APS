@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -168,7 +169,9 @@ func (p *MapRemoteProxy) handleWebSocket(w http.ResponseWriter, r *http.Request)
 		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 		defer cancel()
 
-		err = p.tunnelManager.SendProxyConnect(ctx, tunnelName, endpointName, host, port, useTLS, serverSide)
+		// Get client IP for security audit logging
+		clientIP := r.RemoteAddr
+		_, err = p.tunnelManager.SendProxyConnect(ctx, tunnelName, endpointName, host, port, useTLS, serverSide, clientIP)
 		if err != nil {
 			isError = true
 			log.Printf("[WS] Failed to establish proxy connection through tunnel: %v", err)
@@ -196,11 +199,40 @@ func (p *MapRemoteProxy) handleWebSocket(w http.ResponseWriter, r *http.Request)
 			},
 		}
 		// Only add TLSClientConfig for wss:// connections
+		// IMPORTANT: ServerName strategy:
+		// - For valid certificates: use original hostname for SNI (browser expects this)
+		// - For invalid/self-signed certificates (insecure mode): use target hostname or IP
+		//   This avoids SNI mismatch errors with certificates like ESXi's "localhost.localdomain"
 		if useTLS {
-			dialer.TLSClientConfig = &tls.Config{
-				InsecureSkipVerify: true,
-				ServerName:         host,
+			// Check if insecure mode is enabled in mapping config
+			insecureMode := false
+			if mapping != nil {
+				toConfig := mapping.GetToConfig()
+				if toConfig != nil && toConfig.Insecure != nil && *toConfig.Insecure {
+					insecureMode = true
+				}
 			}
+
+			// Choose appropriate ServerName based on mode
+			serverName := ""
+			if insecureMode {
+				// In insecure mode, use target host (may be IP or hostname from cert)
+				// This works better with self-signed certificates
+				serverName = host
+			} else {
+				// In secure mode, use original hostname for proper SNI
+				serverName = r.Host
+				if colonIdx := strings.Index(serverName, ":"); colonIdx != -1 {
+					serverName = serverName[:colonIdx]
+				}
+			}
+
+			dialer.TLSClientConfig = &tls.Config{
+				InsecureSkipVerify: insecureMode,
+				ServerName:         serverName,
+			}
+			log.Printf("[WS] TLS config: ServerName=%s, InsecureSkipVerify=%v (original: %s, target: %s)",
+				serverName, insecureMode, r.Host, host)
 		}
 
 		// DON'T copy all headers from original request - especially NOT the Host header!

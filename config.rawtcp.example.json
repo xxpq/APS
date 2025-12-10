@@ -1,0 +1,44 @@
+{
+  "servers": {
+    "http_server": {
+      "port": 8080
+    },
+    "tcp_forward": {
+      "port": 9000,
+      "rawTCP": true
+    },
+    "tcp_via_tunnel": {
+      "port": 9001,
+      "rawTCP": true
+    }
+  },
+  "tunnels": {
+    "my_tunnel": {
+      "servers": ["tunnel.example.com:8080"],
+      "password": "secret"
+    }
+  },
+  "mappings": [
+    {
+      "comment": "HTTP proxy example",
+      "servers": "http_server",
+      "from": "https://api.example.com/*",
+      "to": "https://backend.example.com/*"
+    },
+    {
+      "comment": "Direct TCP forwarding (SSH to remote server)",
+      "servers": "tcp_forward",
+      "from": "tcp://:9000",
+      "to": "tcp://remote.server.com:22"
+    },
+    {
+      "comment": "TCP forwarding via tunnel (MySQL to internal server)",
+      "servers": "tcp_via_tunnel",
+      "from": "tcp://:9001",
+      "to": "tcp://internal.db.server:3306",
+      "via": {
+        "tunnels": "my_tunnel"
+      }
+    }
+  ]
+}

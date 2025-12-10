@@ -387,7 +387,8 @@ type RuleAuth struct {
 
 type ListenConfig struct {
 	Port      int         `json:"port"`
-	Cert      interface{} `json:"cert,omitempty"` // string ("auto") or CertFiles
+	RawTCP    bool        `json:"rawTCP,omitempty"` // true: raw TCP forwarding mode, false: HTTP mode (default)
+	Cert      interface{} `json:"cert,omitempty"`   // string ("auto") or CertFiles
 	Key       string      `json:"key,omitempty"`
 	Auth      *ServerAuth `json:"auth,omitempty"`
 	Dump      string      `json:"dump,omitempty"`
