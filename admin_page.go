@@ -18,7 +18,7 @@ var admin_page_content = `
   <link href="/.admin/carbon.css" rel="stylesheet">
 
   <!-- Carbon Charts for time-series visualization -->
-  <link rel="stylesheet" href="https://unpkg.com/@carbon/charts@1.16.0/dist/styles.css">
+  <link href="/.admin/carbon/charts.css" rel="stylesheet">
 
 </head>
 <body>
@@ -161,10 +161,10 @@ var admin_page_content = `
           </div>
         </div>
 
-        <div class="mt-3">
-          <h4>原始数据</h4>
-          <div id="stats-raw" class="code-block">{}</div>
-        </div>
+        // <div class="mt-3">
+        //   <h4>原始数据</h4>
+        //   <div id="stats-raw" class="code-block">{}</div>
+        // </div>
       </div>
     </section>
 
@@ -491,7 +491,8 @@ var admin_page_content = `
   <!-- Carbon JS -->
   <script src="/.admin/carbon.js"></script>
   <!-- Carbon Charts JS -->
-  <script src="https://unpkg.com/@carbon/charts@1.16.0/dist/index.umd.js"></script>
+  <script src="/.admin/carbon/charts.js"></script>
+
   <script src="/.admin/script.js"></script>
 </body>
 </html>`

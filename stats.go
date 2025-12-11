@@ -60,14 +60,29 @@ type StatsCollector struct {
 
 	// For auth-aware masking in stats
 	Config *Config
+
+	// Asynchronous processing
+	recordChan chan RecordData // Channel for async stats processing
+	wg         sync.WaitGroup  // Wait for all workers to finish
+	closed     atomic.Bool     // Closed flag for graceful shutdown
 }
 
 // NewStatsCollector creates and initializes a new StatsCollector.
 func NewStatsCollector(config *Config) *StatsCollector {
-	return &StatsCollector{
-		StartTime: time.Now(),
-		Config:    config,
+	sc := &StatsCollector{
+		StartTime:  time.Now(),
+		Config:     config,
+		recordChan: make(chan RecordData, 10000), // Buffer 10000 records
 	}
+
+	// Start worker goroutines for async stats processing
+	workerCount := 4 // Parallel workers for better throughput
+	for i := 0; i < workerCount; i++ {
+		sc.wg.Add(1)
+		go sc.statsWorker()
+	}
+
+	return sc
 }
 
 // getMetrics retrieves or creates a Metrics object for a given key from a given map.
@@ -122,13 +137,52 @@ type RecordData struct {
 	IsError      bool
 }
 
-// Record processes a RecordData event and updates all relevant metrics.
+// Record processes a RecordData event asynchronously.
+// This method is non-blocking and will drop data if the channel is full
+// to avoid impacting request performance.
 func (sc *StatsCollector) Record(data RecordData) {
-	sc.updateMetricsForDim(&sc.RuleStats, data.RuleKey, data)
-	sc.updateMetricsForDim(&sc.UserStats, data.UserKey, data)
-	sc.updateMetricsForDim(&sc.ServerStats, data.ServerKey, data)
-	sc.updateMetricsForDim(&sc.TunnelStats, data.TunnelKey, data)
-	sc.updateMetricsForDim(&sc.ProxyStats, data.ProxyKey, data)
+	// If collector is closed, ignore
+	if sc.closed.Load() {
+		return
+	}
+
+	// Non-blocking send to avoid blocking request processing
+	select {
+	case sc.recordChan <- data:
+		// Successfully queued for async processing
+	default:
+		// Channel is full, drop the data to avoid blocking
+		// This is acceptable for statistics - we prioritize performance
+		DebugLog("[STATS] Record channel full, dropping stats data")
+	}
+}
+
+// statsWorker processes stats updates in the background.
+func (sc *StatsCollector) statsWorker() {
+	defer sc.wg.Done()
+
+	for data := range sc.recordChan {
+		sc.updateMetricsForDim(&sc.RuleStats, data.RuleKey, data)
+		sc.updateMetricsForDim(&sc.UserStats, data.UserKey, data)
+		sc.updateMetricsForDim(&sc.ServerStats, data.ServerKey, data)
+		sc.updateMetricsForDim(&sc.TunnelStats, data.TunnelKey, data)
+		sc.updateMetricsForDim(&sc.ProxyStats, data.ProxyKey, data)
+	}
+}
+
+// Close gracefully shuts down the stats collector.
+// It closes the channel and waits for all workers to finish processing.
+func (sc *StatsCollector) Close() {
+	// Set closed flag using atomic swap
+	if sc.closed.Swap(true) {
+		return // Already closed
+	}
+
+	// Close the channel to signal workers to exit
+	close(sc.recordChan)
+
+	// Wait for all workers to finish processing remaining data
+	sc.wg.Wait()
 }
 
 // updateMetricsForDim updates the metrics for a specific dimension (rule, user, etc.).
@@ -299,6 +353,100 @@ func (sc *StatsCollector) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(stats)
+}
+
+// GetMetricsForKey retrieves and converts metrics for a specific key from a sync.Map to PublicMetrics.
+func (sc *StatsCollector) GetMetricsForKey(m *sync.Map, key string) *PublicMetrics {
+	value, ok := m.Load(key)
+	if !ok {
+		return nil
+	}
+
+	metrics := value.(*Metrics)
+	metrics.mutex.Lock()
+	defer metrics.mutex.Unlock()
+
+	requestCount := atomic.LoadUint64(&metrics.RequestCount)
+	totalBytesSent := atomic.LoadUint64(&metrics.BytesSent.Total)
+	totalBytesRecv := atomic.LoadUint64(&metrics.BytesRecv.Total)
+	totalResponseTime := atomic.LoadInt64(&metrics.ResponseTime.Total)
+
+	var avgBytesSent, avgBytesRecv float64
+	var avgResponseTimeMs float64
+	if requestCount > 0 {
+		avgBytesSent = float64(totalBytesSent) / float64(requestCount)
+		avgBytesRecv = float64(totalBytesRecv) / float64(requestCount)
+		avgResponseTimeMs = float64(totalResponseTime) / float64(requestCount) / 1e6
+	}
+
+	// 构建QPS统计信息
+	var qpsMetric PublicQPSMetric
+	if !metrics.firstRequestTime.IsZero() && !metrics.lastRequestTime.IsZero() {
+		duration := metrics.lastRequestTime.Sub(metrics.firstRequestTime).Seconds()
+		var currentQPS float64
+		if duration > 1 {
+			currentQPS = float64(requestCount) / duration
+		} else {
+			currentQPS = float64(requestCount)
+		}
+
+		qpsMetric = PublicQPSMetric{
+			Avg: metrics.QPS.Avg,
+			Min: metrics.QPS.Min,
+			Max: metrics.QPS.Max,
+		}
+
+		if metrics.QPS.Min == -1 {
+			qpsMetric.Min = currentQPS
+			qpsMetric.Avg = currentQPS
+			qpsMetric.Max = currentQPS
+		}
+	} else {
+		qpsMetric = PublicQPSMetric{
+			Avg: 0,
+			Min: 0,
+			Max: 0,
+		}
+	}
+
+	minBytesSent := metrics.BytesSent.Min
+	if minBytesSent == ^uint64(0) {
+		minBytesSent = 0
+	}
+	minBytesRecv := metrics.BytesRecv.Min
+	if minBytesRecv == ^uint64(0) {
+		minBytesRecv = 0
+	}
+	minResponseTimeMs := metrics.ResponseTime.Min
+	if minResponseTimeMs == -1 {
+		minResponseTimeMs = 0
+	} else {
+		minResponseTimeMs /= 1e6
+	}
+
+	return &PublicMetrics{
+		RequestCount: requestCount,
+		Errors:       atomic.LoadUint64(&metrics.Errors),
+		QPS:          qpsMetric,
+		BytesSent: PublicNumericMetric{
+			Total: totalBytesSent,
+			Avg:   avgBytesSent,
+			Min:   minBytesSent,
+			Max:   metrics.BytesSent.Max,
+		},
+		BytesRecv: PublicNumericMetric{
+			Total: totalBytesRecv,
+			Avg:   avgBytesRecv,
+			Min:   minBytesRecv,
+			Max:   metrics.BytesRecv.Max,
+		},
+		ResponseTime: PublicTimeMetric{
+			TotalMs: float64(totalResponseTime) / 1e6,
+			AvgMs:   avgResponseTimeMs,
+			MinMs:   minResponseTimeMs,
+			MaxMs:   metrics.ResponseTime.Max / 1e6,
+		},
+	}
 }
 
 // buildPublicMetricsMap converts a sync.Map of internal Metrics to a map of PublicMetrics.

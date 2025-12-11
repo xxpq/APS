@@ -280,6 +280,7 @@ func main() {
 	scriptRunner := NewScriptRunner(config.Scripting)
 	trafficShaper := NewTrafficShaper(dataStore.QuotaUsage)
 	statsCollector := NewStatsCollector(config)
+	defer statsCollector.Close() // Ensure graceful shutdown of async stats workers
 
 	// 初始化静态文件缓存管理器
 	staticCache := NewStaticCacheManager(config.StaticCache)

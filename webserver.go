@@ -231,13 +231,13 @@ func (h *AdminHandlers) handleTunnelEndpoints(w http.ResponseWriter, r *http.Req
 	}
 
 	type PublicEndpointInfo struct {
-		Name         string `json:"name"`
-		Online       bool   `json:"online"`
-		RemoteAddr   string `json:"remoteAddr"`
-		OnlineTime   string `json:"onlineTime"`
-		LastActivity string `json:"lastActivity"`
-		Latency      string `json:"latency"`
-		// Stats        *PublicMetrics `json:"stats"` // Stats temporarily disabled
+		Name         string         `json:"name"`
+		Online       bool           `json:"online"`
+		RemoteAddr   string         `json:"remoteAddr"`
+		OnlineTime   string         `json:"onlineTime"`
+		LastActivity string         `json:"lastActivity"`
+		Latency      string         `json:"latency"`
+		Stats        *PublicMetrics `json:"stats,omitempty"` // Stats enabled
 	}
 
 	response := struct {
@@ -266,8 +266,8 @@ func (h *AdminHandlers) handleTunnelEndpoints(w http.ResponseWriter, r *http.Req
 			RemoteAddr:   ep.RemoteAddr,
 			OnlineTime:   onlineTimeStr,
 			LastActivity: lastActivityStr,
-			Latency:      "-", // Latency measurement disabled
-			// Stats:        nil, // Stats not yet exposed in EndpointInfo
+			Latency:      "-",      // Latency measurement disabled
+			Stats:        ep.Stats, // Include statistics from endpoint info
 		})
 	}
 
