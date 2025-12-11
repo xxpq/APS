@@ -439,6 +439,12 @@ func (ep *TCPEndpoint) handleResponseMessage(msg *TunnelMessage) {
 		return
 	}
 
+	defer func() {
+		if r := recover(); r != nil {
+			DebugLog("[TCP TUNNEL] Recovered from panic in handleResponseMessage (likely closed channel): %v", r)
+		}
+	}()
+
 	select {
 	case pending.responseChan <- msg:
 		DebugLog("[TCP TUNNEL] Successfully routed message type %d for request %s", msg.Type, requestID)
