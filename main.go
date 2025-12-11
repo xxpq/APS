@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -300,6 +301,7 @@ func main() {
 	serverManager.StartAll()
 
 	startQuotaPersistence(dataStore, trafficShaper, *dataFile)
+	startStatsCollection(dataStore, statsCollector, *dataFile)
 
 	log.Println("===========================================")
 	log.Printf("Loaded %d mapping rules:", len(config.Mappings))
@@ -391,7 +393,7 @@ func createServerHandler(serverName string, mappings []*Mapping, serverConfig *L
 		mux.HandleFunc("/.api/stats", stats.ServeHTTP)
 
 		// 注册管理面板处理器
-		adminHandlers := NewAdminHandlers(config, configFile)
+		adminHandlers := NewAdminHandlers(config, configFile, dataStore)
 		// 设置tunnel管理器引用，用于查询endpoint状态
 		adminHandlers.SetTunnelManager(tunnelManager)
 		adminHandlers.RegisterHandlers(mux)
@@ -527,4 +529,101 @@ func startQuotaPersistence(dataStore *DataStore, trafficShaper *TrafficShaper, d
 			}
 		}
 	}()
+}
+
+func startStatsCollection(dataStore *DataStore, stats *StatsCollector, dataFile string) {
+	ticker := time.NewTicker(1 * time.Minute)
+	go func() {
+		for range ticker.C {
+			snapshot := TimeSeriesSnapshot{
+				Timestamp: time.Now().Unix(),
+				Global: GlobalStats{
+					TotalRequests:     atomic.LoadUint64(&stats.TotalRequests),
+					ActiveConnections: atomic.LoadInt64(&stats.ActiveConnections),
+					BytesReceived:     atomic.LoadUint64(&stats.TotalBytesRecv),
+					BytesSent:         atomic.LoadUint64(&stats.TotalBytesSent),
+				},
+				Rules:   make(map[string]*DimensionStats),
+				Users:   make(map[string]*DimensionStats),
+				Servers: make(map[string]*DimensionStats),
+				Tunnels: make(map[string]*DimensionStats),
+				Proxies: make(map[string]*DimensionStats),
+			}
+
+			// Calculate global QPS
+			uptime := time.Since(stats.StartTime).Seconds()
+			if uptime > 0 {
+				snapshot.Global.RequestsPerSecond = float64(snapshot.Global.TotalRequests) / uptime
+			}
+
+			// Collect dimensional stats - Rules
+			stats.RuleStats.Range(func(key, value interface{}) bool {
+				k := key.(string)
+				m := value.(*Metrics)
+				snapshot.Rules[k] = extractDimensionStats(m)
+				return true
+			})
+
+			// Collect dimensional stats - Users
+			stats.UserStats.Range(func(key, value interface{}) bool {
+				k := key.(string)
+				m := value.(*Metrics)
+				snapshot.Users[k] = extractDimensionStats(m)
+				return true
+			})
+
+			// Collect dimensional stats - Servers
+			stats.ServerStats.Range(func(key, value interface{}) bool {
+				k := key.(string)
+				m := value.(*Metrics)
+				snapshot.Servers[k] = extractDimensionStats(m)
+				return true
+			})
+
+			// Collect dimensional stats - Tunnels
+			stats.TunnelStats.Range(func(key, value interface{}) bool {
+				k := key.(string)
+				m := value.(*Metrics)
+				snapshot.Tunnels[k] = extractDimensionStats(m)
+				return true
+			})
+
+			// Collect dimensional stats - Proxies
+			stats.ProxyStats.Range(func(key, value interface{}) bool {
+				k := key.(string)
+				m := value.(*Metrics)
+				snapshot.Proxies[k] = extractDimensionStats(m)
+				return true
+			})
+
+			// Add snapshot to data store
+			dataStore.AddSnapshot(snapshot)
+
+			// Save to disk
+			if err := SaveDataStore(dataStore, dataFile); err != nil {
+				log.Printf("[STATS] Error saving time series data: %v", err)
+			}
+		}
+	}()
+}
+
+// extractDimensionStats extracts dimension-specific statistics from Metrics
+func extractDimensionStats(m *Metrics) *DimensionStats {
+	requestCount := atomic.LoadUint64(&m.RequestCount)
+	totalBytesRecv := atomic.LoadUint64(&m.BytesRecv.Total)
+	totalBytesSent := atomic.LoadUint64(&m.BytesSent.Total)
+	totalResponseTime := atomic.LoadInt64(&m.ResponseTime.Total)
+
+	var avgRespTime float64
+	if requestCount > 0 {
+		avgRespTime = float64(totalResponseTime) / float64(requestCount) / 1e6 // Convert to ms
+	}
+
+	return &DimensionStats{
+		Requests:    requestCount,
+		BytesRecv:   totalBytesRecv,
+		BytesSent:   totalBytesSent,
+		Errors:      atomic.LoadUint64(&m.Errors),
+		AvgRespTime: avgRespTime,
+	}
 }

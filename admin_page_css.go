@@ -197,4 +197,38 @@ body {
 .advanced-panel.hidden {
   display: none;
 }
+
+/* Time-series charts */
+.charts-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(450px, 1fr));
+  gap: 1.5rem;
+  margin-top: 1rem;
+}
+
+.chart-card {
+  background: white;
+  border: 1px solid #e0e0e0;
+  border-radius: 4px;
+  padding: 1rem;
+  min-height: 350px;
+}
+
+.chart-card h5 {
+  font-size: 1rem;
+  margin: 0 0 1rem 0;
+  color: #161616;
+  font-weight: 600;
+}
+
+.chart-container {
+  min-height: 300px;
+  width: 100%;
+}
+
+@media (max-width: 768px) {
+  .charts-grid {
+    grid-template-columns: 1fr;
+  }
+}
 `

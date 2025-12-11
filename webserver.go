@@ -70,14 +70,16 @@ type AdminHandlers struct {
 	configMux     sync.RWMutex
 	sessions      *SessionStore
 	tunnelManager TunnelManagerInterface
+	dataStore     *DataStore
 }
 
 // NewAdminHandlers creates a new AdminHandlers instance.
-func NewAdminHandlers(config *Config, configPath string) *AdminHandlers {
+func NewAdminHandlers(config *Config, configPath string, dataStore *DataStore) *AdminHandlers {
 	return &AdminHandlers{
 		config:     config,
 		configPath: configPath,
 		sessions:   AdminSessions,
+		dataStore:  dataStore,
 	}
 }
 
@@ -100,6 +102,7 @@ func (h *AdminHandlers) RegisterHandlers(mux *http.ServeMux) {
 	mux.HandleFunc("/.api/servers", h.handleServers)
 	mux.HandleFunc("/.api/rules", h.handleRules)
 	mux.HandleFunc("/.api/firewalls", h.handleFirewalls)
+	mux.HandleFunc("/.api/stats/timeseries", h.handleTimeSeriesStats)
 
 	// 管理面板页面
 	mux.HandleFunc("/.admin/", func(w http.ResponseWriter, r *http.Request) {
@@ -126,6 +129,14 @@ func (h *AdminHandlers) RegisterHandlers(mux *http.ServeMux) {
 	mux.HandleFunc("/.admin/ibm-plex.css", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/css; charset=utf-8")
 		w.Write([]byte(admin_page_carbon_font_css))
+	})
+	mux.HandleFunc("/.admin/carbon/charts.js", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+		w.Write([]byte(admin_page_carbon_charts_js))
+	})
+	mux.HandleFunc("/.admin/carbon/charts.css", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/css; charset=utf-8")
+		w.Write([]byte(admin_page_carbon_charts_css))
 	})
 
 	log.Println("Admin panel API available at '/.api' and UI at '/.admin/'")
@@ -289,19 +300,20 @@ func extractToken(r *http.Request) string {
 	return ""
 }
 
-func (h *AdminHandlers) isAdminToken(token string) bool {
+// isAdminRequest checks admin via session token (cookie) or user.token (Bearer) with admin=true
+func isAdminRequest(r *http.Request, config *Config) bool {
+	// Prefer Authorization: Bearer <token>
+	token := extractToken(r)
 	if token == "" {
 		return false
 	}
-	// Session store (login-issued tokens)
-	if sess, ok := h.sessions.Get(token); ok {
-		if sess.Expires.After(time.Now()) && sess.Admin {
-			return true
-		}
+	// Session tokens from login
+	if sess, ok := AdminSessions.Get(token); ok {
+		return sess.Admin && sess.Expires.After(time.Now())
 	}
-	// Config-defined API tokens (user.token) for admin users
-	if h.config != nil && h.config.Auth != nil && h.config.Auth.Users != nil {
-		for _, u := range h.config.Auth.Users {
+	// Config-defined API tokens
+	if config != nil && config.Auth != nil && config.Auth.Users != nil {
+		for _, u := range config.Auth.Users {
 			if u != nil && u.Token == token && u.Admin {
 				return true
 			}
@@ -329,7 +341,7 @@ func (h *AdminHandlers) handleLogout(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *AdminHandlers) getConfig(w http.ResponseWriter, r *http.Request) {
-	if !h.isAdminToken(extractToken(r)) {
+	if !isAdminRequest(r, h.config) {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -367,7 +379,7 @@ func (h *AdminHandlers) getConfig(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *AdminHandlers) setConfig(w http.ResponseWriter, r *http.Request) {
-	if !h.isAdminToken(extractToken(r)) {
+	if !isAdminRequest(r, h.config) {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -416,7 +428,7 @@ func (h *AdminHandlers) saveConfigLocked() error {
 
 // ===== 用户管理 =====
 func (h *AdminHandlers) handleUsers(w http.ResponseWriter, r *http.Request) {
-	if !h.isAdminToken(extractToken(r)) {
+	if !isAdminRequest(r, h.config) {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -503,7 +515,7 @@ func (h *AdminHandlers) handleUsers(w http.ResponseWriter, r *http.Request) {
 
 // ===== 代理管理 =====
 func (h *AdminHandlers) handleProxies(w http.ResponseWriter, r *http.Request) {
-	if !h.isAdminToken(extractToken(r)) {
+	if !isAdminRequest(r, h.config) {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -565,7 +577,7 @@ func (h *AdminHandlers) handleProxies(w http.ResponseWriter, r *http.Request) {
 
 // ===== 隧道管理 =====
 func (h *AdminHandlers) handleTunnels(w http.ResponseWriter, r *http.Request) {
-	if !h.isAdminToken(extractToken(r)) {
+	if !isAdminRequest(r, h.config) {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -633,7 +645,7 @@ func (h *AdminHandlers) handleTunnels(w http.ResponseWriter, r *http.Request) {
 
 // ===== 服务器管理 =====
 func (h *AdminHandlers) handleServers(w http.ResponseWriter, r *http.Request) {
-	if !h.isAdminToken(extractToken(r)) {
+	if !isAdminRequest(r, h.config) {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -696,7 +708,7 @@ func (h *AdminHandlers) handleServers(w http.ResponseWriter, r *http.Request) {
 
 // ===== 规则管理 =====
 func (h *AdminHandlers) handleRules(w http.ResponseWriter, r *http.Request) {
-	if !h.isAdminToken(extractToken(r)) {
+	if !isAdminRequest(r, h.config) {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -760,7 +772,7 @@ func (h *AdminHandlers) handleRules(w http.ResponseWriter, r *http.Request) {
 
 // ===== 防火墙管理 =====
 func (h *AdminHandlers) handleFirewalls(w http.ResponseWriter, r *http.Request) {
-	if !h.isAdminToken(extractToken(r)) {
+	if !isAdminRequest(r, h.config) {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -824,6 +836,93 @@ func (h *AdminHandlers) handleFirewalls(w http.ResponseWriter, r *http.Request) 
 	default:
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+// ===== 时间序列统计数据 =====
+func (h *AdminHandlers) handleTimeSeriesStats(w http.ResponseWriter, r *http.Request) {
+	if !isAdminRequest(r, h.config) {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if h.dataStore == nil {
+		http.Error(w, "Data store not initialized", http.StatusInternalServerError)
+		return
+	}
+
+	dimension := r.URL.Query().Get("dimension") // global, rules, users, servers, tunnels, proxies
+	key := r.URL.Query().Get("key")             // specific rule/user/server/tunnel/proxy name
+
+	h.dataStore.mu.Lock()
+	defer h.dataStore.mu.Unlock()
+
+	w.Header().Set("Content-Type", "application/json")
+
+	// If no dimension specified or global, return global stats
+	if dimension == "" || dimension == "global" {
+		data := extractGlobalTimeSeries(h.dataStore.TimeSeriesStats)
+		json.NewEncoder(w).Encode(data)
+		return
+	}
+
+	// Return dimensional stats
+	data := extractDimensionTimeSeries(h.dataStore.TimeSeriesStats, dimension, key)
+	json.NewEncoder(w).Encode(data)
+}
+
+// extractGlobalTimeSeries extracts global statistics from snapshots
+func extractGlobalTimeSeries(snapshots []TimeSeriesSnapshot) []map[string]interface{} {
+	result := make([]map[string]interface{}, len(snapshots))
+	for i, s := range snapshots {
+		result[i] = map[string]interface{}{
+			"timestamp":         s.Timestamp,
+			"totalRequests":     s.Global.TotalRequests,
+			"activeConnections": s.Global.ActiveConnections,
+			"requestsPerSecond": s.Global.RequestsPerSecond,
+			"bytesReceived":     s.Global.BytesReceived,
+			"bytesSent":         s.Global.BytesSent,
+		}
+	}
+	return result
+}
+
+// extractDimensionTimeSeries extracts dimensional statistics for a specific key
+func extractDimensionTimeSeries(snapshots []TimeSeriesSnapshot, dimension, key string) []map[string]interface{} {
+	result := make([]map[string]interface{}, 0, len(snapshots))
+
+	for _, s := range snapshots {
+		var dimStats *DimensionStats
+
+		switch dimension {
+		case "rules":
+			dimStats = s.Rules[key]
+		case "users":
+			dimStats = s.Users[key]
+		case "servers":
+			dimStats = s.Servers[key]
+		case "tunnels":
+			dimStats = s.Tunnels[key]
+		case "proxies":
+			dimStats = s.Proxies[key]
+		}
+
+		if dimStats != nil {
+			result = append(result, map[string]interface{}{
+				"timestamp":   s.Timestamp,
+				"requests":    dimStats.Requests,
+				"bytesRecv":   dimStats.BytesRecv,
+				"bytesSent":   dimStats.BytesSent,
+				"errors":      dimStats.Errors,
+				"avgRespTime": dimStats.AvgRespTime,
+			})
+		}
+	}
+
+	return result
 }
 
 func (h *CertHandlers) handleCertPage(w http.ResponseWriter, r *http.Request) {

@@ -1,11 +1,8 @@
 package main
 
 import (
-	"crypto/md5"
 	"encoding/json"
-	"fmt"
 	"net/http"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -199,10 +196,10 @@ func (sc *StatsCollector) updateMetricsForDim(m *sync.Map, key string, data Reco
 		metrics.firstRequestTime = now
 	}
 	metrics.lastRequestTime = now
-	
+
 	// 获取当前请求计数
 	currentRequestCount := atomic.LoadUint64(&metrics.RequestCount)
-	
+
 	// 计算当前QPS值
 	var currentQPS float64
 	if !metrics.firstRequestTime.IsZero() && !metrics.lastRequestTime.IsZero() {
@@ -213,7 +210,7 @@ func (sc *StatsCollector) updateMetricsForDim(m *sync.Map, key string, data Reco
 			currentQPS = float64(currentRequestCount)
 		}
 	}
-	
+
 	// 更新QPS统计信息
 	metrics.QPS.Total = currentQPS
 	if metrics.QPS.Min == -1 {
@@ -282,11 +279,10 @@ type PublicStats struct {
 // ServeHTTP provides an HTTP endpoint to expose stats as JSON.
 func (sc *StatsCollector) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// 未通过认证则进行键名脱敏（支持会话 Cookie 与 Bearer token）
-	mask := true
-	if isAdminRequest(r, sc.Config) {
-		mask = false
+	if !isAdminRequest(r, sc.Config) {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
 	}
-	ts := time.Now()
 
 	stats := PublicStats{
 		TotalRequests:     atomic.LoadUint64(&sc.TotalRequests),
@@ -294,11 +290,11 @@ func (sc *StatsCollector) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		TotalBytesSent:    atomic.LoadUint64(&sc.TotalBytesSent),
 		TotalBytesRecv:    atomic.LoadUint64(&sc.TotalBytesRecv),
 		Uptime:            time.Since(sc.StartTime).String(),
-		Rules:             sc.buildPublicMetricsMap(&sc.RuleStats, mask, ts),
-		Users:             sc.buildPublicMetricsMap(&sc.UserStats, mask, ts),
-		Servers:           sc.buildPublicMetricsMap(&sc.ServerStats, mask, ts),
-		Tunnels:           sc.buildPublicMetricsMap(&sc.TunnelStats, mask, ts),
-		Proxies:           sc.buildPublicMetricsMap(&sc.ProxyStats, mask, ts),
+		Rules:             sc.buildPublicMetricsMap(&sc.RuleStats),
+		Users:             sc.buildPublicMetricsMap(&sc.UserStats),
+		Servers:           sc.buildPublicMetricsMap(&sc.ServerStats),
+		Tunnels:           sc.buildPublicMetricsMap(&sc.TunnelStats),
+		Proxies:           sc.buildPublicMetricsMap(&sc.ProxyStats),
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -306,15 +302,10 @@ func (sc *StatsCollector) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // buildPublicMetricsMap converts a sync.Map of internal Metrics to a map of PublicMetrics.
-func (sc *StatsCollector) buildPublicMetricsMap(m *sync.Map, mask bool, ts time.Time) map[string]*PublicMetrics {
+func (sc *StatsCollector) buildPublicMetricsMap(m *sync.Map) map[string]*PublicMetrics {
 	publicMap := make(map[string]*PublicMetrics)
 	m.Range(func(key, value interface{}) bool {
 		k := key.(string)
-		// 根据认证状态对键名进行脱敏（md5(key + timestamp)）
-		maskedKey := k
-		if mask {
-			maskedKey = fmt.Sprintf("%x", md5.Sum([]byte(fmt.Sprintf("%s:%d", k, ts.UnixNano()))))
-		}
 
 		metrics := value.(*Metrics)
 		metrics.mutex.Lock()
@@ -343,13 +334,13 @@ func (sc *StatsCollector) buildPublicMetricsMap(m *sync.Map, mask bool, ts time.
 			} else {
 				currentQPS = float64(requestCount)
 			}
-			
+
 			qpsMetric = PublicQPSMetric{
-				Avg: metrics.QPS.Avg,   // 使用内部记录的平均值
-				Min: metrics.QPS.Min,   // 使用内部记录的最小值
-				Max: metrics.QPS.Max,   // 使用内部记录的最大值
+				Avg: metrics.QPS.Avg, // 使用内部记录的平均值
+				Min: metrics.QPS.Min, // 使用内部记录的最小值
+				Max: metrics.QPS.Max, // 使用内部记录的最大值
 			}
-			
+
 			// 如果内部min值还是-1（未初始化），则设置为当前值
 			if metrics.QPS.Min == -1 {
 				qpsMetric.Min = currentQPS
@@ -379,7 +370,7 @@ func (sc *StatsCollector) buildPublicMetricsMap(m *sync.Map, mask bool, ts time.
 			minResponseTimeMs /= 1e6
 		}
 
-		publicMap[maskedKey] = &PublicMetrics{
+		publicMap[k] = &PublicMetrics{
 			RequestCount: requestCount,
 			Errors:       atomic.LoadUint64(&metrics.Errors),
 			QPS:          qpsMetric,
@@ -405,35 +396,4 @@ func (sc *StatsCollector) buildPublicMetricsMap(m *sync.Map, mask bool, ts time.
 		return true
 	})
 	return publicMap
-}
-
-// isAdminRequest checks admin via session token (cookie) or user.token (Bearer) with admin=true
-func isAdminRequest(r *http.Request, config *Config) bool {
-	// Prefer Authorization: Bearer <token>
-	token := ""
-	auth := r.Header.Get("Authorization")
-	if strings.HasPrefix(auth, "Bearer ") {
-		token = strings.TrimSpace(auth[7:])
-	}
-	if token == "" {
-		if c, err := r.Cookie("APS-Admin-Token"); err == nil {
-			token = c.Value
-		}
-	}
-	if token == "" {
-		return false
-	}
-	// Session tokens from login
-	if sess, ok := AdminSessions.Get(token); ok {
-		return sess.Admin && sess.Expires.After(time.Now())
-	}
-	// Config-defined API tokens
-	if config != nil && config.Auth != nil && config.Auth.Users != nil {
-		for _, u := range config.Auth.Users {
-			if u != nil && u.Token == token && u.Admin {
-				return true
-			}
-		}
-	}
-	return false
 }

@@ -299,7 +299,7 @@ var admin_page_js = `
       statsTimer = setInterval(() => { 
         // 仅在统计页面且autoRefresh为true时刷新
         if (autoRefresh && currentTab === "tab-stats") refreshStats(); 
-      }, 1000);
+      }, 10000);
     }
     startAutoRefresh();
 
@@ -1768,5 +1768,195 @@ function setupAdvancedPanelToggles() {
       }
     }, 100);
   })();
+
+  // ===== 时间序列图表功能 (扩展维度支持) =====
+  let timeSeriesCharts = {};
+  let currentDimension = 'global';
+  let currentDimensionKey = '';
+  
+  // 维度选择事件
+  const dimSelector = document.getElementById('chart-dimension');
+  if (dimSelector) {
+    dimSelector.addEventListener('change', async (e) => {
+      currentDimension = e.target.value;
+      currentDimensionKey = '';
+      
+      const keySelector = document.getElementById('chart-dimension-key');
+      if (currentDimension === 'global') {
+        keySelector.style.display = 'none';
+        loadTimeSeriesData();
+      } else {
+        // 显示并填充具体项选择
+        await populateDimensionKeys(currentDimension);
+        keySelector.style.display = 'inline-block';
+      }
+    });
+  }
+  
+  // 具体项选择事件
+  const keySelector = document.getElementById('chart-dimension-key');
+  if (keySelector) {
+    keySelector.addEventListener('change', (e) => {
+      currentDimensionKey = e.target.value;
+      if (currentDimensionKey) {
+        loadTimeSeriesData();
+      }
+    });
+  }
+  
+  // 填充维度选项
+  async function populateDimensionKeys(dimension) {
+    const select = document.getElementById('chart-dimension-key');
+    select.innerHTML = '<option value="">选择...</option>';
+    
+    try {
+      const res = await authFetch(` + "`" + `/.api/${dimension}` + "`" + `);
+      if (!res.ok) throw new Error('Failed to load dimension keys');
+      const data = await res.json();
+      
+      Object.keys(data).forEach(key => {
+        const option = document.createElement('option');
+        option.value = key;
+        option.textContent = key;
+        select.appendChild(option);
+      });
+    } catch (e) {
+      console.error('Error loading dimension keys:', e);
+    }
+  }
+  
+  async function loadTimeSeriesData() {
+    let url = '/.api/stats/timeseries';
+    
+    if (currentDimension !== 'global' && currentDimensionKey) {
+      url += ` + "`" + `?dimension=${currentDimension}&key=${encodeURIComponent(currentDimensionKey)}` + "`" + `;
+    }
+    
+    try {
+      const res = await authFetch(url);
+      if (!res.ok) throw new Error('Failed to load time-series data');
+      const data = await res.json();
+      renderCharts(data);
+    } catch (e) {
+      console.error('Error loading time-series data:', e);
+    }
+  }
+  
+  function renderCharts(snapshots) {
+    if (!snapshots || snapshots.length === 0) return;
+    
+    if (currentDimension === 'global') {
+      // 全局统计渲染
+      renderLineChart('chart-requests', [{
+        group: '总请求数',
+        data: snapshots.map(s => ({ date: new Date(s.timestamp * 1000), value: s.totalRequests }))
+      }]);
+      
+      renderAreaChart('chart-traffic', [
+        { group: '接收流量', data: snapshots.map(s => ({ date: new Date(s.timestamp * 1000), value: (s.bytesReceived / (1024 * 1024)).toFixed(2) })) },
+        { group: '发送流量', data: snapshots.map(s => ({ date: new Date(s.timestamp * 1000), value: (s.bytesSent / (1024 * 1024)).toFixed(2) })) }
+      ]);
+      
+      renderLineChart('chart-connections', [{
+        group: '活跃连接',
+        data: snapshots.map(s => ({ date: new Date(s.timestamp * 1000), value: s.activeConnections }))
+      }]);
+      
+      renderLineChart('chart-qps', [{
+        group: '请求/秒',
+        data: snapshots.map(s => ({ date: new Date(s.timestamp * 1000), value: s.requestsPerSecond ? s.requestsPerSecond.toFixed(2) : 0 }))
+      }]);
+    } else {
+      // 维度统计渲染
+      renderLineChart('chart-requests', [{
+        group: '请求数',
+        data: snapshots.map(s => ({ date: new Date(s.timestamp * 1000), value: s.requests }))
+      }]);
+      
+      renderAreaChart('chart-traffic', [
+        { group: '接收', data: snapshots.map(s => ({ date: new Date(s.timestamp * 1000), value: (s.bytesRecv / (1024 * 1024)).toFixed(2) })) },
+        { group: '发送', data: snapshots.map(s => ({ date: new Date(s.timestamp * 1000), value: (s.bytesSent / (1024 * 1024)).toFixed(2) })) }
+      ]);
+      
+      renderLineChart('chart-connections', [{
+        group: '错误数',
+        data: snapshots.map(s => ({ date: new Date(s.timestamp * 1000), value: s.errors || 0 }))
+      }]);
+      
+      renderLineChart('chart-qps', [{
+        group: '响应时间(ms)',
+        data: snapshots.map(s => ({ date: new Date(s.timestamp * 1000), value: s.avgRespTime ? s.avgRespTime.toFixed(2) : 0 }))
+      }]);
+    }
+  }
+  
+  function renderLineChart(containerId, dataSets) {
+    const container = document.getElementById(containerId);
+    if (!container) return;
+    
+    const data = [];
+    dataSets.forEach(ds => {
+      ds.data.forEach(point => {
+        data.push({ group: ds.group, date: point.date, value: parseFloat(point.value) });
+      });
+    });
+    
+    const options = {
+      title: '',
+      axes: { bottom: { title: '时间', mapsTo: 'date', scaleType: 'time' }, left: { mapsTo: 'value', scaleType: 'linear' } },
+      curve: 'curveMonotoneX',
+      height: '300px',
+      legend: { enabled: true },
+      toolbar: { enabled: false }
+    };
+    
+    if (timeSeriesCharts[containerId]) {
+      try { timeSeriesCharts[containerId].destroy(); } catch (e) {}
+    }
+    
+    try {
+      timeSeriesCharts[containerId] = new charts.LineChart(container, { data, options });
+    } catch (e) {
+      container.innerHTML = '<div style="padding: 2rem; text-align: center; color: #da1e28;">图表渲染失败</div>';
+    }
+  }
+  
+  function renderAreaChart(containerId, dataSets) {
+    const container = document.getElementById(containerId);
+    if (!container) return;
+    
+    const data = [];
+    dataSets.forEach(ds => {
+      ds.data.forEach(point => {
+        data.push({ group: ds.group, date: point.date, value: parseFloat(point.value) });
+      });
+    });
+    
+    const options = {
+      title: '',
+      axes: { bottom: { title: '时间', mapsTo: 'date', scaleType: 'time' }, left: { mapsTo: 'value', scaleType: 'linear' } },
+      curve: 'curveMonotoneX',
+      height: '300px',
+      legend: { enabled: true },
+      toolbar: { enabled: false }
+    };
+    
+    if (timeSeriesCharts[containerId]) {
+      try { timeSeriesCharts[containerId].destroy(); } catch (e) {}
+    }
+    
+    try {
+      timeSeriesCharts[containerId] = new charts.AreaChart(container, { data, options });
+    } catch (e) {
+      container.innerHTML = '<div style="padding: 2rem; text-align: center; color: #da1e28;">图表渲染失败</div>';
+    }
+  }
+  
+  const btnRefreshCharts = document.getElementById('btn-refresh-charts');
+  if (btnRefreshCharts) btnRefreshCharts.addEventListener('click', loadTimeSeriesData);
+  
+  setTimeout(loadTimeSeriesData, 2000);
+  setInterval(loadTimeSeriesData, 5 * 60 * 1000);
+
 }); // End of DOMContentLoaded
 `

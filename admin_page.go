@@ -17,6 +17,9 @@ var admin_page_content = `
   <!-- Carbon Design System 样式 -->
   <link href="/.admin/carbon.css" rel="stylesheet">
 
+  <!-- Carbon Charts for time-series visualization -->
+  <link rel="stylesheet" href="https://unpkg.com/@carbon/charts@1.16.0/dist/styles.css">
+
 </head>
 <body>
   <!-- Mobile sidebar overlay -->
@@ -24,7 +27,7 @@ var admin_page_content = `
   
   <!-- Mobile sidebar -->
   <div class="mobile-sidebar" id="mobile-sidebar">
-    <a class="mobile-nav-item" href="#" data-tab="tab-stats">统计</a>
+    <a class="mobile-nav-item auth-required" href="#" data-tab="tab-stats">统计</a>
     <a class="mobile-nav-item auth-required" href="#" data-tab="tab-rules">路由</a>
     <a class="mobile-nav-item auth-required" href="#" data-tab="tab-servers">服务</a>
     <a class="mobile-nav-item auth-required" href="#" data-tab="tab-tunnels">隧道</a>
@@ -40,7 +43,7 @@ var admin_page_content = `
     <button class="hamburger-btn" id="hamburger-btn" aria-label="Toggle menu">☰</button>
     <nav class="bx--header__nav" aria-label="APS 管理面板">
       <ul class="bx--header__menu-bar">
-        <li><a class="bx--header__menu-item" href="#" data-tab="tab-stats">统计</a></li>
+        <li class="auth-required"><a class="bx--header__menu-item" href="#" data-tab="tab-stats">统计</a></li>
         <li class="auth-required"><a class="bx--header__menu-item" href="#" data-tab="tab-rules">路由</a></li>
         <li class="auth-required"><a class="bx--header__menu-item" href ="#" data-tab="tab-servers">服务</a></li>
         <li class="auth-required"><a class="bx--header__menu-item" href="#" data-tab="tab-tunnels">隧道</a></li>
@@ -58,7 +61,7 @@ var admin_page_content = `
       <h2>APS 管理面板</h2>
       <div class="status-line">
         <span id="auth-status" class="pill">未登录</span>
-        <span class="pill">刷新频率: 1s</span>
+        <span class="pill">刷新频率: 10s</span>
         <span class="pill"><a href="/.ssl" target="_blank" style="text-decoration:none;color:inherit;">证书安装</a></span>
       </div>
     </div>
@@ -109,6 +112,52 @@ var admin_page_content = `
               <tbody id="stats-tbody">
               </tbody>
             </table>
+          </div>
+        </div>
+
+        <!-- 时间序列图表 -->
+        <div class="mt-3">
+          <div class="flex mb-2" style="align-items: center; gap: 1rem;">
+            <h4 style="margin: 0;">24小时趋势</h4>
+            
+            <!-- 维度选择 -->
+            <select id="chart-dimension" class="bx--select-input">
+              <option value="global">全局统计</option>
+              <option value="rules">按规则</option>
+              <option value="users">按用户</option>
+              <option value="servers">按服务器</option>
+              <option value="tunnels">按隧道</option>
+              <option value="proxies">按代理</option>
+            </select>
+            
+            <!-- 具体项选择（动态填充） -->
+            <select id="chart-dimension-key" class="bx--select-input" style="display: none;">
+              <option value="">选择...</option>
+            </select>
+            
+            <button id="btn-refresh-charts" class="bx--btn bx--btn--sm bx--btn--secondary" style="margin -left: auto;">刷新图表</button>
+          </div>
+          
+          <div class="charts-grid">
+            <div class="chart-card">
+              <h5>请求数量</h5>
+              <div id="chart-requests" class="chart-container"></div>
+            </div>
+            
+            <div class="chart-card">
+              <h5>流量统计 (MB)</h5>
+              <div id="chart-traffic" class="chart-container"></div>
+            </div>
+            
+            <div class="chart-card">
+              <h5>活跃连接</h5>
+              <div id="chart-connections" class="chart-container"></div>
+            </div>
+            
+            <div class="chart-card">
+              <h5>请求速率 (req/s)</h5>
+              <div id="chart-qps" class="chart-container"></div>
+            </div>
           </div>
         </div>
 
@@ -441,6 +490,8 @@ var admin_page_content = `
 
   <!-- Carbon JS -->
   <script src="/.admin/carbon.js"></script>
+  <!-- Carbon Charts JS -->
+  <script src="https://unpkg.com/@carbon/charts@1.16.0/dist/index.umd.js"></script>
   <script src="/.admin/script.js"></script>
 </body>
 </html>`

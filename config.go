@@ -53,8 +53,63 @@ type StaticCacheConfig struct {
 }
 
 type DataStore struct {
-	QuotaUsage map[string]*QuotaUsageData `json:"quotaUsage,omitempty"`
-	mu         sync.Mutex
+	QuotaUsage      map[string]*QuotaUsageData `json:"quotaUsage,omitempty"`
+	TimeSeriesStats []TimeSeriesSnapshot       `json:"timeSeriesStats,omitempty"`
+	mu              sync.Mutex
+}
+
+// TimeSeriesSnapshot represents a point-in-time statistics snapshot with dimensional data
+type TimeSeriesSnapshot struct {
+	Timestamp int64 `json:"timestamp"` // Unix timestamp in seconds
+
+	// Global statistics
+	Global GlobalStats `json:"global"`
+
+	// Dimensional statistics (only store top active dimensions to limit storage)
+	Rules   map[string]*DimensionStats `json:"rules,omitempty"`
+	Users   map[string]*DimensionStats `json:"users,omitempty"`
+	Servers map[string]*DimensionStats `json:"servers,omitempty"`
+	Tunnels map[string]*DimensionStats `json:"tunnels,omitempty"`
+	Proxies map[string]*DimensionStats `json:"proxies,omitempty"`
+}
+
+// GlobalStats contains system-wide statistics
+type GlobalStats struct {
+	TotalRequests     uint64  `json:"totalRequests"`
+	ActiveConnections int64   `json:"activeConnections"`
+	RequestsPerSecond float64 `json:"requestsPerSecond"`
+	BytesReceived     uint64  `json:"bytesReceived"`
+	BytesSent         uint64  `json:"bytesSent"`
+}
+
+// DimensionStats contains statistics for a specific dimension (rule, user, etc.)
+type DimensionStats struct {
+	Requests    uint64  `json:"requests"`
+	BytesRecv   uint64  `json:"bytesRecv"`
+	BytesSent   uint64  `json:"bytesSent"`
+	Errors      uint64  `json:"errors"`
+	AvgRespTime float64 `json:"avgRespTime"` // milliseconds
+}
+
+// AddSnapshot adds a new snapshot and removes data older than 24 hours
+func (ds *DataStore) AddSnapshot(snapshot TimeSeriesSnapshot) {
+	ds.mu.Lock()
+	defer ds.mu.Unlock()
+
+	// Add new snapshot
+	ds.TimeSeriesStats = append(ds.TimeSeriesStats, snapshot)
+
+	// Clean up snapshots older than 24 hours
+	now := snapshot.Timestamp
+	cutoff := now - 24*60*60
+
+	filtered := []TimeSeriesSnapshot{}
+	for _, s := range ds.TimeSeriesStats {
+		if s.Timestamp >= cutoff {
+			filtered = append(filtered, s)
+		}
+	}
+	ds.TimeSeriesStats = filtered
 }
 
 // GetQuotaUsages 批量获取多个 source 的配额使用情况（单次加锁）
@@ -645,7 +700,10 @@ func LoadDataStore(filename string) (*DataStore, error) {
 	if err != nil {
 		if os.IsNotExist(err) {
 			log.Printf("Data file '%s' not found, creating a new one.", filename)
-			return &DataStore{QuotaUsage: make(map[string]*QuotaUsageData)}, nil
+			return &DataStore{
+				QuotaUsage:      make(map[string]*QuotaUsageData),
+				TimeSeriesStats: []TimeSeriesSnapshot{},
+			}, nil
 		}
 		return nil, err
 	}
@@ -656,11 +714,18 @@ func LoadDataStore(filename string) (*DataStore, error) {
 	if err := decoder.Decode(&dataStore); err != nil {
 		log.Printf("Error decoding data file '%s', starting with empty data: %v", filename, err)
 		// If the file is corrupted or empty, start with a fresh data store
-		return &DataStore{QuotaUsage: make(map[string]*QuotaUsageData)}, nil
+		return &DataStore{
+			QuotaUsage:      make(map[string]*QuotaUsageData),
+			TimeSeriesStats: []TimeSeriesSnapshot{},
+		}, nil
 	}
 
 	if dataStore.QuotaUsage == nil {
 		dataStore.QuotaUsage = make(map[string]*QuotaUsageData)
+	}
+
+	if dataStore.TimeSeriesStats == nil {
+		dataStore.TimeSeriesStats = []TimeSeriesSnapshot{}
 	}
 
 	return &dataStore, nil
