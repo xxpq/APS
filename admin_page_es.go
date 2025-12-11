@@ -1,9 +1,10 @@
-package main
+﻿package main
 
 var admin_page_js = `
     // 简易状态
     let autoRefresh = true;
     let authToken = ""; // Authorization: Bearer
+    let currentTab = "tab-stats"; // 当前激活的标签页
     const statsUrl = "/.api/stats";
     const configUrl = "/.api/config";
     const loginUrl = "/.api/login";
@@ -58,11 +59,33 @@ var admin_page_js = `
     
     // 切换tab并自动加载数据
     function switchTab(tabId) {
+      // 更新当前tab
+      currentTab = tabId;
+      
+      // 隐藏所有tab内容
       document.querySelectorAll(".bx--tab-content").forEach(function(t) { 
         t.classList.add("hidden"); 
       });
       var target = document.getElementById(tabId);
       if (target) target.classList.remove("hidden");
+      
+      // 更新桌面端导航active状态
+      document.querySelectorAll(".bx--header__menu-item").forEach(function(item) {
+        if (item.getAttribute("data-tab") === tabId) {
+          item.classList.add("active");
+        } else {
+          item.classList.remove("active");
+        }
+      });
+      
+      // 更新移动端导航active状态
+      document.querySelectorAll(".mobile-nav-item").forEach(function(item) {
+        if (item.getAttribute("data-tab") === tabId) {
+          item.classList.add("active");
+        } else {
+          item.classList.remove("active");
+        }
+      });
       
       // 自动加载对应tab的数据
       setTimeout(function() {
@@ -78,6 +101,7 @@ var admin_page_js = `
           if (typeof populateFirewallSelectors === "function") populateFirewallSelectors();
         }
         else if (tabId === "tab-firewalls" && typeof loadFirewalls === "function") loadFirewalls();
+        else if (tabId === "tab-config" && typeof loadConfig === "function") loadConfig();
       }, 100);
     }
     
@@ -130,13 +154,27 @@ var admin_page_js = `
       document.getElementById("api-token").value = savedToken;
       setAuthStatus(true);
     }
+    
+    // 初始化默认tab的active状态
+    setTimeout(function() {
+      document.querySelectorAll(".bx--header__menu-item").forEach(function(item) {
+        if (item.getAttribute("data-tab") === "tab-stats") {
+          item.classList.add("active");
+        }
+      });
+      document.querySelectorAll(".mobile-nav-item").forEach(function(item) {
+        if (item.getAttribute("data-tab") === "tab-stats") {
+          item.classList.add("active");
+        }
+      });
+    }, 100);
 
     // 登录/退出
     document.getElementById("btn-login").addEventListener("click", async () => {
       const username = document.getElementById("username").value.trim();
       const password = document.getElementById("password").value.trim();
       try {
-        const res = await fetch(loginUrl, {
+        const res = await authFetch(loginUrl, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ username, password })
@@ -168,7 +206,7 @@ var admin_page_js = `
         const token = tokenInput || authToken;
         if (token) headers["Authorization"] = "Bearer " + token;
 
-        const res = await fetch(logoutUrl, { method: "POST", headers });
+        const res = await authFetch(logoutUrl, { method: "POST", headers });
         if (!res.ok) {
           const text = await res.text();
           throw new Error("退出失败: " + text);
@@ -214,7 +252,7 @@ var admin_page_js = `
         const token = tokenInput || authToken;
         if (token) headers["Authorization"] = "Bearer " + token;
 
-        const res = await fetch(configUrl, { headers });
+        const res = await authFetch(configUrl, { headers });
         if (!res.ok) {
           const text = await res.text();
           throw new Error("读取配置失败: " + text);
@@ -243,7 +281,7 @@ var admin_page_js = `
         } catch (e) {
           throw new Error("JSON 解析失败，请检查格式");
         }
-        const res = await fetch(configUrl, { method: "POST", headers, body: JSON.stringify(obj) });
+        const res = await authFetch(configUrl, { method: "POST", headers, body: JSON.stringify(obj) });
         const out = await res.text();
         if (!res.ok) {
           throw new Error("保存失败: " + out);
@@ -258,7 +296,10 @@ var admin_page_js = `
     let statsTimer = null;
     function startAutoRefresh() {
       if (statsTimer) clearInterval(statsTimer);
-      statsTimer = setInterval(() => { if (autoRefresh) refreshStats(); }, 1000);
+      statsTimer = setInterval(() => { 
+        // 仅在统计页面且autoRefresh为true时刷新
+        if (autoRefresh && currentTab === "tab-stats") refreshStats(); 
+      }, 1000);
     }
     startAutoRefresh();
 
@@ -270,7 +311,7 @@ var admin_page_js = `
 
     async function refreshStats() {
       try {
-        const res = await fetch(statsUrl);
+        const res = await authFetch(statsUrl);
         if (!res.ok) {
           const text = await res.text();
           throw new Error("获取统计失败: " + text);
@@ -369,6 +410,49 @@ function buildAuthHeaders(base) {
   return headers;
 }
 
+// Global 401 handler - auto logout
+function handleUnauthorized() {
+  console.warn("401 Unauthorized - session expired");
+  
+  // Clear all authentication-related cookies immediately
+  deleteCookie("APS-Admin-Token");     // Server-set HttpOnly cookie
+  deleteCookie("aps-auth-token");       // Client-saved token
+  deleteCookie("aps-logged-in");        // Login status flag
+  authToken = "";
+  
+  // Clear API token input field
+  var tokenInput = document.getElementById("api-token");
+  if (tokenInput) tokenInput.value = "";
+  
+  // Update auth status display to show logged out
+  if (typeof setAuthStatus === "function") {
+    setAuthStatus(false);
+  }
+  
+  // Hide all auth-required menu items (use same method as setAuthStatus)
+  document.querySelectorAll(".auth-required").forEach(function(el) {
+    el.classList.remove("show");
+  });
+  
+  // Switch to auth tab to show login
+  if (typeof switchTab === "function") {
+    switchTab("tab-auth");
+  }
+  
+  showNotification("error", "Session Expired", "Please log in again");
+}
+
+// Unified API fetch wrapper with 401 handling  
+async function authFetch(url, options) {
+  var response = await fetch(url, options);
+  if (response.status === 401) {
+    handleUnauthorized();
+    throw new Error("Unauthorized");
+  }
+  return response;
+}
+
+
 // ===== Notification \u901a\u77e5\u7cfb\u7edf =====
 function showNotification(type, title, subtitle) {
   var container = document.getElementById('notification-container');
@@ -462,7 +546,7 @@ async function loadUsers() {
   var msg = document.getElementById("users-msg");
   if (msg) msg.textContent = "";
   try {
-    var res = await fetch(usersUrl, { headers: buildAuthHeaders({}) });
+    var res = await authFetch(usersUrl, { headers: buildAuthHeaders({}) });
     if (!res.ok) throw new Error(await res.text());
     var data = await res.json();
     var tbody = document.getElementById("users-tbody");
@@ -497,7 +581,7 @@ function openAddUserModal() {
 
 async function openEditUserModal(username) {
   try {
-    var res = await fetch(usersUrl, { headers: buildAuthHeaders({}) });
+    var res = await authFetch(usersUrl, { headers: buildAuthHeaders({}) });
     if (!res.ok) throw new Error(await res.text());
     var data = await res.json();
     var u = data[username] || {};
@@ -537,7 +621,7 @@ async function confirmAddUser() {
   };
   
   try {
-    var res = await fetch(usersUrl, { 
+    var res = await authFetch(usersUrl, { 
       method: "POST", 
       headers: buildAuthHeaders({ "Content-Type": "application/json" }), 
       body: JSON.stringify({ name: name, user: payload }) 
@@ -573,7 +657,7 @@ async function confirmEditUser() {
   if (password && password.length > 0) payload.password = password;
   
   try {
-    var res = await fetch(usersUrl, { 
+    var res = await authFetch(usersUrl, { 
       method: "POST", 
       headers: buildAuthHeaders({ "Content-Type": "application/json" }), 
       body: JSON.stringify({ name: name, user: payload }) 
@@ -595,7 +679,7 @@ async function deleteUser(username) {
   var msg = document.getElementById("users-msg");
   if (msg) msg.textContent = "";
   try {
-    var res = await fetch(usersUrl + "?name=" + encodeURIComponent(username), { 
+    var res = await authFetch(usersUrl + "?name=" + encodeURIComponent(username), { 
       method: "DELETE", 
       headers: buildAuthHeaders({}) 
     });
@@ -629,7 +713,7 @@ async function loadProxies() {
   var msg = document.getElementById("proxies-msg");
   if (msg) msg.textContent = "";
   try {
-    var res = await fetch(proxiesUrl, { headers: buildAuthHeaders({}) });
+    var res = await authFetch(proxiesUrl, { headers: buildAuthHeaders({}) });
     if (!res.ok) throw new Error(await res.text());
     var data = await res.json();
     var tbody = document.getElementById("proxies-tbody");
@@ -658,7 +742,7 @@ function openAddProxyModal() {
 
 async function openEditProxyModal(name) {
   try {
-    var res = await fetch(proxiesUrl, { headers: buildAuthHeaders({}) });
+    var res = await authFetch(proxiesUrl, { headers: buildAuthHeaders({}) });
     if (!res.ok) throw new Error(await res.text());
     var data = await res.json();
     var p = data[name] || {};
@@ -681,7 +765,7 @@ async function confirmAddProxy() {
   if (!name) { if (msg) msg.textContent = "代理名必填"; return; }
   var urls = raw ? raw.split(/\n|,/).map(function(s){return s.trim();}).filter(function(s){return s;}) : [];
   try {
-    var res = await fetch(proxiesUrl, { method: "POST", headers: buildAuthHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ name: name, proxy: { urls: urls } }) });
+    var res = await authFetch(proxiesUrl, { method: "POST", headers: buildAuthHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ name: name, proxy: { urls: urls } }) });
     var text = await res.text();
     if (!res.ok) throw new Error(text);
     if (msg) msg.textContent = "新增成功";
@@ -701,7 +785,7 @@ async function confirmEditProxy() {
   if (!name) { if (msg) msg.textContent = "代理名必填"; return; }
   var urls = raw ? raw.split(/\n|,/).map(function(s){return s.trim();}).filter(function(s){return s;}) : [];
   try {
-    var res = await fetch(proxiesUrl, { method: "POST", headers: buildAuthHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ name: name, proxy: { urls: urls } }) });
+    var res = await authFetch(proxiesUrl, { method: "POST", headers: buildAuthHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ name: name, proxy: { urls: urls } }) });
     var text = await res.text();
     if (!res.ok) throw new Error(text);
     if (msg) msg.textContent = "更新成功";
@@ -718,7 +802,7 @@ async function deleteProxy(name) {
   var msg = document.getElementById("proxies-msg");
   if (msg) msg.textContent = "";
   try {
-    var res = await fetch(proxiesUrl + "?name=" + encodeURIComponent(name), { method: "DELETE", headers: buildAuthHeaders({}) });
+    var res = await authFetch(proxiesUrl + "?name=" + encodeURIComponent(name), { method: "DELETE", headers: buildAuthHeaders({}) });
     var text = await res.text();
     if (!res.ok) throw new Error(text);
     if (msg) msg.textContent = "删除成功";
@@ -753,7 +837,7 @@ async function loadTunnelEndpoints(tunnelName) {
   if (!tunnelName) return;
 
   try {
-    var res = await fetch(tunnelEndpointsUrl + "?tunnel=" + encodeURIComponent(tunnelName), { headers: buildAuthHeaders({}) });
+    var res = await authFetch(tunnelEndpointsUrl + "?tunnel=" + encodeURIComponent(tunnelName), { headers: buildAuthHeaders({}) });
     if (!res.ok) throw new Error(await res.text());
     var data = await res.json();
     (data.endpoints || []).forEach(function(ep){
@@ -786,7 +870,7 @@ async function loadTunnels() {
   var msg = document.getElementById("tunnels-msg");
   if (msg) msg.textContent = "";
   try {
-    var res = await fetch(tunnelsUrl, { headers: buildAuthHeaders({}) });
+    var res = await authFetch(tunnelsUrl, { headers: buildAuthHeaders({}) });
     if (!res.ok) throw new Error(await res.text());
     var data = await res.json();
     var tbody = document.getElementById("tunnels-tbody");
@@ -821,7 +905,7 @@ function openAddTunnelModal() {
 
 async function openEditTunnelModal(name) {
   try {
-    var res = await fetch(tunnelsUrl, { headers: buildAuthHeaders({}) });
+    var res = await authFetch(tunnelsUrl, { headers: buildAuthHeaders({}) });
     if (!res.ok) throw new Error(await res.text());
     var data = await res.json();
     var t = data[name] || {};
@@ -846,7 +930,7 @@ async function confirmAddTunnel() {
   if (!name) { if (msg) msg.textContent = "隧道名必填"; return; }
   var servers = serversRaw ? serversRaw.split(",").map(function(s){return s.trim();}).filter(function(s){return s;}) : [];
   try {
-    var res = await fetch(tunnelsUrl, { method: "POST", headers: buildAuthHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ name: name, tunnel: { password: password || undefined, servers: servers } }) });
+    var res = await authFetch(tunnelsUrl, { method: "POST", headers: buildAuthHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ name: name, tunnel: { password: password || undefined, servers: servers } }) });
     var text = await res.text();
     if (!res.ok) throw new Error(text);
     if (msg) msg.textContent = "新增成功";
@@ -867,7 +951,7 @@ async function confirmEditTunnel() {
   if (!name) { if (msg) msg.textContent = "隧道名必填"; return; }
   var servers = serversRaw ? serversRaw.split(",").map(function(s){return s.trim();}).filter(function(s){return s;}) : [];
   try {
-    var res = await fetch(tunnelsUrl, { method: "POST", headers: buildAuthHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ name: name, tunnel: { password: password && password.length > 0 ? password : undefined, servers: servers } }) });
+    var res = await authFetch(tunnelsUrl, { method: "POST", headers: buildAuthHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ name: name, tunnel: { password: password && password.length > 0 ? password : undefined, servers: servers } }) });
     var text = await res.text();
     if (!res.ok) throw new Error(text);
     if (msg) msg.textContent = "更新成功";
@@ -884,7 +968,7 @@ async function deleteTunnel(name) {
   var msg = document.getElementById("tunnels-msg");
   if (msg) msg.textContent = "";
   try {
-    var res = await fetch(tunnelsUrl + "?name=" + encodeURIComponent(name), { method: "DELETE", headers: buildAuthHeaders({}) });
+    var res = await authFetch(tunnelsUrl + "?name=" + encodeURIComponent(name), { method: "DELETE", headers: buildAuthHeaders({}) });
     var text = await res.text();
     if (!res.ok) throw new Error(text);
     if (msg) msg.textContent = "删除成功";
@@ -895,21 +979,51 @@ async function deleteTunnel(name) {
 }
 
 // ===== 服务 =====
-// 初始化服务Modals (简化版-保留原有内联表单)
 function initServerModals() {
-  // Server模块保留内联表单,暂不实现Modal
+  var addModal = document.querySelector('#server-add-modal');
+  var editModal = document.querySelector('#server-edit-modal');
+  if (addModal) {
+    addModal.querySelectorAll('[data-modal-close]').forEach(function(btn) {
+      btn.addEventListener('click', function() { addModal.classList.remove('is-visible'); });
+    });
+  }
+  if (editModal) {
+    editModal.querySelectorAll('[data-modal-close]').forEach(function(btn) {
+      btn.addEventListener('click', function() { editModal.classList.remove('is-visible'); });
+    });
+  }
 }
 
 // ===== 规则 =====
-// 初始化规则Modals (简化版-保留原有内联表单)
 function initRuleModals() {
-  // Rule模块保留内联表单,暂不实现Modal  
+  var addModal = document.querySelector('#rule-add-modal');
+  var editModal = document.querySelector('#rule-edit-modal');
+  if (addModal) {
+    addModal.querySelectorAll('[data-modal-close]').forEach(function(btn) {
+      btn.addEventListener('click', function() { addModal.classList.remove('is-visible'); });
+    });
+  }
+  if (editModal) {
+    editModal.querySelectorAll('[data-modal-close]').forEach(function(btn) {
+      btn.addEventListener('click', function() { editModal.classList.remove('is-visible'); });
+    });
+  }
 }
 
 // ===== 防火墙 =====
-// 初始化防火墙Modals (简化版-保留原有内联表单)
 function initFirewallModals() {
-  // Firewall模块保留内联表单,暂不实现Modal
+  var addModal = document.querySelector('#firewall-add-modal');
+  var editModal = document.querySelector('#firewall-edit-modal');
+  if (addModal) {
+    addModal.querySelectorAll('[data-modal-close]').forEach(function(btn) {
+      btn.addEventListener('click', function() { addModal.classList.remove('is-visible'); });
+    });
+  }
+  if (editModal) {
+    editModal.querySelectorAll('[data-modal-close]').forEach(function(btn) {
+      btn.addEventListener('click', function() { editModal.classList.remove('is-visible'); });
+    });
+  }
 }
 
 // ===== 服务 =====
@@ -917,7 +1031,7 @@ async function loadServers() {
   var msg = document.getElementById("servers-msg");
   if (msg) msg.textContent = "";
   try {
-    var res = await fetch(serversUrl, { headers: buildAuthHeaders({}) });
+    var res = await authFetch(serversUrl, { headers: buildAuthHeaders({}) });
     if (!res.ok) throw new Error(await res.text());
     var data = await res.json();
     var tbody = document.getElementById("servers-tbody");
@@ -942,48 +1056,18 @@ async function loadServers() {
     if (msg) msg.textContent = "加载失败: " + (e.message || e);
   }
 }
-async function saveServer() {
-  var msg = document.getElementById("servers-msg");
-  if (msg) msg.textContent = "";
-  var nameEl = document.getElementById("server-name");
-  var portEl = document.getElementById("server-port");
-  var rawTCPEl = document.getElementById("server-rawtcp");
-  var publicEl = document.getElementById("server-public");
-  var panelEl = document.getElementById("server-panel");
-  var certEl = document.getElementById("server-cert");
-  var firewallEl = document.getElementById("server-firewall");
-  var name = nameEl ? nameEl.value.trim() : "";
-  var port = portEl ? parseInt(portEl.value.trim(), 10) : 0;
-  var rawTCPVal = rawTCPEl ? rawTCPEl.value : "";
-  var publicVal = publicEl ? publicEl.value : "";
-  var panelVal = panelEl ? panelEl.value : "";
-  var cert = certEl ? certEl.value.trim() : "";
-  var firewall = firewallEl ? firewallEl.value.trim() : "";
-  if (!name) { if (msg) msg.textContent = "服务名称必填"; return; }
-  if (!port || port <= 0) { if (msg) msg.textContent = "端口需为正整数"; return; }
-  var payload = { port: port };
-  if (rawTCPVal) payload.rawTCP = (rawTCPVal === "true");
-  if (publicVal) payload.public = (publicVal === "true");
-  if (panelVal) payload.panel = (panelVal === "true");
-  if (cert) payload.cert = cert;
-  if (firewall) payload.firewall = firewall;
-  try {
-    var res = await fetch(serversUrl, { method: "POST", headers: buildAuthHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ name: name, server: payload }) });
-    var text = await res.text();
-    if (!res.ok) throw new Error(text);
-    if (msg) msg.textContent = "保存/更新成功";
-    // 清空编辑区
-    if (nameEl) nameEl.value = "";
-    if (portEl) portEl.value = "";
-    if (rawTCPEl) rawTCPEl.value = "";
-    if (publicEl) publicEl.value = "";
-    if (panelEl) panelEl.value = "";
-    if (certEl) certEl.value = "";
-    if (firewallEl) firewallEl.value = "";
-    loadServers();
-  } catch (e) {
-    if (msg) msg.textContent = "保存失败: " + (e.message || e);
-  }
+
+function openAddServerModal() {
+  document.getElementById("add-server-name").value = "";
+  document.getElementById("add-server-port").value = "";
+  document.getElementById("add-server-cert").value = "";
+  document.getElementById("add-server-firewall").value = "";
+  document.getElementById("add-server-rawtcp").checked = false;
+  document.getElementById("add-server-public").checked = true;  // default true
+  document.getElementById("add-server-panel").checked = false;
+  populateFirewallSelectors();
+  var modal = document.querySelector('#server-add-modal');
+  if (modal) modal.classList.add('is-visible');
 }
 
 function openEditServerModal(name) {
@@ -996,7 +1080,17 @@ function openEditServerModal(name) {
       document.getElementById("edit-server-port").value = (s.port != null ? s.port : "");
       var certStr = (typeof s.cert === "string" ? s.cert : "");
       document.getElementById("edit-server-cert").value = certStr;
-      document.getElementById("edit-server-firewall").value = (s.firewall || "");
+      
+      // Populate firewall options and set current value
+      populateFirewallSelectors().then(function() {
+        document.getElementById("edit-server-firewall").value = (s.firewall || "");
+      });
+      
+      // Populate boolean fields
+      document.getElementById("edit-server-rawtcp").checked = s.rawTCP || false;
+      document.getElementById("edit-server-public").checked = (s.public !== undefined ? s.public : true);  // default true
+      document.getElementById("edit-server-panel").checked = s.panel || false;
+      
       var modal = document.querySelector('#server-edit-modal');
       if (modal) modal.classList.add('is-visible');
     })
@@ -1011,7 +1105,7 @@ async function deleteServer(name) {
   var msg = document.getElementById("servers-msg");
   if (msg) msg.textContent = "";
   try {
-    var res = await fetch(serversUrl + "?name=" + encodeURIComponent(name), { method: "DELETE", headers: buildAuthHeaders({}) });
+    var res = await authFetch(serversUrl + "?name=" + encodeURIComponent(name), { method: "DELETE", headers: buildAuthHeaders({}) });
     var text = await res.text();
     if (!res.ok) throw new Error(text);
     if (msg) msg.textContent = "删除成功";
@@ -1028,7 +1122,7 @@ async function deleteSelectedServer() {
   var name = nameEl ? nameEl.value.trim() : "";
   if (!name) { if (msg) msg.textContent = "请先选择服务"; return; }
   try {
-    var res = await fetch(serversUrl + "?name=" + encodeURIComponent(name), { method: "DELETE", headers: buildAuthHeaders({}) });
+    var res = await authFetch(serversUrl + "?name=" + encodeURIComponent(name), { method: "DELETE", headers: buildAuthHeaders({}) });
     var text = await res.text();
     if (!res.ok) throw new Error(text);
     if (msg) msg.textContent = "删除成功";
@@ -1038,258 +1132,610 @@ async function deleteSelectedServer() {
   }
 }
 
+async function confirmAddServer() {
+  var msg = document.getElementById("servers-msg");
+  if (msg) msg.textContent = "";
+  var name = document.getElementById("add-server-name").value.trim();
+  var port = document.getElementById("add-server-port").value.trim();
+  var cert = document.getElementById("add-server-cert").value.trim();
+  var firewall = document.getElementById("add-server-firewall").value.trim();
+  
+  if (!name) { if (msg) msg.textContent = "服务名必填"; return; }
+  if (!port) { if (msg) msg.textContent = "端口必填"; return; }
+  
+  var payload = {
+    port: parseInt(port, 10)
+  };
+  if (cert) payload.cert = cert;
+  if (firewall) payload.firewall = firewall;
+  
+  try {
+    var res = await authFetch(serversUrl, {
+      method: "POST",
+      headers: buildAuthHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ name: name, server: payload })
+    });
+    var text = await res.text();
+    if (!res.ok) throw new Error(text);
+    if (msg) msg.textContent = "新增成功";
+    var modal = document.querySelector('#server-add-modal');
+    if (modal) modal.classList.remove('is-visible');
+    loadServers();
+  } catch (e) {
+    if (msg) msg.textContent = "新增失败: " + (e.message || e);
+  }
+}
+
+async function confirmEditServer() {
+  var msg = document.getElementById("servers-msg");
+  if (msg) msg.textContent = "";
+  var name = document.getElementById("edit-server-name").value.trim();
+  var port = document.getElementById("edit-server-port").value.trim();
+  var cert = document.getElementById("edit-server-cert").value.trim();
+  var firewall = document.getElementById("edit-server-firewall").value.trim();
+  
+  if (!name) { if (msg) msg.textContent = "服务名必填"; return; }
+  if (!port) { if (msg) msg.textContent = "端口必填"; return; }
+  
+  var payload = {
+    port: parseInt(port, 10)
+  };
+  if (cert) payload.cert = cert;
+  if (firewall) payload.firewall = firewall;
+  
+  try {
+    var res = await authFetch(serversUrl, {
+      method: "POST",
+      headers: buildAuthHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ name: name, server: payload })
+    });
+    var text = await res.text();
+    if (!res.ok) throw new Error(text);
+    if (msg) msg.textContent = "更新成功";
+    var modal = document.querySelector('#server-edit-modal');
+    if (modal) modal.classList.remove('is-visible');
+    loadServers();
+  } catch (e) {
+    if (msg) msg.textContent = "更新失败: " + (e.message || e);
+  }
+}
+
 // ===== 规则 =====
 async function loadRules() {
   var msg = document.getElementById("rules-msg");
   if (msg) msg.textContent = "";
   try {
-    var res = await fetch(rulesUrl, { headers: buildAuthHeaders({}) });
+    var res = await authFetch(rulesUrl, { headers: buildAuthHeaders({}) });
     if (!res.ok) throw new Error(await res.text());
     var data = await res.json();
     var tbody = document.getElementById("rules-tbody");
     if (tbody) tbody.innerHTML = "";
-    for (var i = 0; i < (data || []).length; i++) {
-      var m = data[i] || {};
-      var fromStr = (typeof m.from === "string") ? m.from : (m.from && m.from.url ? m.from.url : "");
-      var toStr = (typeof m.to === "string") ? m.to : (m.to && m.to.url ? m.to.url : "");
-      var servers = m.servers;
-      var serversStr = "";
-      if (typeof servers === "string") serversStr = servers;
-      else if (servers && servers.length) serversStr = servers.join(",");
+    
+    (data || []).forEach(function(rule, index) {
+      var fromSummary = typeof rule.from === 'string' ? rule.from : (rule.from && rule.from.url ? rule.from.url : JSON.stringify(rule.from || {}));
+      var toSummary = typeof rule.to === 'string' ? rule.to : (rule.to && rule.to.url ? rule.to.url : JSON.stringify(rule.to || {}));
+      var serversSummary = '';
+      if (rule.servers) {
+        if (typeof rule.servers === 'string') {
+          serversSummary = rule.servers;
+        } else if (Array.isArray(rule.servers)) {
+          serversSummary = rule.servers.join(', ');
+        }
+      }
+      
+      // Truncate if too long
+      if (fromSummary.length > 30) fromSummary = fromSummary.substring(0, 27) + "...";
+      if (toSummary.length > 30) toSummary = toSummary.substring(0, 27) + "...";
+      if (serversSummary.length > 30) serversSummary = serversSummary.substring(0, 27) + "...";
+      
       var tr = document.createElement("tr");
-      tr.innerHTML = "<td>" + i + "</td><td>" + fromStr + "</td><td>" + toStr + "</td><td>" + serversStr + "</td>";
-      (function(index, mappingObj){
-        tr.addEventListener("click", function(){
-          var idxEl = document.getElementById("rule-index");
-          var edEl = document.getElementById("rule-editor");
-          if (idxEl) idxEl.value = index;
-          if (edEl) edEl.value = JSON.stringify(mappingObj, null, 2);
-        });
-      })(i, m);
+      tr.innerHTML = "<td>" + index + "</td>" +
+        "<td>" + fromSummary + "</td>" +
+        "<td>" + toSummary + "</td>" +
+        "<td>" + (serversSummary || "-") + "</td>" +
+        "<td><button class='bx--btn bx--btn--sm bx--btn--ghost' onclick='openEditRuleModal(" + index + ")'>编辑</button> " +
+        "<button class='bx--btn bx--btn--sm bx--btn--danger--ghost' onclick='deleteRule(" + index + ")'>删除</button></td>";
       if (tbody) tbody.appendChild(tr);
-    }
-    if (msg) msg.textContent = "路由列表已加载";
+    });
+    
+    if (msg) msg.textContent = "路由列表已加载 (" + (data || []).length + " 条规则)";
   } catch (e) {
     if (msg) msg.textContent = "加载失败: " + (e.message || e);
   }
 }
-async function saveRule() {
-  var msg = document.getElementById("rules-msg");
-  if (msg) msg.textContent = "";
-  var idxEl = document.getElementById("rule-index");
-  var edEl = document.getElementById("rule-editor");
-  var idxRaw = idxEl ? idxEl.value.trim() : "";
-  var text = edEl ? edEl.value : "";
-  var mapping;
-  try {
-    mapping = JSON.parse(text);
-  } catch (e) {
-    if (msg) msg.textContent = "JSON 解析失败";
-    return;
-  }
-  var payload = { mapping: mapping };
-  if (idxRaw !== "") {
-    var idx = parseInt(idxRaw, 10);
-    if (!isNaN(idx)) payload.index = idx;
-  }
-  try {
-    var res = await fetch(rulesUrl, { method: "POST", headers: buildAuthHeaders({ "Content-Type": "application/json" }), body: JSON.stringify(payload) });
-    var out = await res.text();
-    if (!res.ok) throw new Error(out);
-    if (msg) msg.textContent = "新增/更新成功";
-    // 清空编辑区
-    if (edEl) edEl.value = "{}";
-    if (idxEl) idxEl.value = "";
-    loadRules();
-  } catch (e) {
-    if (msg) msg.textContent = "保存失败: " + (e.message || e);
-  }
+
+function openAddRuleModal() {
+  // 清空基础字段
+  var addFrom = document.getElementById("add-rule-from");
+  var addTo = document.getElementById("add-rule-to");
+  var addServers = document.getElementById("add-rule-servers");
+  var addVia = document.getElementById("add-rule-via-endpoints");
+  
+  if (addFrom) addFrom.value = "";
+  if (addTo) addTo.value = "";
+  if (addServers) addServers.value = "";
+  if (addVia) addVia.value = "";
+  
+  // 重置高级选项
+  var fromAdvCheckbox = document.getElementById("add-rule-from-advanced");
+  var toAdvCheckbox = document.getElementById("add-rule-to-advanced");
+  var fromAdvPanel = document.getElementById("add-rule-from-advanced-panel");
+  var toAdvPanel = document.getElementById("add-rule-to-advanced-panel");
+  
+  if (fromAdvCheckbox) fromAdvCheckbox.checked = false;
+  if (toAdvCheckbox) toAdvCheckbox.checked = false;
+  if (fromAdvPanel) fromAdvPanel.classList.add("hidden");
+  if (toAdvPanel) toAdvPanel.classList.add("hidden");
+  
+  // 清空高级字段
+  var fromProxy = document.getElementById("add-rule-from-proxy");
+  var toInsecure = document.getElementById("add-rule-to-insecure");
+  var toHeaders = document.getElementById("add-rule-to-headers");
+  var toReplace = document.getElementById("add-rule-to-replace");
+  
+  if (fromProxy) fromProxy.value = "";
+  if (toInsecure) toInsecure.checked = false;
+  if (toHeaders) toHeaders.value = "";
+  if (toReplace) toReplace.value = "";
+  
+  var modal = document.querySelector('#rule-add-modal');
+  if (modal) modal.classList.add('is-visible');
 }
-async function deleteSelectedRule() {
-  var msg = document.getElementById("rules-msg");
-  if (msg) msg.textContent = "";
-  var idxEl = document.getElementById("rule-index");
-  var idxRaw = idxEl ? idxEl.value.trim() : "";
-  if (idxRaw === "") { if (msg) msg.textContent = "请填写要删除的索引"; return; }
-  var idx = parseInt(idxRaw, 10);
-  if (isNaN(idx)) { if (msg) msg.textContent = "索引必须为数字"; return; }
-  try {
-    var res = await fetch(rulesUrl + "?index=" + idx, { method: "DELETE", headers: buildAuthHeaders({}) });
-    var out = await res.text();
-    if (!res.ok) throw new Error(out);
-    if (msg) msg.textContent = "删除成功";
-    loadRules();
-  } catch (e) {
-    if (msg) msg.textContent = "删除失败: " + (e.message || e);
+
+function openEditRuleModal(index) {
+  authFetch(rulesUrl, { headers: buildAuthHeaders({}) })
+    .then(function(res) { return res.json(); })
+    .then(function(data) {
+      var rule = (data || [])[index];
+      if (!rule) {
+        showNotification('error', '错误', '规则不存在');
+        return;
+      }
+      
+      document.getElementById("edit-rule-index").value = index;
+      
+      // 填充from
+      populateFromFields(rule.from, 'edit');
+      
+      // 填充to
+      populateToFields(rule.to, 'edit');
+      
+      // 填充via
+      if (rule.via && rule.via.endpoints) {
+        document.getElementById("edit-rule-via-endpoints").value = rule.via.endpoints;
+      } else {
+        document.getElementById("edit-rule-via-endpoints").value = "";
+      }
+      
+      // 填充servers
+      var servers = '';
+      if (rule.servers) {
+        servers = Array.isArray(rule.servers) ? rule.servers.join(', ') : rule.servers;
+      }
+      document.getElementById("edit-rule-servers").value = servers;
+      
+      var modal = document.querySelector('#rule-edit-modal');
+      if (modal) modal.classList.add('is-visible');
+    })
+    .catch(function(e) {
+      showNotification('error', '加载失败', e.message || e);
+    });
+}
+
+function populateFromFields(from, prefix) {
+  var fromInput = document.getElementById(prefix + "-rule-from");
+  var advCheckbox = document.getElementById(prefix + "-rule-from-advanced");
+  var proxyInput = document.getElementById(prefix + "-rule-from-proxy");
+  var advPanel = document.getElementById(prefix + "-rule-from-advanced-panel");
+  
+  if (!fromInput) return; // Element doesn't exist
+  
+  if (typeof from === 'string') {
+    // 简单字符串
+    fromInput.value = from;
+    if (advCheckbox) advCheckbox.checked = false;
+    if (advPanel) advPanel.classList.add("hidden");
+    if (proxyInput) proxyInput.value = "";
+  } else if (Array.isArray(from)) {
+    // 数组 - 多行显示
+    fromInput.value = from.join('\n');
+    if (advCheckbox) advCheckbox.checked = false;
+    if (advPanel) advPanel.classList.add("hidden");
+    if (proxyInput) proxyInput.value = "";
+  } else if (typeof from === 'object') {
+    // 对象
+    if (advCheckbox) advCheckbox.checked = true;
+    if (advPanel) advPanel.classList.remove("hidden");
+    
+    var urls = Array.isArray(from.url) ? from.url : [from.url];
+    fromInput.value = urls.join('\n');
+    if (proxyInput) proxyInput.value = from.proxy || "";
   }
 }
 
+function populateToFields(to, prefix) {
+  var toInput = document.getElementById(prefix + "-rule-to");
+  var advCheckbox = document.getElementById(prefix + "-rule-to-advanced");
+  var insecureCheckbox = document.getElementById(prefix + "-rule-to-insecure");
+  var headersTextarea = document.getElementById(prefix + "-rule-to-headers");
+  var replaceTextarea = document.getElementById(prefix + "-rule-to-replace");
+  var advPanel = document.getElementById(prefix + "-rule-to-advanced-panel");
+  
+  if (!toInput) return; // Element doesn't exist
+  
+  if (typeof to === 'string') {
+    // 简单字符串
+    toInput.value = to;
+    if (advCheckbox) advCheckbox.checked = false;
+    if (advPanel) advPanel.classList.add("hidden");
+    if (insecureCheckbox) insecureCheckbox.checked = false;
+    if (headersTextarea) headersTextarea.value = "";
+    if (replaceTextarea) replaceTextarea.value = "";
+  } else if (typeof to === 'object') {
+    // 对象
+    toInput.value = to.url || "";
+    if (advCheckbox) advCheckbox.checked = true;
+    if (advPanel) advPanel.classList.remove("hidden");
+    
+    if (insecureCheckbox) insecureCheckbox.checked = to.insecure || false;
+    if (headersTextarea) headersTextarea.value = to.headers ? JSON.stringify(to.headers, null, 2) : "";
+    if (replaceTextarea) replaceTextarea.value = to.replace ? JSON.stringify(to.replace, null, 2) : "";
+  }
+}
+
+async function deleteRule(index) {
+  if (!confirm('确认删除规则 #' + index + ' ?')) return;
+  
+  var msg = document.getElementById('rules-msg');
+  if (msg) msg.textContent = '';
+  
+  try {
+    var res = await authFetch(rulesUrl + '?index=' + index, { 
+      method: 'DELETE', 
+      headers: buildAuthHeaders({}) 
+    });
+    if (!res.ok) throw new Error(await res.text());
+    
+    showNotification('success', '删除成功', '规则已删除');
+    loadRules();
+  } catch (e) {
+    showNotification('error', '删除失败', e.message || e);
+  }
+}
+
+function buildFromConfig(prefix) {
+  var fromAdvanced = document.getElementById(prefix + '-rule-from-advanced').checked;
+  var fromText = document.getElementById(prefix + '-rule-from').value.trim();
+  
+  if (!fromText) {
+    showNotification('error', '验证失败', '源路径不能为空');
+    return null;
+  }
+  
+  if (fromAdvanced) {
+    // 高级配置
+    var fromProxy = document.getElementById(prefix + '-rule-from-proxy').value.trim();
+    var urlList = fromText.split('\n').map(function(s) { return s.trim(); }).filter(function(s) { return s; });
+    
+    if (fromProxy) {
+      // 有proxy，使用对象形式
+      return {
+        url: urlList.length === 1 ? urlList[0] : urlList,
+        proxy: fromProxy
+      };
+    } else {
+      // 无proxy，返回URL或URL数组
+      return urlList.length === 1 ? urlList[0] : urlList;
+    }
+  } else {
+    // 简单配置 - 检查是否多行
+    var urlList = fromText.split('\n').map(function(s) { return s.trim(); }).filter(function(s) { return s; });
+    return urlList.length === 1 ? urlList[0] : urlList;
+  }
+}
+
+function buildToConfig(prefix) {
+  var toAdvanced = document.getElementById(prefix + '-rule-to-advanced').checked;
+  var toUrl = document.getElementById(prefix + '-rule-to').value.trim();
+  
+  if (!toUrl) {
+    showNotification('error', '验证失败', '目标路径不能为空');
+    return null;
+  }
+  
+  if (toAdvanced) {
+    // 高级配置
+    var to = { url: toUrl };
+    
+    var insecure = document.getElementById(prefix + '-rule-to-insecure').checked;
+    if (insecure) to.insecure = true;
+    
+    var headersJson = document.getElementById(prefix + '-rule-to-headers').value.trim();
+    if (headersJson) {
+      try {
+        to.headers = JSON.parse(headersJson);
+      } catch (e) {
+        showNotification('error', 'Headers JSON格式错误', e.message || 'JSON解析失败');
+        return null;
+      }
+    }
+    
+    var replaceJson = document.getElementById(prefix + '-rule-to-replace').value.trim();
+    if (replaceJson) {
+      try {
+        to.replace = JSON.parse(replaceJson);
+      } catch (e) {
+        showNotification('error', 'Replace JSON格式错误', e.message || 'JSON解析失败');
+        return null;
+      }
+    }
+    
+    return to;
+  } else {
+    // 简单配置
+    return toUrl;
+  }
+}
+
+async function confirmAddRule() {
+  var msg = document.getElementById('rules-msg');
+  if (msg) msg.textContent = '';
+  
+  // 构建from
+  var from = buildFromConfig('add');
+  if (!from) return; // 验证失败
+  
+  // 构建to
+  var to = buildToConfig('add');
+  if (!to) return; // 验证失败
+  
+  var rule = { from: from, to: to };
+  
+  // Via
+  var viaEndpoints = document.getElementById('add-rule-via-endpoints').value.trim();
+  if (viaEndpoints) {
+    rule.via = { endpoints: viaEndpoints };
+  }
+  
+  // Servers
+  var serversStr = document.getElementById('add-rule-servers').value.trim();
+  if (serversStr) {
+    var serversList = serversStr.split(',').map(function(s) { return s.trim(); }).filter(function(s) { return s; });
+    if (serversList.length === 1) {
+      rule.servers = serversList[0];
+    } else if (serversList.length > 1) {
+      rule.servers = serversList;
+    }
+  }
+  
+  try {
+    var res = await authFetch(rulesUrl, {
+      method: 'POST',
+      headers: buildAuthHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify(rule)
+    });
+    
+    if (!res.ok) throw new Error(await res.text());
+    
+    showNotification('success', '新增成功', '规则已添加');
+    var modal = document.querySelector('#rule-add-modal');
+    if (modal) modal.classList.remove('is-visible');
+    loadRules();
+  } catch (e) {
+    showNotification('error', '新增失败', e.message || e);
+  }
+}
+
+async function confirmEditRule() {
+  var msg = document.getElementById('rules-msg');
+  if (msg) msg.textContent = '';
+  
+  var index = document.getElementById('edit-rule-index').value;
+  
+  // 构建from
+  var from = buildFromConfig('edit');
+  if (!from) return; // 验证失败
+  
+  // 构建to
+  var to = buildToConfig('edit');
+  if (!to) return; // 验证失败
+  
+  var rule = { from: from, to: to };
+  
+  // Via
+  var viaEndpoints = document.getElementById('edit-rule-via-endpoints').value.trim();
+  if (viaEndpoints) {
+    rule.via = { endpoints: viaEndpoints };
+  }
+  
+  // Servers
+  var serversStr = document.getElementById('edit-rule-servers').value.trim();
+  if (serversStr) {
+    var serversList = serversStr.split(',').map(function(s) { return s.trim(); }).filter(function(s) { return s; });
+    if (serversList.length === 1) {
+      rule.servers = serversList[0];
+    } else if (serversList.length > 1) {
+      rule.servers = serversList;
+    }
+  }
+  
+  try {
+    // 删除旧规则
+    var delRes = await authFetch(rulesUrl + '?index=' + index, {
+      method: 'DELETE',
+      headers: buildAuthHeaders({})
+    });
+    if (!delRes.ok) throw new Error(await delRes.text());
+    
+    // 添加新规则
+    var addRes = await authFetch(rulesUrl, {
+      method: 'POST',
+      headers: buildAuthHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify(rule)
+    });
+    
+    if (!addRes.ok) throw new Error(await addRes.text());
+    
+    showNotification('success', '更新成功', '规则已更新');
+    var modal = document.querySelector('#rule-edit-modal');
+    if (modal) modal.classList.remove('is-visible');
+    loadRules();
+  } catch (e) {
+    showNotification('error', '更新失败', e.message || e);
+  }
+}
+
+
 // ===== 防火墙 =====
+// Unified data format parser
+function parseFirewallRules(rules) {
+  if (!rules) return [];
+  // Handle array format
+  if (Array.isArray(rules)) {
+    // Single element with newlines: ["ip1\nip2\nip3"]
+    if (rules.length === 1 && typeof rules[0] === 'string' && rules[0].includes('\n')) {
+      return rules[0].split('\n').map(function(s){ return s.trim(); }).filter(Boolean);
+    }
+    // Regular array: ["ip1", "ip2"]
+    return rules;
+  }
+  // Handle string format: "ip1\nip2\nip3"
+  if (typeof rules === 'string') {
+    return rules.split('\n').map(function(s){ return s.trim(); }).filter(Boolean);
+  }
+  return [];
+}
+
 async function loadFirewalls() {
   var msg = document.getElementById("firewalls-msg");
   if (msg) msg.textContent = "";
   try {
-    var res = await fetch(firewallsUrl, { headers: buildAuthHeaders({}) });
+    var res = await authFetch(firewallsUrl, { headers: buildAuthHeaders({}) });
     if (!res.ok) throw new Error(await res.text());
     var data = await res.json();
+    
     var tbody = document.getElementById("firewalls-tbody");
     if (tbody) tbody.innerHTML = "";
-    Object.keys(data || {}).forEach(function(name){
+    
+    Object.keys(data || {}).forEach(function(name) {
       var fw = data[name] || {};
-      var allow = fw.allow || [];
-      var block = fw.block || [];
-      var mode = allow.length > 0 ? "白名单" : (block.length > 0 ? "黑名单" : "无规则");
+      var allowList = parseFirewallRules(fw.allow);
+      var blockList = parseFirewallRules(fw.block);
+      
+      var mode = allowList.length > 0 ? "白名单" : (blockList.length > 0 ? "黑名单" : "无规则");
+      var count = allowList.length + blockList.length;
+      var preview = allowList.length > 0 ? allowList.slice(0, 2).join(", ") : blockList.slice(0, 2).join(", ");
+      if (count > 2) preview += "...";
+      
       var tr = document.createElement("tr");
       tr.innerHTML = "<td>" + name + "</td>" +
         "<td>" + mode + "</td>" +
-        "<td>" + allow.join(", ") + "</td>" +
-        "<td>" + block.join(", ") + "</td>";
-      tr.addEventListener("click", function(){
-        var el;
-        el = document.getElementById("firewall-name"); if (el) el.value = name;
-        el = document.getElementById("firewall-allow"); if (el) el.value = allow.join("\n");
-        el = document.getElementById("firewall-block"); if (el) el.value = block.join("\n");
-      });
+        "<td>" + count + "</td>" +
+        "<td>" + (preview || "-") + "</td>" +
+        "<td><button class='bx--btn bx--btn--sm bx--btn--ghost' onclick='openEditFirewallModal(\"" + name.replace(/"/g, '&quot;') + "\")'>编辑</button> " +
+        "<button class='bx--btn bx--btn--sm bx--btn--danger--ghost' onclick='deleteFirewall(\"" + name.replace(/"/g, '&quot;') + "\")'>删除</button></td>";
       if (tbody) tbody.appendChild(tr);
     });
-    if (msg) msg.textContent = "防火墙规则已加载";
+    
+    if (msg) msg.textContent = "防火墙规则已加载 (" + Object.keys(data || {}).length + " 组规则)";
   } catch (e) {
     if (msg) msg.textContent = "加载失败: " + (e.message || e);
   }
 }
-async function saveFirewall() {
-  var msg = document.getElementById("firewalls-msg");
-  if (msg) msg.textContent = "";
-  var nameEl = document.getElementById("firewall-name");
-  var allowEl = document.getElementById("firewall-allow");
-  var blockEl = document.getElementById("firewall-block");
-  var name = nameEl ? nameEl.value.trim() : "";
-  var allowRaw = allowEl ? allowEl.value.trim() : "";
-  var blockRaw = blockEl ? blockEl.value.trim() : "";
-  if (!name) { if (msg) msg.textContent = "规则名称必填"; return; }
-  var allow = allowRaw ? allowRaw.split("\\n").map(function(s){return s.trim();}).filter(function(s){return s;}) : [];
-  var block = blockRaw ? blockRaw.split("\\n").map(function(s){return s.trim();}).filter(function(s){return s;}) : [];
-  var firewall = {};
-  if (allow.length > 0) firewall.allow = allow;
-  if (block.length > 0) firewall.block = block;
-  try {
-    var res = await fetch(firewallsUrl, { method: "POST", headers: buildAuthHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ name: name, firewall: firewall }) });
-    var text = await res.text();
-    if (!res.ok) throw new Error(text);
-    if (msg) msg.textContent = "保存/更新成功";
-    // 清空编辑区
-    if (nameEl) nameEl.value = "";
-    if (allowEl) allowEl.value = "";
-    if (blockEl) blockEl.value = "";
-    loadFirewalls();
-    populateFirewallSelectors(); // Refresh dropdowns
-  } catch (e) {
-    if (msg) msg.textContent = "保存失败: " + (e.message || e);
-  }
-}
-async function deleteSelectedFirewall() {
-  var msg = document.getElementById("firewalls-msg");
-  if (msg) msg.textContent = "";
-  var nameEl = document.getElementById("firewall-name");
-  var name = nameEl ? nameEl.value.trim() : "";
-  if (!name) { if (msg) msg.textContent = "请先选择/填写规则名称"; return; }
-  try {
-    var res = await fetch(firewallsUrl + "?name=" + encodeURIComponent(name), { method: "DELETE", headers: buildAuthHeaders({}) });
-    var text = await res.text();
-    if (!res.ok) throw new Error(text);
-    if (msg) msg.textContent = "删除成功";
-    loadFirewalls();
-  } catch (e) {
-    if (msg) msg.textContent = "删除失败: " + (e.message || e);
-  }
+
+function openAddFirewallModal() {
+  var modal = document.querySelector('#firewall-add-modal');
+  if (!modal) return;
+  
+  var nameEl = document.getElementById('add-firewall-name');
+  var allowEl = document.getElementById('add-firewall-allow');
+  var blockEl = document.getElementById('add-firewall-block');
+  
+  if (nameEl) nameEl.value = '';
+  if (allowEl) allowEl.value = '';
+  if (blockEl) blockEl.value = '';
+  
+  modal.classList.add('is-visible');
 }
 
-// Rule Modal helpers
-function openEditRuleModal(idx) {
-  document.getElementById("add-rule-editor").value = "{}";
-  fetch(rulesUrl, { headers: buildAuthHeaders({}) })
-    .then(function(res) { return res.json(); })
-    .then(function(data) {
-      var rule = (data || [])[idx];
-      if (rule) {
-        document.getElementById("add-rule-editor").value = JSON.stringify(rule, null, 2);
-        document.getElementById("rule-index").value = idx;
-      }
-      var modal = document.querySelector('#rule-add-modal');
-      if (modal) modal.classList.add('is-visible');
-    })
-    .catch(function(e) {
-      var msg = document.getElementById("rules-msg");
-      if (msg) msg.textContent = "加载规则失败: " + (e.message || e);
-    });
-}
-
-async function deleteRule(idx) {
-  if (!confirm("确定要删除规则 #" + idx + " 吗?")) return;
-  var msg = document.getElementById("rules-msg");
-  if (msg) msg.textContent = "";
-  try {
-    var res = await fetch(rulesUrl + "?index=" + idx, { method: "DELETE", headers: buildAuthHeaders({}) });
-    var out = await res.text();
-    if (!res.ok) throw new Error(out);
-    if (msg) msg.textContent = "删除成功";
-    loadRules();
-  } catch (e) {
-    if (msg) msg.textContent = "删除失败: " + (e.message || e);
-  }
-}
-
-// Firewall Modal helpers
 function openEditFirewallModal(name) {
-  document.getElementById("add-firewall-name").value = name;
-  fetch(firewallsUrl, { headers: buildAuthHeaders({}) })
+  var modal = document.querySelector('#firewall-edit-modal');
+  if (!modal) return;
+  
+  authFetch(firewallsUrl, { headers: buildAuthHeaders({}) })
     .then(function(res) { return res.json(); })
     .then(function(data) {
-      var fw = data[name] || {};
-      document.getElementById("add-firewall-allow").value = (fw.allow || []).join("\n");
-      document.getElementById("add-firewall-block").value = (fw.block || []).join("\n");
-      var modal = document.querySelector('#firewall-add-modal');
-      if (modal) modal.classList.add('is-visible');
+      var fw = data[name];
+      if (!fw) {
+        showNotification('error', '错误', '防火墙规则不存在');
+        return;
+      }
+      
+      var nameEl = document.getElementById('edit-firewall-name');
+      var allowEl = document.getElementById('edit-firewall-allow');
+      var blockEl = document.getElementById('edit-firewall-block');
+      
+      if (nameEl) nameEl.value = name;
+      if (allowEl) allowEl.value = parseFirewallRules(fw.allow).join('\n');
+      if (blockEl) blockEl.value = parseFirewallRules(fw.block).join('\n');
+      
+      modal.classList.add('is-visible');
     })
     .catch(function(e) {
-      var msg = document.getElementById("firewalls-msg");
-      if (msg) msg.textContent = "加载防火墙失败: " + (e.message || e);
+      showNotification('error', '加载失败', e.message || e);
     });
 }
 
 async function deleteFirewall(name) {
-  if (!confirm("确定要删除防火墙策略 '" + name + "' 吗?")) return;
-  var msg = document.getElementById("firewalls-msg");
-  if (msg) msg.textContent = "";
+  if (!confirm('确认删除防火墙规则 "' + name + '" ?')) return;
+  
+  var msg = document.getElementById('firewalls-msg');
+  if (msg) msg.textContent = '';
+  
   try {
-    var res = await fetch(firewallsUrl + "?name=" + encodeURIComponent(name), { method: "DELETE", headers: buildAuthHeaders({}) });
-    var text = await res.text();
-    if (!res.ok) throw new Error(text);
-    if (msg) msg.textContent = "删除成功";
+    var res = await authFetch(firewallsUrl + '?name=' + encodeURIComponent(name), { 
+      method: 'DELETE', 
+      headers: buildAuthHeaders({}) 
+    });
+    if (!res.ok) throw new Error(await res.text());
+    
+    showNotification('success', '删除成功', '防火墙规则已删除');
     loadFirewalls();
-    populateFirewallSelectors();
   } catch (e) {
-    if (msg) msg.textContent = "删除失败: " + (e.message || e);
+    showNotification('error', '删除失败', e.message || e);
   }
 }
+
 
 // 填充防火墙下拉框
 async function populateFirewallSelectors() {
   try {
-    var res = await fetch(firewallsUrl, { headers: buildAuthHeaders({}) });
+    var res = await authFetch(firewallsUrl, { headers: buildAuthHeaders({}) });
     if (!res.ok) return; // Silently fail if can't load firewalls
     var data = await res.json();
     var names = Object.keys(data || {});
     
-    // Populate server firewall selector
-    var serverFwEl = document.getElementById("server-firewall");
-    if (serverFwEl) {
-      serverFwEl.innerHTML = '<option value="">无</option>';
+    // Populate add server firewall selector
+    var addServerFwEl = document.getElementById("add-server-firewall");
+    if (addServerFwEl) {
+      addServerFwEl.innerHTML = '<option value="">无</option>';
       names.forEach(function(name) {
         var opt = document.createElement("option");
         opt.value = name;
         opt.textContent = name;
-        serverFwEl.appendChild(opt);
+        addServerFwEl.appendChild(opt);
+      });
+    }
+    
+    // Populate edit server firewall selector
+    var editServerFwEl = document.getElementById("edit-server-firewall");
+    if (editServerFwEl) {
+      editServerFwEl.innerHTML = '<option value="">无</option>';
+      names.forEach(function(name) {
+        var opt = document.createElement("option");
+        opt.value = name;
+        opt.textContent = name;
+        editServerFwEl.appendChild(opt);
       });
     }
     
@@ -1336,6 +1782,43 @@ window.loadRules = loadRules;
 window.loadFirewalls = loadFirewalls;
 window.loadTunnelEndpoints = loadTunnelEndpoints;
 
+// 设置高级面板切换逻辑
+function setupAdvancedPanelToggles() {
+  // Add modal toggles
+  var addFromAdvCheckbox = document.getElementById('add-rule-from-advanced');
+  if (addFromAdvCheckbox) {
+    addFromAdvCheckbox.addEventListener('change', function() {
+      var panel = document.getElementById('add-rule-from-advanced-panel');
+      if (panel) panel.classList.toggle('hidden', !this.checked);
+    });
+  }
+  
+  var addToAdvCheckbox = document.getElementById('add-rule-to-advanced');
+  if (addToAdvCheckbox) {
+    addToAdvCheckbox.addEventListener('change', function() {
+      var panel = document.getElementById('add-rule-to-advanced-panel');
+      if (panel) panel.classList.toggle('hidden', !this.checked);
+    });
+  }
+  
+  // Edit modal toggles
+  var editFromAdvCheckbox = document.getElementById('edit-rule-from-advanced');
+  if (editFromAdvCheckbox) {
+    editFromAdvCheckbox.addEventListener('change', function() {
+      var panel = document.getElementById('edit-rule-from-advanced-panel');
+      if (panel) panel.classList.toggle('hidden', !this.checked);
+    });
+  }
+  
+  var editToAdvCheckbox = document.getElementById('edit-rule-to-advanced');
+  if (editToAdvCheckbox) {
+    editToAdvCheckbox.addEventListener('change', function() {
+      var panel = document.getElementById('edit-rule-to-advanced-panel');
+      if (panel) panel.classList.toggle('hidden', !this.checked);
+    });
+  }
+}
+
 // 绑定按钮事件
 (function bindMgmtEvents(){
   function on(id, evt, fn){
@@ -1364,34 +1847,17 @@ window.loadTunnelEndpoints = loadTunnelEndpoints;
   on("confirm-edit-tunnel", "click", confirmEditTunnel);
 
   on("btn-servers-load", "click", loadServers);
-  on("btn-servers-add", "click", function() {
-    var modal = document.querySelector('#server-add-modal');
-    if (modal) modal.classList.add('is-visible');
-  });
-  on("btn-servers-save", "click", saveServer);
-  on("btn-servers-delete", "click", deleteSelectedServer);
-  on("confirm-add-server", "click", saveServer);
-  on("confirm-edit-server", "click", saveServer);
+  on("btn-servers-add", "click", openAddServerModal);
+  on("confirm-add-server", "click", confirmAddServer);
+  on("confirm-edit-server", "click", confirmEditServer);
 
   on("btn-rules-load", "click", loadRules);
-  on("btn-rules-add", "click", function() {
-    var modal = document.querySelector('#rule-add-modal');
-    if (modal) modal.classList.add('is-visible');
-  });
-  on("btn-rules-save", "click", saveRule);
-  on("btn-rules-delete", "click", deleteSelectedRule);
-  on("confirm-add-rule", "click", saveRule);
-  on("confirm-edit-rule", "click", saveRule);
+  on("btn-rules-add", "click", openAddRuleModal);
+  on("confirm-add-rule", "click", confirmAddRule);
+  on("confirm-edit-rule", "click", confirmEditRule);
 
   on("btn-firewalls-load", "click", loadFirewalls);
-  on("btn-firewalls-add", "click", function() {
-    var modal = document.querySelector('#firewall-add-modal');
-    if (modal) modal.classList.add('is-visible');
-  });
-  on("btn-firewalls-save", "click", saveFirewall);
-  on("btn-firewalls-delete", "click", deleteSelectedFirewall);
-  on("confirm-add-firewall", "click", saveFirewall);
-  on("confirm-edit-firewall", "click", saveFirewall);
+  on("btn-firewalls-add", "click", openAddFirewallModal);
   
   // 初始加载一次
     refreshStats();

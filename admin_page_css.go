@@ -171,4 +171,30 @@ body {
     grid-template-columns: repeat(2, 1fr);
   }
 }
+/* Active navigation states */
+.bx--header__menu-item.active {
+  background-color: #393939;
+  cursor: default;
+  pointer-events: none;
+}
+.mobile-nav-item.active {
+  background-color: #393939;
+  border-left: 3px solid #0f62fe;
+  cursor: default;
+  pointer-events: none;
+}
+
+/* 高级面板样式 */
+.advanced-panel {
+  margin-left: 1.5rem;
+  margin-top: 0.5rem;
+  padding: 1rem;
+  background-color: #f4f4f4;
+  border-left: 3px solid #0f62fe;
+  border-radius: 4px;
+}
+
+.advanced-panel.hidden {
+  display: none;
+}
 `

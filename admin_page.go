@@ -385,21 +385,6 @@ var admin_page_content = `
       </div>
     </section>
 
-    <!-- 路由规则管理 -->
-    <section id="tab-rules" class="bx--tab-content hidden" role="tabpanel" aria-labelledby="路由">
-              <div class="bx--form-item"><label class="bx--label">服务名称</label><input id="server-name" type="text" class="bx--text-input w-full"></div>
-              <div class="bx--form-item mt-1"><label class="bx--label">监听端口</label><input id="server-port" type="number" class="bx--text-input w-full" placeholder="8080"></div>
-              <div class="bx--form-item mt-1"><label class="bx--label">透明代理</label><select id="server-rawtcp" class="bx--select"><option value="">默认(false)</option><option value="true">启用</option><option value="false">禁用</option></select></div>
-              <div class="bx--form-item mt-1"><label class="bx--label">公共服务</label><select id="server-public" class="bx--select"><option value="">默认(true)</option><option value="true">true</option><option value="false">false</option></select></div>
-              <div class="bx--form-item mt-1"><label class="bx--label">管理面板</label><select id="server-panel" class="bx--select"><option value="">默认(false)</option><option value="true">true</option><option value="false">false</option></select></div>
-              <div class="bx--form-item mt-1"><label class="bx--label">SSL证书</label><input id="server-cert" type="text" class="bx--text-input w-full" placeholder="auto / acme / 留空"></div>
-              <div class="bx--form-item mt-1"><label class="bx--label">安全策略</label><select id="server-firewall" class="bx--select"><option value="">无</option></select><small>选择要绑定的防火墙规则组</small></div>
-            </div>
-          </div>
-        </div>
-        <div id="servers-msg" class="mt-2"></div>
-      </div>
-    </section>
 
     <!-- 路由规则管理 -->
     <section id="tab-rules" class="bx--tab-content hidden" role="tabpanel" aria-labelledby="路由">
@@ -408,104 +393,44 @@ var admin_page_content = `
           <button id="btn-rules-load" class="bx--btn bx--btn--secondary">加载规则</button>
           <button id="btn-rules-add" class="bx--btn bx--btn--primary">新增规则</button>
         </div>
-        <div class="bx--grid bx--grid--condensed">
-          <div class="bx--row">
-            <div class="bx--col-lg-8">
-              <div class="table-wrap">
-                <table class="bx--data-table carbon-table">
-                  <thead><tr><th>#</th><th>from</th><th>to</th><th>servers</th><th>操作</th></tr></thead>
-                  <tbody id="rules-tbody"></tbody>
-                </table>
-              </div>
-            </div>
-            <div class="bx--col-lg-8">
-              <div class="bx--form-item"><label class="bx--label">规则索引（留空=新增，填写数字=更新）</label><input id="rule-index" type="text" class="bx--text-input w-full" placeholder=""></div>
-              <div class="bx--form-item mt-1"><label class="bx--label">规则 JSON</label><textarea id="rule-editor" class="code-block w-full" rows="10" spellcheck="false">{}</textarea></div>
-            </div>
-          </div>
+        <div class="table-wrap">
+          <table class="bx--data-table carbon-table">
+            <thead><tr><th>#</th><th>From</th><th>To</th><th>Servers</th><th>操作</th></tr></thead>
+            <tbody id="rules-tbody"></tbody>
+          </table>
         </div>
         <div id="rules-msg" class="mt-2"></div>
       </div>
     </section>
 
-    <!-- 安全策略管理 -->
+
+    <!-- 防火墙管理 -->
     <section id="tab-firewalls" class="bx--tab-content hidden" role="tabpanel" aria-labelledby="安全">
       <div class="bx--tile">
         <div class="flex mb-2">
           <button id="btn-firewalls-load" class="bx--btn bx--btn--secondary">加载策略</button>
           <button id="btn-firewalls-add" class="bx--btn bx--btn--primary">新增策略</button>
         </div>
-        <div class="bx--grid bx--grid--condensed">
-          <div class="bx--row">
-            <div class="bx--col-lg-8">
-              <div class="table-wrap">
-                <table class="bx--data-table carbon-table">
-                  <thead><tr><th>#</th><th>from</th><th>to</th><th>servers</th></tr></thead>
-                  <tbody id="rules-tbody"></tbody>
-                </table>
-              </div>
-            </div>
-            <div class="bx--col-lg-8">
-              <div class="bx--form-item"><label class="bx--label">原始配置</label><textarea id="rule-editor" class="code-block w-full" rows="14" spellcheck="false">{}</textarea></div>
-              <div class="bx--form-item mt-1"><label class="bx--label">索引（可选，更新用）</label><input id="rule-index" type="number" class="bx--text-input w-full" placeholder=""></div>
-              <div class="bx--form-item mt-1">
-                <label class="bx--label">安全策略（可选）</label>
-                <select id="rule-firewall" class="bx--select">
-                  <option value="">无</option>
-                </select>
-                <small>选择后会在JSON中自动添加 "firewall": "规则名称" 字段</small>
-              </div>
-            </div>
-          </div>
-        </div>
-        <div id="rules-msg" class="mt-2"></div>
-      </div>
-    </section>
-
-    <!-- 防火墙管理 -->
-    <section id="tab-firewalls" class="bx--tab-content hidden" role="tabpanel" aria-labelledby="安全">
-      <div class="bx--tile">
-        <div class="flex mb-2">
-          <button id="btn-firewalls-load" class="bx--btn bx--btn--secondary">加载配置</button>
-          <button id="btn-firewalls-save" class="bx--btn bx--btn--primary">保存更新</button>
-          <button id="btn-firewalls-delete" class="bx--btn bx--btn--danger--tertiary">删除所选</button>
-        </div>
-        <div class="bx--grid bx--grid--condensed">
-          <div class="bx--row">
-            <div class="bx--col-lg-8">
-              <div class="table-wrap">
-                <table class="bx--data-table carbon-table">
-                  <thead><tr><th>规则名称</th><th>模式</th><th>Allow (白名单)</th><th>Block (黑名单)</th></tr></thead>
-                  <tbody id="firewalls-tbody"></tbody>
-                </table>
-              </div>
-            </div>
-            <div class="bx--col-lg-8">
-              <div class="bx--form-item"><label class="bx--label">规则名称</label><input id="firewall-name" type="text" class="bx--text-input w-full" placeholder="internal_only"></div>
-              <div class="bx--form-item mt-1">
-                <label class="bx--label">Allow 列表 (白名单，每行一个IP/CIDR/范围)</label>
-                <textarea id="firewall-allow" class="bx--text-input w-full" rows="6" placeholder="127.0.0.1&#10;192.168.0.0/16&#10;10.0.0.1-10.0.0.100"></textarea>
-                <small>支持格式: 单IP (192.168.1.1), CIDR (192.168.0.0/16), 短范围 (192.168.1.1-10), 全范围 (192.168.1.1-192.168.2.10)</small>
-              </div>
-              <div class="bx--form-item mt-1">
-                <label class="bx--label">Block 列表 (黑名单，每行一个IP/CIDR/范围)</label>
-                <textarea id="firewall-block" class="bx--text-input w-full" rows="6" placeholder="111.32.1.0/24&#10;192.111.133.1"></textarea>
-                <small>注意: 如果设置了Allow，则只有Allow列表中的IP可访问，Block列表将被忽略</small>
-              </div>
-            </div>
-          </div>
+        <div class="table-wrap">
+          <table class="bx--data-table carbon-table">
+            <thead><tr><th>规则名称</th><th>模式</th><th>规则数</th><th>预览</th><th>操作</th></tr></thead>
+            <tbody id="firewalls-tbody"></tbody>
+          </table>
         </div>
         <div id="firewalls-msg" class="mt-2"></div>
       </div>
     </section>
 
     <!-- Server Add/Edit Modals -->
-    <div data-modal id="server-add-modal" class="bx--modal"><div class="bx--modal-container"><div class="bx--modal-header"><p class="bx--modal-header__heading">新增服务</p><button class="bx--modal-close" type="button" data-modal-close aria-label="关闭"><svg class="bx--modal-close__icon" width="16" height="16" viewBox="0 0 16 16"><path d="M12 4.7L11.3 4 8 7.3 4.7 4 4 4.7 7.3 8 4 11.3 4.7 12 8 8.7 11.3 12 12 11.3 8.7 8z"/></svg></button></div><div class="bx--modal-content"><div class="bx--form-item"><label class="bx--label">服务名称 *</label><input id="add-server-name" type="text" class="bx--text-input"></div><div class="bx--form-item mt-1"><label class="bx--label">监听端口 *</label><input id="add-server-port" type="number" class="bx--text-input" placeholder="8080"></div><div class="bx--form-item mt-1"><label class="bx--label">SSL证书</label><input id="add-server-cert" type="text" class="bx--text-input" placeholder="auto / acme / 留空"></div><div class="bx--form-item mt-1"><label class="bx--label">安全策略</label><select id="add-server-firewall" class="bx--select"><option value="">无</option></select></div></div><div class="bx--modal-footer"><button class="bx--btn bx--btn--secondary" type="button" data-modal-close>取消</button><button class="bx--btn bx--btn--primary" type="button" id="confirm-add-server">确认新增</button></div></div></div>
-    <div data-modal id="server-edit-modal" class="bx--modal"><div class="bx--modal-container"><div class="bx--modal-header"><p class="bx--modal-header__heading">编辑服务</p><button class="bx--modal-close" type="button" data-modal-close aria-label="关闭"><svg class="bx--modal-close__icon" width="16" height="16" viewBox="0 0 16 16"><path d="M12 4.7L11.3 4 8 7.3 4.7 4 4 4.7 7.3 8 4 11.3 4.7 12 8 8.7 11.3 12 12 11.3 8.7 8z"/></svg></button></div><div class="bx--modal-content"><input type="hidden" id="edit-server-original-name"><div class="bx--form-item"><label class="bx--label">服务名称 *</label><input id="edit-server-name" type="text" class="bx--text-input"></div><div class="bx--form-item mt-1"><label class="bx--label">监听端口 *</label><input id="edit-server-port" type="number" class="bx--text-input"></div><div class="bx--form-item mt-1"><label class="bx--label">SSL证书</label><input id="edit-server-cert" type="text" class="bx--text-input"></div><div class="bx--form-item mt-1"><label class="bx--label">安全策略</label><select id="edit-server-firewall" class="bx--select"><option value="">无</option></select></div></div><div class="bx--modal-footer"><button class="bx--btn bx--btn--secondary" type="button" data-modal-close>取消</button><button class="bx--btn bx--btn--primary" type="button" id="confirm-edit-server">确认保存</button></div></div></div>
+    <div data-modal id="server-add-modal" class="bx--modal"><div class="bx--modal-container"><div class="bx--modal-header"><p class="bx--modal-header__heading">新增服务</p><button class="bx--modal-close" type="button" data-modal-close aria-label="关闭"><svg class="bx--modal-close__icon" width="16" height="16" viewBox="0 0 16 16"><path d="M12 4.7L11.3 4 8 7.3 4.7 4 4 4.7 7.3 8 4 11.3 4.7 12 8 8.7 11.3 12 12 11.3 8.7 8z"/></svg></button></div><div class="bx--modal-content"><div class="bx--form-item"><label class="bx--label">服务名称 *</label><input id="add-server-name" type="text" class="bx--text-input"></div><div class="bx--form-item mt-1"><label class="bx--label">监听端口 *</label><input id="add-server-port" type="number" class="bx--text-input" placeholder="8080"></div><div class="bx--form-item mt-1"><label class="bx--label">SSL证书</label><select id="add-server-cert" class="bx--select"><option value="">无</option><option value="auto">Auto</option><option value="acme">ACME</option></select></div><div class="bx--form-item mt-1"><label class="bx--label">安全策略</label><select id="add-server-firewall" class="bx--select"><option value="">无</option></select></div><div class="bx--form-item mt-1"><div class="bx--checkbox-wrapper"><input id="add-server-rawtcp" type="checkbox" class="bx--checkbox"><label for="add-server-rawtcp" class="bx--checkbox-label"><span class="bx--checkbox-label-text">透明代理</span></label></div></div><div class="bx--form-item mt-1"><div class="bx--checkbox-wrapper"><input id="add-server-public" type="checkbox" class="bx--checkbox"><label for="add-server-public" class="bx--checkbox-label"><span class="bx--checkbox-label-text">公共服务</span></label></div></div><div class="bx--form-item mt-1"><div class="bx--checkbox-wrapper"><input id="add-server-panel" type="checkbox" class="bx--checkbox"><label for="add-server-panel" class="bx--checkbox-label"><span class="bx--checkbox-label-text">管理面板</span></label></div></div></div><div class="bx--modal-footer"><button class="bx--btn bx--btn--secondary" type="button" data-modal-close>取消</button><button class="bx--btn bx--btn--primary" type="button" id="confirm-add-server">确认新增</button></div></div></div>
+    <div data-modal id="server-edit-modal" class="bx--modal"><div class="bx--modal-container"><div class="bx--modal-header"><p class="bx--modal-header__heading">编辑服务</p><button class="bx--modal-close" type="button" data-modal-close aria-label="关闭"><svg class="bx--modal-close__icon" width="16" height="16" viewBox="0 0 16 16"><path d="M12 4.7L11.3 4 8 7.3 4.7 4 4 4.7 7.3 8 4 11.3 4.7 12 8 8.7 11.3 12 12 11.3 8.7 8z"/></svg></button></div><div class="bx--modal-content"><input type="hidden" id="edit-server-original-name"><div class="bx--form-item"><label class="bx--label">服务名称 *</label><input id="edit-server-name" type="text" class="bx--text-input"></div><div class="bx--form-item mt-1"><label class="bx--label">监听端口 *</label><input id="edit-server-port" type="number" class="bx--text-input"></div><div class="bx--form-item mt-1"><label class="bx--label">SSL证书</label><select id="edit-server-cert" class="bx--select"><option value="">无</option><option value="auto">Auto</option><option value="acme">ACME</option></select></div><div class="bx--form-item mt-1"><label class="bx--label">安全策略</label><select id="edit-server-firewall" class="bx--select"><option value="">无</option></select></div><div class="bx--form-item mt-1"><div class="bx--checkbox-wrapper"><input id="edit-server-rawtcp" type="checkbox" class="bx--checkbox"><label for="edit-server-rawtcp" class="bx--checkbox-label"><span class="bx--checkbox-label-text">透明代理</span></label></div></div><div class="bx--form-item mt-1"><div class="bx--checkbox-wrapper"><input id="edit-server-public" type="checkbox" class="bx--checkbox"><label for="edit-server-public" class="bx--checkbox-label"><span class="bx--checkbox-label-text">公共服务</span></label></div></div><div class="bx--form-item mt-1"><div class="bx--checkbox-wrapper"><input id="edit-server-panel" type="checkbox" class="bx--checkbox"><label for="edit-server-panel" class="bx--checkbox-label"><span class="bx--checkbox-label-text">管理面板</span></label></div></div></div><div class="bx--modal-footer"><button class="bx--btn bx--btn--secondary" type="button" data-modal-close>取消</button><button class="bx--btn bx--btn--primary" type="button" id="confirm-edit-server">确认保存</button></div></div></div>
+
+
 
     <!-- Rule Add/Edit Modals -->
-    <div data-modal id="rule-add-modal" class="bx--modal"><div class="bx--modal-container"><div class="bx--modal-header"><p class="bx--modal-header__heading">新增路由规则</p><button class="bx--modal-close" type="button" data-modal-close aria-label="关闭"><svg class="bx--modal-close__icon" width="16" height="16" viewBox="0 0 16 16"><path d="M12 4.7L11.3 4 8 7.3 4.7 4 4 4.7 7.3 8 4 11.3 4.7 12 8 8.7 11.3 12 12 11.3 8.7 8z"/></svg></button></div><div class="bx--modal-content"><div class="bx--form-item"><label class="bx--label">规则JSON *</label><textarea id="add-rule-editor" class="code-block" rows="10" spellcheck="false">{}</textarea></div></div><div class="bx--modal-footer"><button class="bx--btn bx--btn--secondary" type="button" data-modal-close>取消</button><button class="bx--btn bx--btn--primary" type="button" id="confirm-add-rule">确认新增</button></div></div></div>
-    <div data-modal id="rule-edit-modal" class="bx--modal"><div class="bx--modal-container"><div class="bx--modal-header"><p class="bx--modal-header__heading">编辑路由规则</p><button class="bx--modal-close" type="button" data-modal-close aria-label="关闭"><svg class="bx--modal-close__icon" width="16" height="16" viewBox="0 0 16 16"><path d="M12 4.7L11.3 4 8 7.3 4.7 4 4 4.7 7.3 8 4 11.3 4.7 12 8 8.7 11.3 12 12 11.3 8.7 8z"/></svg></button></div><div class="bx--modal-content"><input type="hidden" id="edit-rule-index"><div class="bx--form-item"><label class="bx--label">规则JSON *</label><textarea id="edit-rule-editor" class="code-block" rows="10" spellcheck="false">{}</textarea></div></div><div class="bx--modal-footer"><button class="bx--btn bx--btn--secondary" type="button" data-modal-close>取消</button><button class="bx--btn bx--btn--primary" type="button" id="confirm-edit-rule">确认保存</button></div></div></div>
+    <div data-modal id="rule-add-modal" class="bx--modal"><div class="bx--modal-container" style="max-width: 600px;"><div class="bx--modal-header"><p class="bx--modal-header__heading">新增路由规则</p><button class="bx--modal-close" type="button" data-modal-close aria-label="关闭"><svg class="bx--modal-close__icon" width="16" height="16" viewBox="0 0 16 16"><path d="M12 4.7L11.3 4 8 7.3 4.7 4 4 4.7 7.3 8 4 11.3 4.7 12 8 8.7 11.3 12 12 11.3 8.7 8z"/></svg></button></div><div class="bx--modal-content" style="max-height: 70vh; overflow-y: auto;"><div class="bx--form-item"><label class="bx--label">源路径 (From) *</label><textarea id="add-rule-from" class="bx--text-input" rows="2" placeholder="/api/*&#10;或多行URL"></textarea><div class="bx--form__helper-text">支持单个URL或多个URL（每行一个）</div></div><div class="bx--form-item mt-1"><div class="bx--checkbox-wrapper"><input id="add-rule-from-advanced" type="checkbox" class="bx--checkbox"><label for="add-rule-from-advanced" class="bx--checkbox-label"><span class="bx--checkbox-label-text">高级From配置</span></label></div></div><div id="add-rule-from-advanced-panel" class="advanced-panel hidden"><div class="bx--form-item"><label class="bx--label">代理 (Proxy)</label><input id="add-rule-from-proxy" type="text" class="bx--text-input" placeholder="socks5://127.0.0.1:7890"></div></div><div class="bx--form-item mt-1"><label class="bx--label">目标路径 (To) *</label><input id="add-rule-to" type="text" class="bx--text-input" placeholder="http://backend/*"></div><div class="bx--form-item mt-1"><div class="bx--checkbox-wrapper"><input id="add-rule-to-advanced" type="checkbox" class="bx--checkbox"><label for="add-rule-to-advanced" class="bx--checkbox-label"><span class="bx--checkbox-label-text">高级To配置</span></label></div></div><div id="add-rule-to-advanced-panel" class="advanced-panel hidden"><div class="bx--form-item"><div class="bx--checkbox-wrapper"><input id="add-rule-to-insecure" type="checkbox" class="bx--checkbox"><label for="add-rule-to-insecure" class="bx--checkbox-label"><span class="bx--checkbox-label-text">允许不安全的HTTPS</span></label></div></div><div class="bx--form-item mt-1"><label class="bx--label">Headers (JSON)</label><textarea id="add-rule-to-headers" class="bx--text-input code-block" rows="3" placeholder='{"access-control-allow-origin": "*"}'></textarea></div><div class="bx--form-item mt-1"><label class="bx--label">Replace (JSON)</label><textarea id="add-rule-to-replace" class="bx--text-input code-block" rows="2" placeholder='{"http://old": "/new"}'></textarea></div></div><div class="bx--form-item mt-1"><label class="bx--label">Via Endpoints (可选)</label><input id="add-rule-via-endpoints" type="text" class="bx--text-input" placeholder="endpoint_name"><div class="bx--form__helper-text">通过指定的端点转发</div></div><div class="bx--form-item mt-1"><label class="bx--label">服务器列表 (可选)</label><input id="add-rule-servers" type="text" class="bx--text-input" placeholder="server1, server2"><div class="bx--form__helper-text">多个服务器用逗号分隔</div></div></div><div class="bx--modal-footer"><button class="bx--btn bx--btn--secondary" type="button" data-modal-close>取消</button><button class="bx--btn bx--btn--primary" type="button" id="confirm-add-rule">确认新增</button></div></div></div>
+    <div data-modal id="rule-edit-modal" class="bx--modal"><div class="bx--modal-container" style="max-width: 600px;"><div class="bx--modal-header"><p class="bx--modal-header__heading">编辑路由规则</p><button class="bx--modal-close" type="button" data-modal-close aria-label="关闭"><svg class="bx--modal-close__icon" width="16" height="16" viewBox="0 0 16 16"><path d="M12 4.7L11.3 4 8 7.3 4.7 4 4 4.7 7.3 8 4 11.3 4.7 12 8 8.7 11.3 12 12 11.3 8.7 8z"/></svg></button></div><div class="bx--modal-content" style="max-height: 70vh; overflow-y: auto;"><input type="hidden" id="edit-rule-index"><div class="bx--form-item"><label class="bx--label">源路径 (From) *</label><textarea id="edit-rule-from" class="bx--text-input" rows="2"></textarea><div class="bx--form__helper-text">支持单个URL或多个URL（每行一个）</div></div><div class="bx--form-item mt-1"><div class="bx--checkbox-wrapper"><input id="edit-rule-from-advanced" type="checkbox" class="bx--checkbox"><label for="edit-rule-from-advanced" class="bx--checkbox-label"><span class="bx--checkbox-label-text">高级From配置</span></label></div></div><div id="edit-rule-from-advanced-panel" class="advanced-panel hidden"><div class="bx--form-item"><label class="bx--label">代理 (Proxy)</label><input id="edit-rule-from-proxy" type="text" class="bx--text-input" placeholder="socks5://127.0.0.1:7890"></div></div><div class="bx--form-item mt-1"><label class="bx--label">目标路径 (To) *</label><input id="edit-rule-to" type="text" class="bx--text-input"></div><div class="bx--form-item mt-1"><div class="bx--checkbox-wrapper"><input id="edit-rule-to-advanced" type="checkbox" class="bx--checkbox"><label for="edit-rule-to-advanced" class="bx--checkbox-label"><span class="bx--checkbox-label-text">高级To配置</span></label></div></div><div id="edit-rule-to-advanced-panel" class="advanced-panel hidden"><div class="bx--form-item"><div class="bx--checkbox-wrapper"><input id="edit-rule-to-insecure" type="checkbox" class="bx--checkbox"><label for="edit-rule-to-insecure" class="bx--checkbox-label"><span class="bx--checkbox-label-text">允许不安全的HTTPS</span></label></div></div><div class="bx--form-item mt-1"><label class="bx--label">Headers (JSON)</label><textarea id="edit-rule-to-headers" class="bx--text-input code-block" rows="3"></textarea></div><div class="bx--form-item mt-1"><label class="bx--label">Replace (JSON)</label><textarea id="edit-rule-to-replace" class="bx--text-input code-block" rows="2"></textarea></div></div><div class="bx--form-item mt-1"><label class="bx--label">Via Endpoints (可选)</label><input id="edit-rule-via-endpoints" type="text" class="bx--text-input"></div><div class="bx--form-item mt-1"><label class="bx--label">服务器列表 (可选)</label><input id="edit-rule-servers" type="text" class="bx--text-input"><div class="bx--form__helper-text">多个服务器用逗号分隔</div></div></div><div class="bx--modal-footer"><button class="bx--btn bx--btn--secondary" type="button" data-modal-close>取消</button><button class="bx--btn bx--btn--primary" type="button" id="confirm-edit-rule">确认保存</button></div></div></div>
+
 
     <!-- Firewall Add/Edit Modals -->
     <div data-modal id="firewall-add-modal" class="bx--modal"><div class="bx--modal-container"><div class="bx--modal-header"><p class="bx--modal-header__heading">新增防火墙策略</p><button class="bx--modal-close" type="button" data-modal-close aria-label="关闭"><svg class="bx--modal-close__icon" width="16" height="16" viewBox="0 0 16 16"><path d="M12 4.7L11.3 4 8 7.3 4.7 4 4 4.7 7.3 8 4 11.3 4.7 12 8 8.7 11.3 12 12 11.3 8.7 8z"/></svg></button></div><div class="bx--modal-content"><div class="bx--form-item"><label class="bx--label">策略名称 *</label><input id="add-firewall-name" type="text" class="bx--text-input"></div><div class="bx--form-item mt-1"><label class="bx--label">允许规则（每行一个CIDR或IP）</label><textarea id="add-firewall-allow" class="bx--text-input" rows="6" placeholder="192.168.1.0/24&#10;10.0.0.1"></textarea></div><div class="bx--form-item mt-1"><label class="bx--label">拒绝规则（每行一个CIDR或IP）</label><textarea id="add-firewall-block" class="bx--text-input" rows="6" placeholder="0.0.0.0/0"></textarea></div></div><div class="bx--modal-footer"><button class="bx--btn bx--btn--secondary" type="button" data-modal-close>取消</button><button class="bx--btn bx--btn--primary" type="button" id="confirm-add-firewall">确认新增</button></div></div></div>
