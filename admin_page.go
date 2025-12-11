@@ -31,6 +31,21 @@ var admin_page_content = `
       left: 0;
       right: 0;
       z-index: 8000;
+      display: flex;
+      align-items: center;
+    }
+    .bx--header__nav {
+      flex: 1;
+    }
+    .header-auth-link {
+      margin-left: auto;
+      padding: 0 1rem;
+      color: #f4f4f4;
+      text-decoration: none;
+      white-space: nowrap;
+    }
+    .header-auth-link:hover {
+      text-decoration: underline;
     }
     .container {
       max-width: 1200px;
@@ -116,6 +131,8 @@ var admin_page_content = `
       transition: left 0.3s ease;
       z-index: 7999;
       overflow-y: auto;
+      display: flex;
+      flex-direction: column;
     }
     .mobile-sidebar.open {
       left: 0;
@@ -144,8 +161,15 @@ var admin_page_content = `
     .mobile-nav-item:hover {
       background: #262626;
     }
+    /* Auth-required items (hidden until logged in) */
+    .auth-required {
+      display: none !important;
+    }
+    .auth-required.show {
+      display: block !important;
+    }
     /* Mobile menu improvements */
-    @media (max-width: 768px) {
+    @media (max-width: 1055px) {
       body {
         padding-top: 48px; /* Normal padding */
       }
@@ -154,6 +178,9 @@ var admin_page_content = `
       }
       .bx--header__nav {
         display: none !important; /* Hide top nav on mobile */
+      }
+      .header-auth-link {
+        display: none !important; /* Hide auth link in header on mobile */
       }
       .stats-grid {
         grid-template-columns: repeat(2, 1fr);
@@ -168,14 +195,14 @@ var admin_page_content = `
   <!-- Mobile sidebar -->
   <div class="mobile-sidebar" id="mobile-sidebar">
     <a class="mobile-nav-item" href="#" data-tab="tab-stats">统计</a>
-    <a class="mobile-nav-item" href="#" data-tab="tab-config">配置</a>
-    <a class="mobile-nav-item" href="#" data-tab="tab-auth">登录/退出</a>
-    <a class="mobile-nav-item" href="#" data-tab="tab-users">用户</a>
-    <a class="mobile-nav-item" href="#" data-tab="tab-proxies">代理</a>
-    <a class="mobile-nav-item" href="#" data-tab="tab-tunnels">隧道</a>
-    <a class="mobile-nav-item" href="#" data-tab="tab-servers">服务</a>
-    <a class="mobile-nav-item" href="#" data-tab="tab-rules">路由</a>
-    <a class="mobile-nav-item" href="#" data-tab="tab-firewalls">安全</a>
+    <a class="mobile-nav-item auth-required" href="#" data-tab="tab-users">用户</a>
+    <a class="mobile-nav-item auth-required" href="#" data-tab="tab-proxies">代理</a>
+    <a class="mobile-nav-item auth-required" href="#" data-tab="tab-tunnels">隧道</a>
+    <a class="mobile-nav-item auth-required" href="#" data-tab="tab-servers">服务</a>
+    <a class="mobile-nav-item auth-required" href="#" data-tab="tab-rules">路由</a>
+    <a class="mobile-nav-item auth-required" href="#" data-tab="tab-firewalls">安全</a>
+    <a class="mobile-nav-item auth-required" href="#" data-tab="tab-config">配置</a>
+    <a class="mobile-nav-item" href="#" data-tab="tab-auth" style="margin-top: auto; border-top: 2px solid #525252;">登录/退出</a>
   </div>
   
   <header class="bx--header" role="banner" aria-label="APS Admin">
@@ -184,16 +211,16 @@ var admin_page_content = `
     <nav class="bx--header__nav" aria-label="APS 管理面板">
       <ul class="bx--header__menu-bar">
         <li><a class="bx--header__menu-item" href="#" data-tab="tab-stats">统计</a></li>
-        <li><a class="bx--header__menu-item" href="#" data-tab="tab-config">配置</a></li>
-        <li><a class="bx--header__menu-item" href="#" data-tab="tab-auth">登录/退出</a></li>
-        <li><a class="bx--header__menu-item" href="#" data-tab="tab-users">用户</a></li>
-        <li><a class="bx--header__menu-item" href="#" data-tab="tab-proxies">代理</a></li>
-        <li><a class="bx--header__menu-item" href="#" data-tab="tab-tunnels">隧道</a></li>
-        <li><a class="bx--header__menu-item" href ="#" data-tab="tab-servers">服务</a></li>
-        <li><a class="bx--header__menu-item" href="#" data-tab="tab-rules">路由</a></li>
-        <li><a class="bx--header__menu-item" href="#" data-tab="tab-firewalls">安全</a></li>
+        <li class="auth-required"><a class="bx--header__menu-item" href="#" data-tab="tab-config">配置</a></li>
+        <li class="auth-required"><a class="bx--header__menu-item" href="#" data-tab="tab-users">用户</a></li>
+        <li class="auth-required"><a class="bx--header__menu-item" href="#" data-tab="tab-proxies">代理</a></li>
+        <li class="auth-required"><a class="bx--header__menu-item" href="#" data-tab="tab-tunnels">隧道</a></li>
+        <li class="auth-required"><a class="bx--header__menu-item" href ="#" data-tab="tab-servers">服务</a></li>
+        <li class="auth-required"><a class="bx--header__menu-item" href="#" data-tab="tab-rules">路由</a></li>
+        <li class="auth-required"><a class="bx--header__menu-item" href="#" data-tab="tab-firewalls">安全</a></li>
       </ul>
     </nav>
+    <a class="header-auth-link" href="#" data-tab="tab-auth">登录/退出</a>
   </header>
 
   <main class="container">
@@ -280,7 +307,7 @@ var admin_page_content = `
       <div class="bx--tile">
         <div class="bx--form-item">
           <label for="username" class="bx--label">用户名</label>
-          <input id="username" type="text" class="bx--text-input w-full" placeholder="admin">
+          <input id="username" type="text" class="bx--text-input w-full" placeholder="manager">
         </div>
         <div class="bx--form-item mt-1">
           <label for="password" class="bx--label">密码</label>
@@ -537,6 +564,32 @@ var admin_page_content = `
         if (sidebar) sidebar.classList.remove("open");
         if (overlay) overlay.classList.remove("show");
       }
+      
+      // 切换tab并自动加载数据
+      function switchTab(tabId) {
+        document.querySelectorAll(".bx--tab-content").forEach(function(t) { 
+          t.classList.add("hidden"); 
+        });
+        var target = document.getElementById(tabId);
+        if (target) target.classList.remove("hidden");
+        
+        // 自动加载对应tab的数据
+        setTimeout(function() {
+          if (tabId === "tab-users" && typeof loadUsers === "function") loadUsers();
+          else if (tabId === "tab-proxies" && typeof loadProxies === "function") loadProxies();
+          else if (tabId === "tab-tunnels" && typeof loadTunnels === "function") loadTunnels();
+          else if (tabId === "tab-servers" && typeof loadServers === "function") {
+            loadServers();
+            if (typeof populateFirewallSelectors === "function") populateFirewallSelectors();
+          }
+          else if (tabId === "tab-rules" && typeof loadRules === "function") {
+            loadRules();
+            if (typeof populateFirewallSelectors === "function") populateFirewallSelectors();
+          }
+          else if (tabId === "tab-firewalls" && typeof loadFirewalls === "function") loadFirewalls();
+        }, 100);
+      }
+      
       var hamburger = document.getElementById("hamburger-btn");
       if (hamburger) {
         hamburger.addEventListener("click", function() {
@@ -548,16 +601,34 @@ var admin_page_content = `
       }
       var overlay = document.getElementById("sidebar-overlay");
       if (overlay) overlay.addEventListener("click", closeSidebar);
+      
       document.querySelectorAll(".mobile-nav-item").forEach(function(item) {
         item.addEventListener("click", function(e) {
           e.preventDefault();
           var tabId = this.getAttribute("data-tab");
-          document.querySelectorAll(".bx--tab-content").forEach(function(t) { t.classList.add("hidden"); });
-          var target = document.getElementById(tabId);
-          if (target) target.classList.remove("hidden");
+          switchTab(tabId);
           closeSidebar();
         });
       });
+      
+      // 桌面端导航
+      document.querySelectorAll(".bx--header__menu-item").forEach(function(item) {
+        item.addEventListener("click", function(e) {
+          e.preventDefault();
+          var tabId = this.getAttribute("data-tab");
+          switchTab(tabId);
+        });
+      });
+      
+      // 桌面端 Auth 链接
+      var headerAuthLink = document.querySelector(".header-auth-link");
+      if (headerAuthLink) {
+        headerAuthLink.addEventListener("click", function(e) {
+          e.preventDefault();
+          var tabId = this.getAttribute("data-tab");
+          switchTab(tabId);
+        });
+      }
     })();
 
     // 登录/退出
@@ -611,6 +682,15 @@ var admin_page_content = `
       el.textContent = isAuthed ? "已登录" : "未登录";
       el.style.background = isAuthed ? "#a7f0ba" : "#e0e0e0";
       el.style.color = isAuthed ? "#0e6027" : "#161616";
+      
+      // 控制需要登录才能访问的菜单项显示/隐藏
+      document.querySelectorAll(".auth-required").forEach(function(item) {
+        if (isAuthed) {
+          item.classList.add("show");
+        } else {
+          item.classList.remove("show");
+        }
+      });
     }
 
     // 配置读取/保存
