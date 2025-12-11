@@ -106,6 +106,28 @@ func (h *AdminHandlers) RegisterHandlers(mux *http.ServeMux) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Write([]byte(admin_page_content))
 	})
+	mux.HandleFunc("/.admin/style.css", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/css; charset=utf-8")
+		w.Write([]byte(admin_page_css))
+	})
+	mux.HandleFunc("/.admin/script.js", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+		w.Write([]byte(admin_page_js))
+	})
+
+	mux.HandleFunc("/.admin/carbon.js", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+		w.Write([]byte(admin_page_carbon_components_js))
+	})
+	mux.HandleFunc("/.admin/carbon.css", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/css; charset=utf-8")
+		w.Write([]byte(admin_page_carbon_components_css))
+	})
+	mux.HandleFunc("/.admin/ibm-plex.css", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/css; charset=utf-8")
+		w.Write([]byte(admin_page_carbon_font_css))
+	})
+
 	log.Println("Admin panel API available at '/.api' and UI at '/.admin/'")
 }
 
@@ -441,6 +463,15 @@ func (h *AdminHandlers) handleUsers(w http.ResponseWriter, r *http.Request) {
 		}
 		// 覆盖或新增
 		u := req.User
+		// 如果是更新已存在用户,且password/token为空,则保留原值
+		if existingUser, exists := h.config.Auth.Users[req.Name]; exists && existingUser != nil {
+			if u.Password == "" {
+				u.Password = existingUser.Password
+			}
+			if u.Token == "" {
+				u.Token = existingUser.Token
+			}
+		}
 		h.config.Auth.Users[req.Name] = &u
 		if err := h.saveConfigLocked(); err != nil {
 			http.Error(w, "Failed to persist config", http.StatusInternalServerError)
@@ -565,6 +596,12 @@ func (h *AdminHandlers) handleTunnels(w http.ResponseWriter, r *http.Request) {
 			h.config.Tunnels = make(map[string]*TunnelConfig)
 		}
 		t := req.Tunnel
+		// 如果是更新已存在隧道,且password为空,则保留原密码
+		if existingTunnel, exists := h.config.Tunnels[req.Name]; exists && existingTunnel != nil {
+			if t.Password == "" {
+				t.Password = existingTunnel.Password
+			}
+		}
 		h.config.Tunnels[req.Name] = &t
 		if err := h.saveConfigLocked(); err != nil {
 			http.Error(w, "Failed to persist config", http.StatusInternalServerError)
