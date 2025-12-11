@@ -1245,7 +1245,6 @@ async function loadRules() {
 }
 
 function openAddRuleModal() {
-  // 清空基础字段
   var addFrom = document.getElementById("add-rule-from");
   var addTo = document.getElementById("add-rule-to");
   var addServers = document.getElementById("add-rule-servers");
@@ -1255,28 +1254,6 @@ function openAddRuleModal() {
   if (addTo) addTo.value = "";
   if (addServers) addServers.value = "";
   if (addVia) addVia.value = "";
-  
-  // 重置高级选项
-  var fromAdvCheckbox = document.getElementById("add-rule-from-advanced");
-  var toAdvCheckbox = document.getElementById("add-rule-to-advanced");
-  var fromAdvPanel = document.getElementById("add-rule-from-advanced-panel");
-  var toAdvPanel = document.getElementById("add-rule-to-advanced-panel");
-  
-  if (fromAdvCheckbox) fromAdvCheckbox.checked = false;
-  if (toAdvCheckbox) toAdvCheckbox.checked = false;
-  if (fromAdvPanel) fromAdvPanel.classList.add("hidden");
-  if (toAdvPanel) toAdvPanel.classList.add("hidden");
-  
-  // 清空高级字段
-  var fromProxy = document.getElementById("add-rule-from-proxy");
-  var toInsecure = document.getElementById("add-rule-to-insecure");
-  var toHeaders = document.getElementById("add-rule-to-headers");
-  var toReplace = document.getElementById("add-rule-to-replace");
-  
-  if (fromProxy) fromProxy.value = "";
-  if (toInsecure) toInsecure.checked = false;
-  if (toHeaders) toHeaders.value = "";
-  if (toReplace) toReplace.value = "";
   
   var modal = document.querySelector('#rule-add-modal');
   if (modal) modal.classList.add('is-visible');
@@ -1324,62 +1301,26 @@ function openEditRuleModal(index) {
 
 function populateFromFields(from, prefix) {
   var fromInput = document.getElementById(prefix + "-rule-from");
-  var advCheckbox = document.getElementById(prefix + "-rule-from-advanced");
-  var proxyInput = document.getElementById(prefix + "-rule-from-proxy");
-  var advPanel = document.getElementById(prefix + "-rule-from-advanced-panel");
-  
-  if (!fromInput) return; // Element doesn't exist
+  if (!fromInput) return;
   
   if (typeof from === 'string') {
-    // 简单字符串
     fromInput.value = from;
-    if (advCheckbox) advCheckbox.checked = false;
-    if (advPanel) advPanel.classList.add("hidden");
-    if (proxyInput) proxyInput.value = "";
   } else if (Array.isArray(from)) {
-    // 数组 - 多行显示
     fromInput.value = from.join('\n');
-    if (advCheckbox) advCheckbox.checked = false;
-    if (advPanel) advPanel.classList.add("hidden");
-    if (proxyInput) proxyInput.value = "";
   } else if (typeof from === 'object') {
-    // 对象
-    if (advCheckbox) advCheckbox.checked = true;
-    if (advPanel) advPanel.classList.remove("hidden");
-    
     var urls = Array.isArray(from.url) ? from.url : [from.url];
     fromInput.value = urls.join('\n');
-    if (proxyInput) proxyInput.value = from.proxy || "";
   }
 }
 
 function populateToFields(to, prefix) {
   var toInput = document.getElementById(prefix + "-rule-to");
-  var advCheckbox = document.getElementById(prefix + "-rule-to-advanced");
-  var insecureCheckbox = document.getElementById(prefix + "-rule-to-insecure");
-  var headersTextarea = document.getElementById(prefix + "-rule-to-headers");
-  var replaceTextarea = document.getElementById(prefix + "-rule-to-replace");
-  var advPanel = document.getElementById(prefix + "-rule-to-advanced-panel");
-  
-  if (!toInput) return; // Element doesn't exist
+  if (!toInput) return;
   
   if (typeof to === 'string') {
-    // 简单字符串
     toInput.value = to;
-    if (advCheckbox) advCheckbox.checked = false;
-    if (advPanel) advPanel.classList.add("hidden");
-    if (insecureCheckbox) insecureCheckbox.checked = false;
-    if (headersTextarea) headersTextarea.value = "";
-    if (replaceTextarea) replaceTextarea.value = "";
   } else if (typeof to === 'object') {
-    // 对象
     toInput.value = to.url || "";
-    if (advCheckbox) advCheckbox.checked = true;
-    if (advPanel) advPanel.classList.remove("hidden");
-    
-    if (insecureCheckbox) insecureCheckbox.checked = to.insecure || false;
-    if (headersTextarea) headersTextarea.value = to.headers ? JSON.stringify(to.headers, null, 2) : "";
-    if (replaceTextarea) replaceTextarea.value = to.replace ? JSON.stringify(to.replace, null, 2) : "";
   }
 }
 
@@ -1404,7 +1345,6 @@ async function deleteRule(index) {
 }
 
 function buildFromConfig(prefix) {
-  var fromAdvanced = document.getElementById(prefix + '-rule-from-advanced').checked;
   var fromText = document.getElementById(prefix + '-rule-from').value.trim();
   
   if (!fromText) {
@@ -1412,30 +1352,11 @@ function buildFromConfig(prefix) {
     return null;
   }
   
-  if (fromAdvanced) {
-    // 高级配置
-    var fromProxy = document.getElementById(prefix + '-rule-from-proxy').value.trim();
-    var urlList = fromText.split('\n').map(function(s) { return s.trim(); }).filter(function(s) { return s; });
-    
-    if (fromProxy) {
-      // 有proxy，使用对象形式
-      return {
-        url: urlList.length === 1 ? urlList[0] : urlList,
-        proxy: fromProxy
-      };
-    } else {
-      // 无proxy，返回URL或URL数组
-      return urlList.length === 1 ? urlList[0] : urlList;
-    }
-  } else {
-    // 简单配置 - 检查是否多行
-    var urlList = fromText.split('\n').map(function(s) { return s.trim(); }).filter(function(s) { return s; });
-    return urlList.length === 1 ? urlList[0] : urlList;
-  }
+  var urlList = fromText.split('\n').map(function(s) { return s.trim(); }).filter(function(s) { return s; });
+  return urlList.length === 1 ? urlList[0] : urlList;
 }
 
 function buildToConfig(prefix) {
-  var toAdvanced = document.getElementById(prefix + '-rule-to-advanced').checked;
   var toUrl = document.getElementById(prefix + '-rule-to').value.trim();
   
   if (!toUrl) {
@@ -1443,38 +1364,7 @@ function buildToConfig(prefix) {
     return null;
   }
   
-  if (toAdvanced) {
-    // 高级配置
-    var to = { url: toUrl };
-    
-    var insecure = document.getElementById(prefix + '-rule-to-insecure').checked;
-    if (insecure) to.insecure = true;
-    
-    var headersJson = document.getElementById(prefix + '-rule-to-headers').value.trim();
-    if (headersJson) {
-      try {
-        to.headers = JSON.parse(headersJson);
-      } catch (e) {
-        showNotification('error', 'Headers JSON格式错误', e.message || 'JSON解析失败');
-        return null;
-      }
-    }
-    
-    var replaceJson = document.getElementById(prefix + '-rule-to-replace').value.trim();
-    if (replaceJson) {
-      try {
-        to.replace = JSON.parse(replaceJson);
-      } catch (e) {
-        showNotification('error', 'Replace JSON格式错误', e.message || 'JSON解析失败');
-        return null;
-      }
-    }
-    
-    return to;
-  } else {
-    // 简单配置
-    return toUrl;
-  }
+  return toUrl;
 }
 
 async function confirmAddRule() {
