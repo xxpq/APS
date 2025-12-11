@@ -22,6 +22,15 @@ var admin_page_content = `
     body {
       font-family: "IBM Plex Sans", system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji";
       background: var(--bg);
+      padding-top: 48px; /* Prevent header from overlapping content */
+    }
+    /* Fix header to top */
+    .bx--header {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      z-index: 8000;
     }
     .container {
       max-width: 1200px;
@@ -40,7 +49,7 @@ var admin_page_content = `
     }
     .stats-grid {
       display: grid;
-      grid-template-columns: repeat(4, minmax(0, 1fr));
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
       gap: 1rem;
       margin-top: 1rem;
     }
@@ -58,6 +67,7 @@ var admin_page_content = `
       display: flex;
       gap: 0.5rem;
       align-items: center;
+      flex-wrap: wrap;
     }
     .mt-1 { margin-top: 0.5rem; }
     .mt-2 { margin-top: 1rem; }
@@ -84,11 +94,93 @@ var admin_page_content = `
       font-size: 12px;
       color: #161616;
     }
+    /* Hamburger menu button */
+    .hamburger-btn {
+      display: none;
+      background: none;
+      border: none;
+      color: white;
+      font-size: 1.5rem;
+      cursor: pointer;
+      padding: 0.5rem;
+      margin-left: auto;
+    }
+    /* Mobile sidebar */
+    .mobile-sidebar {
+      position: fixed;
+      top: 48px;
+      left: -280px;
+      width: 280px;
+      height: calc(100vh - 48px);
+      background: #161616;
+      transition: left 0.3s ease;
+      z-index: 7999;
+      overflow-y: auto;
+    }
+    .mobile-sidebar.open {
+      left: 0;
+    }
+    .mobile-sidebar-overlay {
+      position: fixed;
+      top: 48px;
+      left: 0;
+      width: 100%;
+      height: calc(100vh - 48px);
+      background: rgba(0, 0, 0, 0.5);
+      display: none;
+      z-index: 7998;
+    }
+    .mobile-sidebar-overlay.show {
+      display: block;
+    }
+    .mobile-nav-item {
+      display: block;
+      padding: 1rem;
+      color: #f4f4f4;
+      text-decoration: none;
+      border-bottom: 1px solid #393939;
+      cursor: pointer;
+    }
+    .mobile-nav-item:hover {
+      background: #262626;
+    }
+    /* Mobile menu improvements */
+    @media (max-width: 768px) {
+      body {
+        padding-top: 48px; /* Normal padding */
+      }
+      .hamburger-btn {
+        display: block; /* Show hamburger on mobile */
+      }
+      .bx--header__nav {
+        display: none !important; /* Hide top nav on mobile */
+      }
+      .stats-grid {
+        grid-template-columns: repeat(2, 1fr);
+      }
+    }
   </style>
 </head>
 <body>
+  <!-- Mobile sidebar overlay -->
+  <div class="mobile-sidebar-overlay" id="sidebar-overlay"></div>
+  
+  <!-- Mobile sidebar -->
+  <div class="mobile-sidebar" id="mobile-sidebar">
+    <a class="mobile-nav-item" href="#" data-tab="tab-stats">统计</a>
+    <a class="mobile-nav-item" href="#" data-tab="tab-config">配置</a>
+    <a class="mobile-nav-item" href="#" data-tab="tab-auth">登录/退出</a>
+    <a class="mobile-nav-item" href="#" data-tab="tab-users">用户</a>
+    <a class="mobile-nav-item" href="#" data-tab="tab-proxies">代理</a>
+    <a class="mobile-nav-item" href="#" data-tab="tab-tunnels">隧道</a>
+    <a class="mobile-nav-item" href="#" data-tab="tab-servers">服务</a>
+    <a class="mobile-nav-item" href="#" data-tab="tab-rules">路由</a>
+    <a class="mobile-nav-item" href="#" data-tab="tab-firewalls">安全</a>
+  </div>
+  
   <header class="bx--header" role="banner" aria-label="APS Admin">
     <a class="bx--header__name" href="#" title="APS">APS</a>
+    <button class="hamburger-btn" id="hamburger-btn" aria-label="Toggle menu">☰</button>
     <nav class="bx--header__nav" aria-label="APS 管理面板">
       <ul class="bx--header__menu-bar">
         <li><a class="bx--header__menu-item" href="#" data-tab="tab-stats">统计</a></li>
@@ -97,8 +189,9 @@ var admin_page_content = `
         <li><a class="bx--header__menu-item" href="#" data-tab="tab-users">用户</a></li>
         <li><a class="bx--header__menu-item" href="#" data-tab="tab-proxies">代理</a></li>
         <li><a class="bx--header__menu-item" href="#" data-tab="tab-tunnels">隧道</a></li>
-        <li><a class="bx--header__menu-item" href="#" data-tab="tab-servers">服务器</a></li>
-        <li><a class="bx--header__menu-item" href="#" data-tab="tab-rules">规则</a></li>
+        <li><a class="bx--header__menu-item" href ="#" data-tab="tab-servers">服务</a></li>
+        <li><a class="bx--header__menu-item" href="#" data-tab="tab-rules">路由</a></li>
+        <li><a class="bx--header__menu-item" href="#" data-tab="tab-firewalls">安全</a></li>
       </ul>
     </nav>
   </header>
@@ -213,8 +306,8 @@ var admin_page_content = `
     <section id="tab-users" class="bx--tab-content hidden" role="tabpanel" aria-labelledby="用户">
       <div class="bx--tile">
         <div class="flex mb-2">
-          <button id="btn-users-load" class="bx--btn bx--btn--secondary">加载用户</button>
-          <button id="btn-users-save" class="bx--btn bx--btn--primary">保存/更新用户</button>
+          <button id="btn-users-load" class="bx--btn bx--btn--secondary">加载配置</button>
+          <button id="btn-users-save" class="bx--btn bx--btn--primary">保存更新</button>
           <button id="btn-users-delete" class="bx--btn bx--btn--danger--tertiary">删除所选</button>
         </div>
         <div class="bx--grid bx--grid--condensed">
@@ -222,17 +315,17 @@ var admin_page_content = `
             <div class="bx--col-lg-8">
               <div class="table-wrap">
                 <table class="bx--data-table carbon-table">
-                  <thead><tr><th>用户名</th><th>管理员</th><th>分组</th><th>Token</th></tr></thead>
+                  <thead><tr><th>用户账号</th><th>管理权限</th><th>用户分组</th><th>访问令牌</th></tr></thead>
                   <tbody id="users-tbody"></tbody>
                 </table>
               </div>
             </div>
             <div class="bx--col-lg-8">
-              <div class="bx--form-item"><label class="bx--label">用户名</label><input id="user-name" type="text" class="bx--text-input w-full"></div>
-              <div class="bx--form-item mt-1"><label class="bx--label">密码</label><input id="user-password" type="text" class="bx--text-input w-full" placeholder="留空表示不修改"></div>
-              <div class="bx--form-item mt-1"><label class="bx--label">管理员</label><select id="user-admin" class="bx--select"><option value="false">否</option><option value="true">是</option></select></div>
-              <div class="bx--form-item mt-1"><label class="bx--label">分组（逗号分隔）</label><input id="user-groups" type="text" class="bx--text-input w-full" placeholder="groupA,groupB"></div>
-              <div class="bx--form-item mt-1"><label class="bx--label">Token（可选）</label><input id="user-token" type="text" class="bx--text-input w-full" placeholder=""></div>
+              <div class="bx--form-item"><label class="bx--label">用户账号</label><input id="user-name" type="text" class="bx--text-input w-full"></div>
+              <div class="bx--form-item mt-1"><label class="bx--label">登录密码</label><input id="user-password" type="text" class="bx--text-input w-full" placeholder="留空表示不修改"></div>
+              <div class="bx--form-item mt-1"><label class="bx--label">管理权限</label><select id="user-admin" class="bx--select"><option value="false">否</option><option value="true">是</option></select></div>
+              <div class="bx--form-item mt-1"><label class="bx--label">用户分组（逗号分隔）</label><input id="user-groups" type="text" class="bx--text-input w-full" placeholder="groupA,groupB"></div>
+              <div class="bx--form-item mt-1"><label class="bx--label">访问令牌（可选）</label><input id="user-token" type="text" class="bx--text-input w-full" placeholder=""></div>
             </div>
           </div>
         </div>
@@ -244,8 +337,8 @@ var admin_page_content = `
     <section id="tab-proxies" class="bx--tab-content hidden" role="tabpanel" aria-labelledby="代理">
       <div class="bx--tile">
         <div class="flex mb-2">
-          <button id="btn-proxies-load" class="bx--btn bx--btn--secondary">加载代理</button>
-          <button id="btn-proxies-save" class="bx--btn bx--btn--primary">保存/更新代理</button>
+          <button id="btn-proxies-load" class="bx--btn bx--btn--secondary">加载配置</button>
+          <button id="btn-proxies-save" class="bx--btn bx--btn--primary">保存更新</button>
           <button id="btn-proxies-delete" class="bx--btn bx--btn--danger--tertiary">删除所选</button>
         </div>
         <div class="bx--grid bx--grid--condensed">
@@ -253,14 +346,14 @@ var admin_page_content = `
             <div class="bx--col-lg-8">
               <div class="table-wrap">
                 <table class="bx--data-table carbon-table">
-                  <thead><tr><th>代理名</th><th>URLs</th></tr></thead>
+                  <thead><tr><th>代理名称</th><th>URLs</th></tr></thead>
                   <tbody id="proxies-tbody"></tbody>
                 </table>
               </div>
             </div>
             <div class="bx--col-lg-8">
-              <div class="bx--form-item"><label class="bx--label">代理名</label><input id="proxy-name" type="text" class="bx--text-input w-full"></div>
-              <div class="bx--form-item mt-1"><label class="bx--label">代理 URL（每行一个或逗号分隔）</label><textarea id="proxy-urls" class="bx--text-input w-full" rows="6" placeholder="http://user:pass@host:port"></textarea></div>
+              <div class="bx--form-item"><label class="bx--label">代理名称</label><input id="proxy-name" type="text" class="bx--text-input w-full"></div>
+              <div class="bx--form-item mt-1"><label class="bx--label">代理 URI（每行一个或逗号分隔）</label><textarea id="proxy-urls" class="bx--text-input w-full" rows="6" placeholder="http://user:pass@host:port"></textarea></div>
             </div>
           </div>
         </div>
@@ -272,8 +365,8 @@ var admin_page_content = `
     <section id="tab-tunnels" class="bx--tab-content hidden" role="tabpanel" aria-labelledby="隧道">
       <div class="bx--tile">
         <div class="flex mb-2">
-          <button id="btn-tunnels-load" class="bx--btn bx--btn--secondary">加载隧道</button>
-          <button id="btn-tunnels-save" class="bx--btn bx--btn--primary">保存/更新隧道</button>
+          <button id="btn-tunnels-load" class="bx--btn bx--btn--secondary">加载配置</button>
+          <button id="btn-tunnels-save" class="bx--btn bx--btn--primary">保存更新</button>
           <button id="btn-tunnels-delete" class="bx--btn bx--btn--danger--tertiary">删除所选</button>
         </div>
         <div class="bx--grid bx--grid--condensed">
@@ -281,21 +374,21 @@ var admin_page_content = `
             <div class="bx--col-lg-8">
               <div class="table-wrap">
                 <table class="bx--data-table carbon-table">
-                  <thead><tr><th>隧道名</th><th>Password</th><th>Servers</th></tr></thead>
+                  <thead><tr><th>隧道名称</th><th>通信密码</th><th>通信服务</th></tr></thead>
                   <tbody id="tunnels-tbody"></tbody>
                 </table>
               </div>
             </div>
             <div class="bx--col-lg-8">
-              <div class="bx--form-item"><label class="bx--label">隧道名</label><input id="tunnel-name" type="text" class="bx--text-input w-full"></div>
-              <div class="bx--form-item mt-1"><label class="bx--label">密码（AES-GCM）</label><input id="tunnel-password" type="text" class="bx--text-input w-full" placeholder=""></div>
-              <div class="bx--form-item mt-1"><label class="bx--label">服务器列表（逗号分隔）</label><input id="tunnel-servers" type="text" class="bx--text-input w-full" placeholder="serverA,serverB"></div>
+              <div class="bx--form-item"><label class="bx--label">隧道名称</label><input id="tunnel-name" type="text" class="bx--text-input w-full"></div>
+              <div class="bx--form-item mt-1"><label class="bx--label">通信密码</label><input id="tunnel-password" type="text" class="bx--text-input w-full" placeholder=""></div>
+              <div class="bx--form-item mt-1"><label class="bx--label">通信服务（逗号分隔）</label><input id="tunnel-servers" type="text" class="bx--text-input w-full" placeholder="serverA,serverB"></div>
               
               <div class="mt-3">
-                <h4>在线 Endpoint</h4>
+                <h4>在线节点</h4>
                 <div class="table-wrap mt-1">
                   <table class="bx--data-table carbon-table">
-                    <thead><tr><th>名称</th><th>远程地址</th><th>上线时间</th><th>最后传输</th><th>延迟</th><th>请求数</th><th>错误数</th><th>QPS (平均/最小/最大)</th><th>发送字节 (总/均/最小/最大)</th><th>接收字节 (总/均/最小/最大)</th><th>响应时间 (平均/最短/最长 ms)</th></tr></thead>
+                    <thead><tr><th>节点名称</th><th>远程地址</th><th>上线时间</th><th>最后传输</th><th>延迟</th><th>请求数</th><th>错误数</th><th>QPS (平均/最小/最大)</th><th>发送字节 (总/均/最小/最大)</th><th>接收字节 (总/均/最小/最大)</th><th>响应时间 (平均/最短/最长 ms)</th></tr></thead>
                     <tbody id="tunnel-endpoints-tbody"></tbody>
                   </table>
                 </div>
@@ -307,12 +400,12 @@ var admin_page_content = `
       </div>
     </section>
 
-    <!-- 服务器管理 -->
-    <section id="tab-servers" class="bx--tab-content hidden" role="tabpanel" aria-labelledby="服务器">
+    <!-- 服务管理 -->
+    <section id="tab-servers" class="bx--tab-content hidden" role="tabpanel" aria-labelledby="服务">
       <div class="bx--tile">
         <div class="flex mb-2">
-          <button id="btn-servers-load" class="bx--btn bx--btn--secondary">加载服务器</button>
-          <button id="btn-servers-save" class="bx--btn bx--btn--primary">保存/更新服务器</button>
+          <button id="btn-servers-load" class="bx--btn bx--btn--secondary">加载配置</button>
+          <button id="btn-servers-save" class="bx--btn bx--btn--primary">保存更新</button>
           <button id="btn-servers-delete" class="bx--btn bx--btn--danger--tertiary">删除所选</button>
         </div>
         <div class="bx--grid bx--grid--condensed">
@@ -320,17 +413,19 @@ var admin_page_content = `
             <div class="bx--col-lg-8">
               <div class="table-wrap">
                 <table class="bx--data-table carbon-table">
-                  <thead><tr><th>名称</th><th>端口</th><th>Public</th><th>Panel</th><th>Cert</th></tr></thead>
+                  <thead><tr><th>服务名称</th><th>监听端口</th><th>透明代理</th><th>公共服务</th><th>管理面板</th><th>SSL证书</th><th>安全策略</th></tr></thead>
                   <tbody id="servers-tbody"></tbody>
                 </table>
               </div>
             </div>
             <div class="bx--col-lg-8">
-              <div class="bx--form-item"><label class="bx--label">名称</label><input id="server-name" type="text" class="bx--text-input w-full"></div>
-              <div class="bx--form-item mt-1"><label class="bx--label">端口</label><input id="server-port" type="number" class="bx--text-input w-full" placeholder="8080"></div>
-              <div class="bx--form-item mt-1"><label class="bx--label">Public</label><select id="server-public" class="bx--select"><option value="">默认(true)</option><option value="true">true</option><option value="false">false</option></select></div>
-              <div class="bx--form-item mt-1"><label class="bx--label">Panel</label><select id="server-panel" class="bx--select"><option value="">默认(false)</option><option value="true">true</option><option value="false">false</option></select></div>
-              <div class="bx--form-item mt-1"><label class="bx--label">证书（auto 或留空）</label><input id="server-cert" type="text" class="bx--text-input w-full" placeholder="auto"></div>
+              <div class="bx--form-item"><label class="bx--label">服务名称</label><input id="server-name" type="text" class="bx--text-input w-full"></div>
+              <div class="bx--form-item mt-1"><label class="bx--label">监听端口</label><input id="server-port" type="number" class="bx--text-input w-full" placeholder="8080"></div>
+              <div class="bx--form-item mt-1"><label class="bx--label">透明代理</label><select id="server-rawtcp" class="bx--select"><option value="">默认(false)</option><option value="true">启用</option><option value="false">禁用</option></select></div>
+              <div class="bx--form-item mt-1"><label class="bx--label">公共服务</label><select id="server-public" class="bx--select"><option value="">默认(true)</option><option value="true">true</option><option value="false">false</option></select></div>
+              <div class="bx--form-item mt-1"><label class="bx--label">管理面板</label><select id="server-panel" class="bx--select"><option value="">默认(false)</option><option value="true">true</option><option value="false">false</option></select></div>
+              <div class="bx--form-item mt-1"><label class="bx--label">SSL证书</label><input id="server-cert" type="text" class="bx--text-input w-full" placeholder="auto / acme / 留空"></div>
+              <div class="bx--form-item mt-1"><label class="bx--label">安全策略</label><select id="server-firewall" class="bx--select"><option value="">无</option></select><small>选择要绑定的防火墙规则组</small></div>
             </div>
           </div>
         </div>
@@ -338,12 +433,12 @@ var admin_page_content = `
       </div>
     </section>
 
-    <!-- 规则管理 -->
-    <section id="tab-rules" class="bx--tab-content hidden" role="tabpanel" aria-labelledby="规则">
+    <!-- 路由规则管理 -->
+    <section id="tab-rules" class="bx--tab-content hidden" role="tabpanel" aria-labelledby="路由">
       <div class="bx--tile">
         <div class="flex mb-2">
-          <button id="btn-rules-load" class="bx--btn bx--btn--secondary">加载规则</button>
-          <button id="btn-rules-save" class="bx--btn bx--btn--primary">新增/更新规则</button>
+          <button id="btn-rules-load" class="bx--btn bx--btn--secondary">加载配置</button>
+          <button id="btn-rules-save" class="bx--btn bx--btn--primary">保存更新</button>
           <button id="btn-rules-delete" class="bx--btn bx--btn--danger--tertiary">删除所选</button>
         </div>
         <div class="bx--grid bx--grid--condensed">
@@ -357,12 +452,56 @@ var admin_page_content = `
               </div>
             </div>
             <div class="bx--col-lg-8">
-              <div class="bx--form-item"><label class="bx--label">规则 JSON（Mapping）</label><textarea id="rule-editor" class="code-block w-full" rows="14" spellcheck="false">{}</textarea></div>
+              <div class="bx--form-item"><label class="bx--label">原始配置</label><textarea id="rule-editor" class="code-block w-full" rows="14" spellcheck="false">{}</textarea></div>
               <div class="bx--form-item mt-1"><label class="bx--label">索引（可选，更新用）</label><input id="rule-index" type="number" class="bx--text-input w-full" placeholder=""></div>
+              <div class="bx--form-item mt-1">
+                <label class="bx--label">安全策略（可选）</label>
+                <select id="rule-firewall" class="bx--select">
+                  <option value="">无</option>
+                </select>
+                <small>选择后会在JSON中自动添加 "firewall": "规则名称" 字段</small>
+              </div>
             </div>
           </div>
         </div>
         <div id="rules-msg" class="mt-2"></div>
+      </div>
+    </section>
+
+    <!-- 防火墙管理 -->
+    <section id="tab-firewalls" class="bx--tab-content hidden" role="tabpanel" aria-labelledby="安全">
+      <div class="bx--tile">
+        <div class="flex mb-2">
+          <button id="btn-firewalls-load" class="bx--btn bx--btn--secondary">加载配置</button>
+          <button id="btn-firewalls-save" class="bx--btn bx--btn--primary">保存更新</button>
+          <button id="btn-firewalls-delete" class="bx--btn bx--btn--danger--tertiary">删除所选</button>
+        </div>
+        <div class="bx--grid bx--grid--condensed">
+          <div class="bx--row">
+            <div class="bx--col-lg-8">
+              <div class="table-wrap">
+                <table class="bx--data-table carbon-table">
+                  <thead><tr><th>规则名称</th><th>模式</th><th>Allow (白名单)</th><th>Block (黑名单)</th></tr></thead>
+                  <tbody id="firewalls-tbody"></tbody>
+                </table>
+              </div>
+            </div>
+            <div class="bx--col-lg-8">
+              <div class="bx--form-item"><label class="bx--label">规则名称</label><input id="firewall-name" type="text" class="bx--text-input w-full" placeholder="internal_only"></div>
+              <div class="bx--form-item mt-1">
+                <label class="bx--label">Allow 列表 (白名单，每行一个IP/CIDR/范围)</label>
+                <textarea id="firewall-allow" class="bx--text-input w-full" rows="6" placeholder="127.0.0.1&#10;192.168.0.0/16&#10;10.0.0.1-10.0.0.100"></textarea>
+                <small>支持格式: 单IP (192.168.1.1), CIDR (192.168.0.0/16), 短范围 (192.168.1.1-10), 全范围 (192.168.1.1-192.168.2.10)</small>
+              </div>
+              <div class="bx--form-item mt-1">
+                <label class="bx--label">Block 列表 (黑名单，每行一个IP/CIDR/范围)</label>
+                <textarea id="firewall-block" class="bx--text-input w-full" rows="6" placeholder="111.32.1.0/24&#10;192.111.133.1"></textarea>
+                <small>注意: 如果设置了Allow，则只有Allow列表中的IP可访问，Block列表将被忽略</small>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div id="firewalls-msg" class="mt-2"></div>
       </div>
     </section>
 
@@ -389,6 +528,37 @@ var admin_page_content = `
         document.getElementById(tabId).classList.remove("hidden");
       });
     });
+
+    // 移动端侧边栏控制
+    (function() {
+      function closeSidebar() {
+        var sidebar = document.getElementById("mobile-sidebar");
+        var overlay = document.getElementById("sidebar-overlay");
+        if (sidebar) sidebar.classList.remove("open");
+        if (overlay) overlay.classList.remove("show");
+      }
+      var hamburger = document.getElementById("hamburger-btn");
+      if (hamburger) {
+        hamburger.addEventListener("click", function() {
+          var sidebar = document.getElementById("mobile-sidebar");
+          var overlay = document.getElementById("sidebar-overlay");
+          if (sidebar) sidebar.classList.toggle("open");
+          if (overlay) overlay.classList.toggle("show");
+        });
+      }
+      var overlay = document.getElementById("sidebar-overlay");
+      if (overlay) overlay.addEventListener("click", closeSidebar);
+      document.querySelectorAll(".mobile-nav-item").forEach(function(item) {
+        item.addEventListener("click", function(e) {
+          e.preventDefault();
+          var tabId = this.getAttribute("data-tab");
+          document.querySelectorAll(".bx--tab-content").forEach(function(t) { t.classList.add("hidden"); });
+          var target = document.getElementById(tabId);
+          if (target) target.classList.remove("hidden");
+          closeSidebar();
+        });
+      });
+    })();
 
     // 登录/退出
     document.getElementById("btn-login").addEventListener("click", async () => {
@@ -598,6 +768,8 @@ var proxiesUrl = "/.api/proxies";
 var tunnelsUrl = "/.api/tunnels";
 var serversUrl = "/.api/servers";
 var rulesUrl = "/.api/rules";
+var firewallsUrl = "/.api/firewalls";
+
 
 function buildAuthHeaders(base) {
   var headers = base ? JSON.parse(JSON.stringify(base)) : {};
@@ -852,7 +1024,7 @@ async function deleteSelectedTunnel() {
   }
 }
 
-// ===== 服务器 =====
+// ===== 服务 =====
 async function loadServers() {
   var msg = document.getElementById("servers-msg");
   if (msg) msg.textContent = "";
@@ -871,20 +1043,24 @@ async function loadServers() {
       tr.innerHTML =
         "<td>" + name + "</td>" +
         "<td>" + (s.port != null ? s.port : "") + "</td>" +
+        "<td>" + (s.rawTCP == null ? "默认" : (s.rawTCP ? "启用" : "禁用")) + "</td>" +
         "<td>" + (s.public == null ? "默认" : (s.public ? "true" : "false")) + "</td>" +
         "<td>" + (s.panel == null ? "默认" : (s.panel ? "true" : "false")) + "</td>" +
-        "<td>" + certStr + "</td>";
+        "<td>" + certStr + "</td>" +
+        "<td>" + (s.firewall || "无") + "</td>";
       tr.addEventListener("click", function(){
         var el;
         el = document.getElementById("server-name"); if (el) el.value = name;
         el = document.getElementById("server-port"); if (el) el.value = (s.port != null ? s.port : "");
+        el = document.getElementById("server-rawtcp"); if (el) el.value = (s.rawTCP == null ? "" : (s.rawTCP ? "true" : "false"));
         el = document.getElementById("server-public"); if (el) el.value = (s.public == null ? "" : (s.public ? "true" : "false"));
         el = document.getElementById("server-panel"); if (el) el.value = (s.panel == null ? "" : (s.panel ? "true" : "false"));
         el = document.getElementById("server-cert"); if (el) el.value = (typeof s.cert === "string" ? s.cert : "");
+        el = document.getElementById("server-firewall"); if (el) el.value = (s.firewall || "");
       });
       if (tbody) tbody.appendChild(tr);
     });
-    if (msg) msg.textContent = "服务器列表已加载";
+    if (msg) msg.textContent = "服务列表已加载";
   } catch (e) {
     if (msg) msg.textContent = "加载失败: " + (e.message || e);
   }
@@ -894,20 +1070,26 @@ async function saveServer() {
   if (msg) msg.textContent = "";
   var nameEl = document.getElementById("server-name");
   var portEl = document.getElementById("server-port");
+  var rawTCPEl = document.getElementById("server-rawtcp");
   var publicEl = document.getElementById("server-public");
   var panelEl = document.getElementById("server-panel");
   var certEl = document.getElementById("server-cert");
+  var firewallEl = document.getElementById("server-firewall");
   var name = nameEl ? nameEl.value.trim() : "";
   var port = portEl ? parseInt(portEl.value.trim(), 10) : 0;
+  var rawTCPVal = rawTCPEl ? rawTCPEl.value : "";
   var publicVal = publicEl ? publicEl.value : "";
   var panelVal = panelEl ? panelEl.value : "";
   var cert = certEl ? certEl.value.trim() : "";
-  if (!name) { if (msg) msg.textContent = "服务器名称必填"; return; }
+  var firewall = firewallEl ? firewallEl.value.trim() : "";
+  if (!name) { if (msg) msg.textContent = "服务名称必填"; return; }
   if (!port || port <= 0) { if (msg) msg.textContent = "端口需为正整数"; return; }
   var payload = { port: port };
+  if (rawTCPVal) payload.rawTCP = (rawTCPVal === "true");
   if (publicVal) payload.public = (publicVal === "true");
   if (panelVal) payload.panel = (panelVal === "true");
   if (cert) payload.cert = cert;
+  if (firewall) payload.firewall = firewall;
   try {
     var res = await fetch(serversUrl, { method: "POST", headers: buildAuthHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ name: name, server: payload }) });
     var text = await res.text();
@@ -923,7 +1105,7 @@ async function deleteSelectedServer() {
   if (msg) msg.textContent = "";
   var nameEl = document.getElementById("server-name");
   var name = nameEl ? nameEl.value.trim() : "";
-  if (!name) { if (msg) msg.textContent = "请先选择服务器"; return; }
+  if (!name) { if (msg) msg.textContent = "请先选择服务"; return; }
   try {
     var res = await fetch(serversUrl + "?name=" + encodeURIComponent(name), { method: "DELETE", headers: buildAuthHeaders({}) });
     var text = await res.text();
@@ -965,7 +1147,7 @@ async function loadRules() {
       })(i, m);
       if (tbody) tbody.appendChild(tr);
     }
-    if (msg) msg.textContent = "规则列表已加载";
+    if (msg) msg.textContent = "路由列表已加载";
   } catch (e) {
     if (msg) msg.textContent = "加载失败: " + (e.message || e);
   }
@@ -1018,6 +1200,118 @@ async function deleteSelectedRule() {
   }
 }
 
+// ===== 防火墙 =====
+async function loadFirewalls() {
+  var msg = document.getElementById("firewalls-msg");
+  if (msg) msg.textContent = "";
+  try {
+    var res = await fetch(firewallsUrl, { headers: buildAuthHeaders({}) });
+    if (!res.ok) throw new Error(await res.text());
+    var data = await res.json();
+    var tbody = document.getElementById("firewalls-tbody");
+    if (tbody) tbody.innerHTML = "";
+    Object.keys(data || {}).forEach(function(name){
+      var fw = data[name] || {};
+      var allow = fw.allow || [];
+      var block = fw.block || [];
+      var mode = allow.length > 0 ? "白名单" : (block.length > 0 ? "黑名单" : "无规则");
+      var tr = document.createElement("tr");
+      tr.innerHTML = "<td>" + name + "</td>" +
+        "<td>" + mode + "</td>" +
+        "<td>" + allow.join(", ") + "</td>" +
+        "<td>" + block.join(", ") + "</td>";
+      tr.addEventListener("click", function(){
+        var el;
+        el = document.getElementById("firewall-name"); if (el) el.value = name;
+        el = document.getElementById("firewall-allow"); if (el) el.value = allow.join("\n");
+        el = document.getElementById("firewall-block"); if (el) el.value = block.join("\n");
+      });
+      if (tbody) tbody.appendChild(tr);
+    });
+    if (msg) msg.textContent = "防火墙规则已加载";
+  } catch (e) {
+    if (msg) msg.textContent = "加载失败: " + (e.message || e);
+  }
+}
+async function saveFirewall() {
+  var msg = document.getElementById("firewalls-msg");
+  if (msg) msg.textContent = "";
+  var nameEl = document.getElementById("firewall-name");
+  var allowEl = document.getElementById("firewall-allow");
+  var blockEl = document.getElementById("firewall-block");
+  var name = nameEl ? nameEl.value.trim() : "";
+  var allowRaw = allowEl ? allowEl.value.trim() : "";
+  var blockRaw = blockEl ? blockEl.value.trim() : "";
+  if (!name) { if (msg) msg.textContent = "规则名称必填"; return; }
+  var allow = allowRaw ? allowRaw.split("\\n").map(function(s){return s.trim();}).filter(function(s){return s;}) : [];
+  var block = blockRaw ? blockRaw.split("\\n").map(function(s){return s.trim();}).filter(function(s){return s;}) : [];
+  var firewall = {};
+  if (allow.length > 0) firewall.allow = allow;
+  if (block.length > 0) firewall.block = block;
+  try {
+    var res = await fetch(firewallsUrl, { method: "POST", headers: buildAuthHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ name: name, firewall: firewall }) });
+    var text = await res.text();
+    if (!res.ok) throw new Error(text);
+    if (msg) msg.textContent = "保存/更新成功";
+    loadFirewalls();
+    populateFirewallSelectors(); // Refresh dropdowns
+  } catch (e) {
+    if (msg) msg.textContent = "保存失败: " + (e.message || e);
+  }
+}
+async function deleteSelectedFirewall() {
+  var msg = document.getElementById("firewalls-msg");
+  if (msg) msg.textContent = "";
+  var nameEl = document.getElementById("firewall-name");
+  var name = nameEl ? nameEl.value.trim() : "";
+  if (!name) { if (msg) msg.textContent = "请先选择/填写规则名称"; return; }
+  try {
+    var res = await fetch(firewallsUrl + "?name=" + encodeURIComponent(name), { method: "DELETE", headers: buildAuthHeaders({}) });
+    var text = await res.text();
+    if (!res.ok) throw new Error(text);
+    if (msg) msg.textContent = "删除成功";
+    loadFirewalls();
+  } catch (e) {
+    if (msg) msg.textContent = "删除失败: " + (e.message || e);
+  }
+}
+
+// 填充防火墙下拉框
+async function populateFirewallSelectors() {
+  try {
+    var res = await fetch(firewallsUrl, { headers: buildAuthHeaders({}) });
+    if (!res.ok) return; // Silently fail if can't load firewalls
+    var data = await res.json();
+    var names = Object.keys(data || {});
+    
+    // Populate server firewall selector
+    var serverFwEl = document.getElementById("server-firewall");
+    if (serverFwEl) {
+      serverFwEl.innerHTML = '<option value="">无</option>';
+      names.forEach(function(name) {
+        var opt = document.createElement("option");
+        opt.value = name;
+        opt.textContent = name;
+        serverFwEl.appendChild(opt);
+      });
+    }
+    
+    // Populate rule firewall selector
+    var ruleFwEl = document.getElementById("rule-firewall");
+    if (ruleFwEl) {
+      ruleFwEl.innerHTML = '<option value="">无</option>';
+      names.forEach(function(name) {
+        var opt = document.createElement("option");
+        opt.value = name;
+        opt.textContent = name;
+        ruleFwEl.appendChild(opt);
+      });
+    }
+  } catch (e) {
+    // Silently fail
+  }
+}
+
 // 绑定按钮事件
 (function bindMgmtEvents(){
   function on(id, evt, fn){
@@ -1043,9 +1337,15 @@ async function deleteSelectedRule() {
   on("btn-rules-load", "click", loadRules);
   on("btn-rules-save", "click", saveRule);
   on("btn-rules-delete", "click", deleteSelectedRule);
+
+  on("btn-firewalls-load", "click", loadFirewalls);
+  on("btn-firewalls-save", "click", saveFirewall);
+  on("btn-firewalls-delete", "click", deleteSelectedFirewall);
 })();
     // 初始加载一次
     refreshStats();
+    // 填充防火墙下拉框
+    populateFirewallSelectors();
   </script>
 </body>
 </html>`

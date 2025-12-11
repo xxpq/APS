@@ -99,6 +99,7 @@ func (h *AdminHandlers) RegisterHandlers(mux *http.ServeMux) {
 	mux.HandleFunc("/.api/tunnels/endpoints", h.handleTunnelEndpoints)
 	mux.HandleFunc("/.api/servers", h.handleServers)
 	mux.HandleFunc("/.api/rules", h.handleRules)
+	mux.HandleFunc("/.api/firewalls", h.handleFirewalls)
 
 	// 管理面板页面
 	mux.HandleFunc("/.admin/", func(w http.ResponseWriter, r *http.Request) {
@@ -311,11 +312,36 @@ func (h *AdminHandlers) getConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	section := r.URL.Query().Get("section")
+	if section == "" {
+		section = "all"
+	}
+
 	h.configMux.RLock()
 	defer h.configMux.RUnlock()
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(h.config)
+
+	switch section {
+	case "all":
+		json.NewEncoder(w).Encode(h.config)
+	case "servers":
+		json.NewEncoder(w).Encode(h.config.Servers)
+	case "mappings":
+		json.NewEncoder(w).Encode(h.config.Mappings)
+	case "tunnels":
+		json.NewEncoder(w).Encode(h.config.Tunnels)
+	case "firewalls":
+		json.NewEncoder(w).Encode(h.config.Firewalls)
+	case "proxies":
+		json.NewEncoder(w).Encode(h.config.Proxies)
+	case "auth":
+		json.NewEncoder(w).Encode(h.config.Auth)
+	case "p12s":
+		json.NewEncoder(w).Encode(h.config.P12s)
+	default:
+		http.Error(w, "Invalid section. Valid values: all, servers, mappings, tunnels, firewalls, proxies, auth, p12s", http.StatusBadRequest)
+	}
 }
 
 func (h *AdminHandlers) setConfig(w http.ResponseWriter, r *http.Request) {
@@ -353,6 +379,9 @@ func (h *AdminHandlers) setConfig(w http.ResponseWriter, r *http.Request) {
 
 // ===== 辅助：保存当前内存配置到文件（需持有写锁）=====
 func (h *AdminHandlers) saveConfigLocked() error {
+	// Increment version for concurrent editing detection
+	h.config.Version++
+
 	file, err := os.OpenFile(h.configPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
 	if err != nil {
 		return err
@@ -681,6 +710,74 @@ func (h *AdminHandlers) handleRules(w http.ResponseWriter, r *http.Request) {
 		h.configMux.Lock()
 		defer h.configMux.Unlock()
 		h.config.Mappings = append(h.config.Mappings[:idx], h.config.Mappings[idx+1:]...)
+		if err := h.saveConfigLocked(); err != nil {
+			http.Error(w, "Failed to persist config", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"status": "deleted"})
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// ===== 防火墙管理 =====
+func (h *AdminHandlers) handleFirewalls(w http.ResponseWriter, r *http.Request) {
+	if !h.isAdminToken(extractToken(r)) {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		h.configMux.RLock()
+		defer h.configMux.RUnlock()
+		resp := make(map[string]*FirewallRule)
+		if h.config.Firewalls != nil {
+			for name, fw := range h.config.Firewalls {
+				resp[name] = fw
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	case http.MethodPost:
+		var req struct {
+			Name     string       `json:"name"`
+			Firewall FirewallRule `json:"firewall"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" {
+			http.Error(w, "Invalid payload", http.StatusBadRequest)
+			return
+		}
+		h.configMux.Lock()
+		defer h.configMux.Unlock()
+		if h.config.Firewalls == nil {
+			h.config.Firewalls = make(map[string]*FirewallRule)
+		}
+		fw := req.Firewall
+		h.config.Firewalls[req.Name] = &fw
+		// Parse the firewall rule
+		if err := ParseFirewallRule(&fw); err != nil {
+			log.Printf("[FIREWALL] Warning: failed to parse firewall rule '%s': %v", req.Name, err)
+		} else {
+			log.Printf("[FIREWALL] Loaded firewall rule '%s'", req.Name)
+		}
+		if err := h.saveConfigLocked(); err != nil {
+			http.Error(w, "Failed to persist config", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"status": "upserted"})
+	case http.MethodDelete:
+		name := r.URL.Query().Get("name")
+		if name == "" {
+			http.Error(w, "name is required", http.StatusBadRequest)
+			return
+		}
+		h.configMux.Lock()
+		defer h.configMux.Unlock()
+		if h.config.Firewalls != nil {
+			delete(h.config.Firewalls, name)
+		}
 		if err := h.saveConfigLocked(); err != nil {
 			http.Error(w, "Failed to persist config", http.StatusInternalServerError)
 			return

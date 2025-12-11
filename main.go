@@ -392,7 +392,8 @@ func createServerHandler(serverName string, mappings []*Mapping, serverConfig *L
 
 		// 注册管理面板处理器
 		adminHandlers := NewAdminHandlers(config, configFile)
-		// TCP tunnel manager handles endpoints directly
+		// 设置tunnel管理器引用，用于查询endpoint状态
+		adminHandlers.SetTunnelManager(tunnelManager)
 		adminHandlers.RegisterHandlers(mux)
 	}
 

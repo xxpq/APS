@@ -40,6 +40,7 @@ type Config struct {
 	StaticCache *StaticCacheConfig       `json:"static_cache,omitempty"` // 静态文件缓存配置
 	Firewalls   map[string]*FirewallRule `json:"firewalls,omitempty"`    // 防火墙规则组配置
 	Mappings    []Mapping                `json:"mappings"`
+	Version     int64                    `json:"version,omitempty"` // 配置版本号，用于并发编辑检测
 	mu          sync.RWMutex
 }
 
