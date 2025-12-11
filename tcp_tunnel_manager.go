@@ -206,7 +206,7 @@ func (tm *TCPTunnelManager) SendRequestStream(ctx context.Context, tunnelName, e
 
 	// Register pending request
 	pending := &tcpPendingRequest{
-		responseChan: make(chan *TunnelMessage, 10),
+		responseChan: make(chan *TunnelMessage, 100), // Increased from 10 to 100
 		pipeWriter:   pipeWriter,
 	}
 
@@ -294,8 +294,14 @@ func (tm *TCPTunnelManager) SendRequestStream(ctx context.Context, tunnelName, e
 						pipeWriter.CloseWithError(err)
 						return
 					}
-					if _, err := pipeWriter.Write(decryptedChunk); err != nil {
-						return
+					// Write with retry for transient failures
+					written := 0
+					for written < len(decryptedChunk) {
+						n, err := pipeWriter.Write(decryptedChunk[written:])
+						written += n
+						if err != nil {
+							return
+						}
 					}
 				case MsgTypeResponseEnd:
 					var end ResponseEndPayloadTCP

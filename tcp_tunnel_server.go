@@ -39,8 +39,9 @@ type TCPEndpoint struct {
 	proxyConns      map[string]*tcpProxyConnection // connectionID -> proxy
 
 	// Control channels
-	sendChan chan *TunnelMessage
-	done     chan struct{}
+	sendChan  chan *TunnelMessage
+	done      chan struct{}
+	closeOnce sync.Once // Ensures done channel is closed only once
 }
 
 // tcpPendingRequest represents a pending HTTP request
@@ -144,6 +145,14 @@ func (s *TCPTunnelServer) acceptLoop() {
 
 // handleConnection handles a new endpoint connection
 func (s *TCPTunnelServer) handleConnection(conn net.Conn) {
+	// Optimize TCP connection for better throughput
+	if tcpConn, ok := conn.(*net.TCPConn); ok {
+		tcpConn.SetReadBuffer(256 * 1024)  // 256KB
+		tcpConn.SetWriteBuffer(256 * 1024) // 256KB
+		tcpConn.SetKeepAlive(true)
+		tcpConn.SetKeepAlivePeriod(60 * time.Second)
+	}
+
 	tc := NewTunnelConn(conn)
 	remoteAddr := conn.RemoteAddr().String()
 	DebugLog("[TCP TUNNEL] New connection from %s", remoteAddr)
@@ -220,7 +229,7 @@ func (s *TCPTunnelServer) handleConnection(conn net.Conn) {
 		LastActivityTime: time.Now(),
 		pendingRequests:  make(map[string]*tcpPendingRequest),
 		proxyConns:       make(map[string]*tcpProxyConnection),
-		sendChan:         make(chan *TunnelMessage, 100),
+		sendChan:         make(chan *TunnelMessage, 1000), // Increased from 100 to 1000
 		done:             make(chan struct{}),
 	}
 
@@ -282,13 +291,24 @@ func (s *TCPTunnelServer) GetEndpoint(endpointID string) (*TCPEndpoint, bool) {
 
 // Send queues a message to be sent to the endpoint
 func (ep *TCPEndpoint) Send(msg *TunnelMessage) error {
+	// First try non-blocking send
 	select {
 	case ep.sendChan <- msg:
 		return nil
 	case <-ep.done:
 		return errors.New("endpoint closed")
 	default:
-		return errors.New("send channel full")
+		// Channel is full, try with timeout to implement backpressure
+		select {
+		case ep.sendChan <- msg:
+			return nil
+		case <-ep.done:
+			return errors.New("endpoint closed")
+		case <-time.After(5 * time.Second):
+			// Still full after timeout - this indicates serious congestion
+			DebugLog("[TCP TUNNEL] Send channel timeout for endpoint %s (possible congestion)", ep.ID)
+			return errors.New("send timeout - channel congestion")
+		}
 	}
 }
 
@@ -303,12 +323,10 @@ func (ep *TCPEndpoint) SendJSON(msgType uint8, data interface{}) error {
 
 // Close closes the endpoint connection
 func (ep *TCPEndpoint) Close() {
-	select {
-	case <-ep.done:
-		return // Already closed
-	default:
+	// Use sync.Once to ensure done channel is closed exactly once
+	ep.closeOnce.Do(func() {
 		close(ep.done)
-	}
+	})
 
 	ep.Conn.Close()
 
@@ -366,8 +384,8 @@ func (ep *TCPEndpoint) readLoop(server *TCPTunnelServer) {
 
 	for {
 		// Set read deadline to detect dead connections
-		// Client sends heartbeat every 30s, so 90s timeout is generous
-		ep.Conn.UnderlyingConn().SetReadDeadline(time.Now().Add(90 * time.Second))
+		// Client sends heartbeat every 30s, use 120s for large transfers
+		ep.Conn.UnderlyingConn().SetReadDeadline(time.Now().Add(120 * time.Second))
 		msg, err := ep.Conn.ReadMessage()
 		if err != nil {
 			if err != io.EOF {

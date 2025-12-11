@@ -20,20 +20,20 @@ import (
 
 // Local buffer pools for the endpoint client
 var (
-	mediumBufPool = sync.Pool{New: func() any { return make([]byte, 32*1024) }}
-	largeBufPool  = sync.Pool{New: func() any { return make([]byte, 128*1024) }}
+	mediumBufPool = sync.Pool{New: func() any { return make([]byte, 64*1024) }}
+	largeBufPool  = sync.Pool{New: func() any { return make([]byte, 256*1024) }}
 )
 
 func GetMediumBuffer() []byte { return mediumBufPool.Get().([]byte) }
 func PutMediumBuffer(b []byte) {
-	if cap(b) >= 32*1024 {
-		mediumBufPool.Put(b[:32*1024])
+	if cap(b) >= 64*1024 {
+		mediumBufPool.Put(b[:64*1024])
 	}
 }
 func GetLargeBuffer() []byte { return largeBufPool.Get().([]byte) }
 func PutLargeBuffer(b []byte) {
-	if cap(b) >= 128*1024 {
-		largeBufPool.Put(b[:128*1024])
+	if cap(b) >= 256*1024 {
+		largeBufPool.Put(b[:256*1024])
 	}
 }
 
@@ -239,6 +239,14 @@ func runTCPTunnelSession(ctx context.Context) bool {
 	tc := NewTunnelConn(conn)
 	defer tc.Close()
 
+	// Optimize TCP connection for better throughput
+	if tcpConn, ok := conn.(*net.TCPConn); ok {
+		tcpConn.SetReadBuffer(256 * 1024)  // 256KB
+		tcpConn.SetWriteBuffer(256 * 1024) // 256KB
+		tcpConn.SetKeepAlive(true)
+		tcpConn.SetKeepAlivePeriod(60 * time.Second)
+	}
+
 	// Send registration
 	if err := tc.SendJSON(MsgTypeRegister, RegisterPayload{
 		TunnelName:   *tunnelName,
@@ -283,8 +291,8 @@ func runTCPTunnelSession(ctx context.Context) bool {
 		defer close(done)
 		for {
 			// Set read deadline to detect dead connections
-			// Server sends heartbeat every 30s
-			tc.conn.SetReadDeadline(time.Now().Add(90 * time.Second))
+			// Server sends heartbeat every 30s, use 120s for large transfers
+			tc.conn.SetReadDeadline(time.Now().Add(120 * time.Second))
 			msg, err := tc.ReadMessage()
 			if err != nil {
 				if err != io.EOF {
@@ -473,6 +481,15 @@ func handleTCPProxyConnect(tc *TunnelConn, msg *TunnelMessage) {
 
 	// Connect to target
 	conn, err := net.DialTimeout("tcp", address, 30*time.Second)
+	if err == nil {
+		// Optimize TCP connection
+		if tcpConn, ok := conn.(*net.TCPConn); ok {
+			tcpConn.SetReadBuffer(256 * 1024)
+			tcpConn.SetWriteBuffer(256 * 1024)
+			tcpConn.SetKeepAlive(true)
+			tcpConn.SetKeepAlivePeriod(60 * time.Second)
+		}
+	}
 
 	// Send ack
 	ack := ProxyConnectAckPayload{
