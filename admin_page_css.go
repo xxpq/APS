@@ -34,7 +34,6 @@ body {
   text-decoration: underline;
 }
 .container {
-  max-width: 1200px;
   margin: 1rem auto 0; /* Add top margin to prevent overlap with fixed header */
   padding: 48px;
 }

@@ -1411,6 +1411,6 @@ window.loadTunnelEndpoints = loadTunnelEndpoints;
         initFirewallModals();
       }
     }, 100);
-  });
+  })();
 }); // End of DOMContentLoaded
 `

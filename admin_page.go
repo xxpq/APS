@@ -25,12 +25,12 @@ var admin_page_content = `
   <!-- Mobile sidebar -->
   <div class="mobile-sidebar" id="mobile-sidebar">
     <a class="mobile-nav-item" href="#" data-tab="tab-stats">统计</a>
-    <a class="mobile-nav-item auth-required" href="#" data-tab="tab-users">用户</a>
-    <a class="mobile-nav-item auth-required" href="#" data-tab="tab-proxies">代理</a>
-    <a class="mobile-nav-item auth-required" href="#" data-tab="tab-tunnels">隧道</a>
-    <a class="mobile-nav-item auth-required" href="#" data-tab="tab-servers">服务</a>
     <a class="mobile-nav-item auth-required" href="#" data-tab="tab-rules">路由</a>
+    <a class="mobile-nav-item auth-required" href="#" data-tab="tab-servers">服务</a>
+    <a class="mobile-nav-item auth-required" href="#" data-tab="tab-tunnels">隧道</a>
     <a class="mobile-nav-item auth-required" href="#" data-tab="tab-firewalls">安全</a>
+    <a class="mobile-nav-item auth-required" href="#" data-tab="tab-proxies">代理</a>
+    <a class="mobile-nav-item auth-required" href="#" data-tab="tab-users">用户</a>
     <a class="mobile-nav-item auth-required" href="#" data-tab="tab-config">配置</a>
     <a class="mobile-nav-item" href="#" data-tab="tab-auth" style="margin-top: auto; border-top: 2px solid #525252;">登录/退出</a>
   </div>
@@ -41,13 +41,13 @@ var admin_page_content = `
     <nav class="bx--header__nav" aria-label="APS 管理面板">
       <ul class="bx--header__menu-bar">
         <li><a class="bx--header__menu-item" href="#" data-tab="tab-stats">统计</a></li>
-        <li class="auth-required"><a class="bx--header__menu-item" href="#" data-tab="tab-config">配置</a></li>
-        <li class="auth-required"><a class="bx--header__menu-item" href="#" data-tab="tab-users">用户</a></li>
-        <li class="auth-required"><a class="bx--header__menu-item" href="#" data-tab="tab-proxies">代理</a></li>
-        <li class="auth-required"><a class="bx--header__menu-item" href="#" data-tab="tab-tunnels">隧道</a></li>
-        <li class="auth-required"><a class="bx--header__menu-item" href ="#" data-tab="tab-servers">服务</a></li>
         <li class="auth-required"><a class="bx--header__menu-item" href="#" data-tab="tab-rules">路由</a></li>
+        <li class="auth-required"><a class="bx--header__menu-item" href ="#" data-tab="tab-servers">服务</a></li>
+        <li class="auth-required"><a class="bx--header__menu-item" href="#" data-tab="tab-tunnels">隧道</a></li>
         <li class="auth-required"><a class="bx--header__menu-item" href="#" data-tab="tab-firewalls">安全</a></li>
+        <li class="auth-required"><a class="bx--header__menu-item" href="#" data-tab="tab-proxies">代理</a></li>
+        <li class="auth-required"><a class="bx--header__menu-item" href="#" data-tab="tab-users">用户</a></li>
+        <li class="auth-required"><a class="bx--header__menu-item" href="#" data-tab="tab-config">配置</a></li>
       </ul>
     </nav>
     <a class="header-auth-link" href="#" data-tab="tab-auth">登录/退出</a>
