@@ -35,6 +35,7 @@ type LogEntry struct {
 	UserName       string    `json:"userName,omitempty"`
 	UserGroup      string    `json:"userGroup,omitempty"`
 	ClientIP       string    `json:"clientIP"`
+	Token          string    `json:"token,omitempty"`          // Extracted token (if any)
 	RequestHeaders string    `json:"requestHeaders,omitempty"` // JSON string, level 2 only
 	RequestBody    string    `json:"requestBody,omitempty"`    // TEXT, level 2 only (limited to 1MB)
 }
@@ -102,6 +103,7 @@ func (l *LoggingDB) initSchema() error {
 		user_name TEXT,
 		user_group TEXT,
 		client_ip TEXT NOT NULL,
+		token TEXT,
 		request_headers TEXT,
 		request_body TEXT
 	);
@@ -118,6 +120,10 @@ func (l *LoggingDB) initSchema() error {
 		return fmt.Errorf("failed to create logging schema: %v", err)
 	}
 
+	// Migration: Add token column if it doesn't exist
+	// Ignore error "duplicate column name"
+	l.db.Exec("ALTER TABLE request_logs ADD COLUMN token TEXT;")
+
 	return nil
 }
 
@@ -129,8 +135,9 @@ func (l *LoggingDB) AddLog(entry *LogEntry) error {
 			duration_ms, request_size, response_size,
 			server_name, tunnel_name, proxy_name, endpoint_name,
 			firewall_name, user_name, user_group, client_ip,
+			token,
 			request_headers, request_body
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
 
 	_, err := l.db.Exec(query,
@@ -151,6 +158,7 @@ func (l *LoggingDB) AddLog(entry *LogEntry) error {
 		entry.UserName,
 		entry.UserGroup,
 		entry.ClientIP,
+		entry.Token,
 		entry.RequestHeaders,
 		entry.RequestBody,
 	)
@@ -239,6 +247,7 @@ func (l *LoggingDB) QueryLogs(filter LogQueryFilter) ([]LogEntry, int, error) {
 		       duration_ms, request_size, response_size,
 		       server_name, tunnel_name, proxy_name, endpoint_name,
 		       firewall_name, user_name, user_group, client_ip,
+		       token,
 		       request_headers, request_body
 		FROM request_logs
 		%s
@@ -262,6 +271,7 @@ func (l *LoggingDB) QueryLogs(filter LogQueryFilter) ([]LogEntry, int, error) {
 		var statusCode sql.NullInt64
 		var serverName, tunnelName, proxyName, endpointName sql.NullString
 		var firewallName, userName, userGroup sql.NullString
+		var token sql.NullString
 		var requestHeaders, requestBody sql.NullString
 
 		err := rows.Scan(
@@ -283,6 +293,7 @@ func (l *LoggingDB) QueryLogs(filter LogQueryFilter) ([]LogEntry, int, error) {
 			&userName,
 			&userGroup,
 			&entry.ClientIP,
+			&token,
 			&requestHeaders,
 			&requestBody,
 		)
@@ -323,6 +334,9 @@ func (l *LoggingDB) QueryLogs(filter LogQueryFilter) ([]LogEntry, int, error) {
 		}
 		if userGroup.Valid {
 			entry.UserGroup = userGroup.String
+		}
+		if token.Valid {
+			entry.Token = token.String
 		}
 		if requestHeaders.Valid {
 			entry.RequestHeaders = requestHeaders.String

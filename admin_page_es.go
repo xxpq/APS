@@ -2112,8 +2112,9 @@ async function loadLogs() {
         <td>${fmtBytes(log.requestSize)} / ${fmtBytes(log.responseSize)}</td>
         <td>${log.clientIP}</td>
         <td>${log.userName || "-"}</td>
+        <td title="${log.token || ""}">${log.token ? (log.token.length > 10 ? log.token.substring(0, 10) + "..." : log.token) : "-"}</td>
         <td title="${details.join(', ')}">${details.length > 0 ? "查看" : "-"}</td>
-      ` + "`" + `;
+        tr.innerHTML = ` + "`" + `;
       tbody.appendChild(tr);
     });
     

@@ -183,6 +183,7 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 				logStatus := statusCode
 				logDuration := responseTime.Milliseconds()
 				logClientIP := getClientIP(r)
+				logToken := p.extractToken(r)
 
 				logHeaders := ""
 				if logConfig.LogLevel >= 2 {
@@ -205,6 +206,7 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 						EndpointName: endpointKey,
 						UserName:     userKey,
 						ClientIP:     logClientIP,
+						Token:        logToken,
 					}
 
 					// Populate UserGroup

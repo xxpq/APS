@@ -609,6 +609,7 @@ var admin_page_content = `
                 <th>大小(入/出)</th>
                 <th>客户端IP</th>
                 <th>用户</th>
+                <th>Token</th>
                 <th>详情</th>
               </tr>
             </thead>
