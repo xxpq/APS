@@ -161,10 +161,10 @@ var admin_page_content = `
           </div>
         </div>
 
-        // <div class="mt-3">
-        //   <h4>原始数据</h4>
-        //   <div id="stats-raw" class="code-block">{}</div>
-        // </div>
+        <div class="mt-3">
+          <h4>原始数据</h4>
+          <div id="stats-raw" class="code-block">{}</div>
+        </div>
       </div>
     </section>
 

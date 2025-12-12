@@ -92,13 +92,15 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Prepare variables for stats recording
 	var (
-		bytesSent uint64
-		bytesRecv uint64
-		isError   bool
-		ruleKey   string
-		userKey   string
-		tunnelKey string
-		proxyKey  string
+		bytesSent   uint64
+		bytesRecv   uint64
+		isError     bool
+		ruleKey     string
+		userKey     string
+		tunnelKey   string
+		endpointKey string // Format: "tunnelName:endpointName"
+		proxyKey    string
+		statusCode  int // HTTP status code
 	)
 
 	// Defer the consolidated stats recording
@@ -111,11 +113,15 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 			UserKey:      userKey,
 			ServerKey:    p.serverName,
 			TunnelKey:    tunnelKey,
+			EndpointKey:  endpointKey,
 			ProxyKey:     proxyKey,
 			BytesSent:    bytesSent,
 			BytesRecv:    bytesRecv,
 			ResponseTime: responseTime,
 			IsError:      isError,
+			Protocol:     "http",
+			StatusCode:   statusCode,
+			ClientIP:     getClientIP(r),
 		})
 	}()
 
@@ -303,13 +309,7 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	for source, quotaLimit := range quotas {
-		var initialUsage int64
-		p.dataStore.mu.Lock()
-		if usage, ok := p.dataStore.QuotaUsage[source]; ok {
-			initialUsage = usage.TrafficUsed
-		}
-		p.dataStore.mu.Unlock()
-		quota, err := p.trafficShaper.GetTrafficQuota(source, quotaLimit, initialUsage)
+		quota, err := p.trafficShaper.GetTrafficQuota(source, quotaLimit)
 		if err != nil {
 			log.Printf("[TRAFFIC] Error creating quota for %s: %v", source, err)
 			continue
@@ -323,13 +323,7 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	for source, quotaLimit := range requestQuotas {
-		var initialUsage int64
-		p.dataStore.mu.Lock()
-		if usage, ok := p.dataStore.QuotaUsage[source]; ok {
-			initialUsage = usage.RequestsUsed
-		}
-		p.dataStore.mu.Unlock()
-		quota, err := p.trafficShaper.GetRequestQuota(source, quotaLimit, initialUsage)
+		quota, err := p.trafficShaper.GetRequestQuota(source, quotaLimit)
 		if err != nil {
 			log.Printf("[TRAFFIC] Error creating request quota for %s: %v", source, err)
 			continue
@@ -353,7 +347,7 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		log.Printf("[TRAFFIC] Error creating limiter: %v", err)
 	}
 
-	trackingQuota, _ := p.trafficShaper.GetTrafficQuota(limiterKey, "", 0)
+	trackingQuota, _ := p.trafficShaper.GetTrafficQuota(limiterKey, "")
 
 	if policies.MaxThread > 0 {
 		select {
@@ -562,7 +556,8 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		tunnelName = foundTunnel
 		endpointName = randomEndpoint
-		tunnelKey = tunnelName // for stats
+		tunnelKey = tunnelName                        // for stats
+		endpointKey = tunnelName + ":" + endpointName // for per-endpoint stats
 		DebugLog("[TUNNEL] Using user-level endpoint '%s' via tunnel '%s'", endpointName, tunnelName)
 
 	} else if len(userTunnelNames) > 0 {
@@ -577,7 +572,8 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		tunnelName = foundTunnel
 		endpointName = foundEndpoint
-		tunnelKey = tunnelName // for stats
+		tunnelKey = tunnelName                        // for stats
+		endpointKey = tunnelName + ":" + endpointName // for per-endpoint stats
 		DebugLog("[TUNNEL] Using user-level tunnel '%s' to endpoint '%s'", tunnelName, endpointName)
 
 	} else if len(serverEndpointNames) > 0 {
@@ -594,7 +590,8 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		tunnelName = foundTunnel
 		endpointName = randomEndpoint
-		tunnelKey = tunnelName // for stats
+		tunnelKey = tunnelName                        // for stats
+		endpointKey = tunnelName + ":" + endpointName // for per-endpoint stats
 		DebugLog("[TUNNEL] Using server-level endpoint '%s' via tunnel '%s'", endpointName, tunnelName)
 
 	} else if len(serverTunnelNames) > 0 {
@@ -609,7 +606,8 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		tunnelName = foundTunnel
 		endpointName = foundEndpoint
-		tunnelKey = tunnelName // for stats
+		tunnelKey = tunnelName                        // for stats
+		endpointKey = tunnelName + ":" + endpointName // for per-endpoint stats
 		DebugLog("[TUNNEL] Using server-level tunnel '%s' to endpoint '%s'", tunnelName, endpointName)
 
 	} else if mapping != nil && len(mapping.endpointNames) > 0 {
@@ -626,8 +624,8 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		tunnelName = foundTunnel
 		endpointName = randomEndpoint
-		tunnelKey = tunnelName // for stats
-
+		tunnelKey = tunnelName                        // for stats
+		endpointKey = tunnelName + ":" + endpointName // for per-endpoint stats
 	} else if mapping != nil && len(mapping.tunnelNames) > 0 {
 		// Priority 6: mapping级别的tunnels配置（fallback）
 		isTunnelRequest = true
@@ -640,7 +638,8 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		tunnelName = foundTunnel
 		endpointName = foundEndpoint
-		tunnelKey = tunnelName // for stats
+		tunnelKey = tunnelName                        // for stats
+		endpointKey = tunnelName + ":" + endpointName // for per-endpoint stats
 	}
 
 	if isTunnelRequest {
@@ -741,10 +740,14 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 			p.logHarEntry(r, nil, startTime, mapping, user)
 			http.Error(w, "Failed to proxy request", http.StatusBadGateway)
 			log.Printf("Error proxying request: %v", err)
+			statusCode = http.StatusBadGateway // Capture error status code
 			return
 		}
 	}
 	defer resp.Body.Close()
+
+	// Capture status code for statistics
+	statusCode = resp.StatusCode
 
 	if matched && mapping != nil {
 		toConfig := mapping.GetToConfig()

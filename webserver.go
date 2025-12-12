@@ -70,16 +70,19 @@ type AdminHandlers struct {
 	configMux     sync.RWMutex
 	sessions      *SessionStore
 	tunnelManager TunnelManagerInterface
-	dataStore     *DataStore
+	// dataStore      *DataStore // Removed, no longer needed
+	statsCollector *StatsCollector
+	statsDB        *StatsDB
 }
 
 // NewAdminHandlers creates a new AdminHandlers instance.
-func NewAdminHandlers(config *Config, configPath string, dataStore *DataStore) *AdminHandlers {
+func NewAdminHandlers(config *Config, configPath string, statsCollector *StatsCollector, statsDB *StatsDB) *AdminHandlers {
 	return &AdminHandlers{
-		config:     config,
-		configPath: configPath,
-		sessions:   AdminSessions,
-		dataStore:  dataStore,
+		config:         config,
+		configPath:     configPath,
+		sessions:       AdminSessions,
+		statsCollector: statsCollector,
+		statsDB:        statsDB,
 	}
 }
 
@@ -103,6 +106,26 @@ func (h *AdminHandlers) RegisterHandlers(mux *http.ServeMux) {
 	mux.HandleFunc("/.api/rules", h.handleRules)
 	mux.HandleFunc("/.api/firewalls", h.handleFirewalls)
 	mux.HandleFunc("/.api/stats/timeseries", h.handleTimeSeriesStats)
+	mux.HandleFunc("/.api/stats/ip", func(w http.ResponseWriter, r *http.Request) {
+		// Admin authentication check
+		if !isAdminRequest(r, h.config) {
+			return
+		}
+
+		stats := h.statsCollector.GetIPStats()
+		response := struct {
+			IPs       []IPRequestStats `json:"ips"`
+			TotalIPs  int              `json:"totalIPs"`
+			TimeRange string           `json:"timeRange"`
+		}{
+			IPs:       stats,
+			TotalIPs:  len(stats),
+			TimeRange: "24h",
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(response)
+	})
 
 	// 管理面板页面
 	mux.HandleFunc("/.admin/", func(w http.ResponseWriter, r *http.Request) {
@@ -224,7 +247,7 @@ func (h *AdminHandlers) handleTunnelEndpoints(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	endpoints := h.tunnelManager.GetEndpointsInfo(tunnelName)
+	endpoints := h.tunnelManager.GetEndpointsInfo(tunnelName, h.statsCollector)
 	if endpoints == nil {
 		http.Error(w, "Tunnel not found", http.StatusNotFound)
 		return
@@ -849,28 +872,33 @@ func (h *AdminHandlers) handleTimeSeriesStats(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	if h.dataStore == nil {
-		http.Error(w, "Data store not initialized", http.StatusInternalServerError)
+	if h.statsDB == nil {
+		http.Error(w, "Stats DB not initialized", http.StatusInternalServerError)
 		return
 	}
 
 	dimension := r.URL.Query().Get("dimension") // global, rules, users, servers, tunnels, proxies
 	key := r.URL.Query().Get("key")             // specific rule/user/server/tunnel/proxy name
 
-	h.dataStore.mu.Lock()
-	defer h.dataStore.mu.Unlock()
-
 	w.Header().Set("Content-Type", "application/json")
 
 	// If no dimension specified or global, return global stats
 	if dimension == "" || dimension == "global" {
-		data := extractGlobalTimeSeries(h.dataStore.TimeSeriesStats)
+		data, err := h.statsDB.GetGlobalTimeSeries()
+		if err != nil {
+			http.Error(w, "Failed to get stats: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
 		json.NewEncoder(w).Encode(data)
 		return
 	}
 
 	// Return dimensional stats
-	data := extractDimensionTimeSeries(h.dataStore.TimeSeriesStats, dimension, key)
+	data, err := h.statsDB.GetDimensionTimeSeries(dimension, key)
+	if err != nil {
+		http.Error(w, "Failed to get stats: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
 	json.NewEncoder(w).Encode(data)
 }
 

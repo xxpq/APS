@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"net/http"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -34,8 +35,23 @@ type QPSMetric struct {
 type Metrics struct {
 	RequestCount uint64
 	Errors       uint64
-	BytesSent    NumericMetric
-	BytesRecv    NumericMetric
+
+	// Protocol-specific counters
+	HTTPRequests   uint64 // HTTP请求数
+	HTTPSuccess    uint64 // HTTP成功 (状态码 100-399)
+	HTTPFailure    uint64 // HTTP失败 (状态码 400-599)
+	RawTCPRequests uint64 // RawTCP请求数
+
+	// Traffic metrics (original, for backward compatibility)
+	BytesSent NumericMetric
+	BytesRecv NumericMetric
+
+	// Protocol-separated traffic
+	HTTPBytesSent   uint64 // HTTP发送流量
+	HTTPBytesRecv   uint64 // HTTP接收流量
+	RawTCPBytesSent uint64 // RawTCP发送流量
+	RawTCPBytesRecv uint64 // RawTCP接收流量
+
 	ResponseTime TimeMetric
 	QPS          QPSMetric // QPS统计信息
 
@@ -52,11 +68,12 @@ type StatsCollector struct {
 	TotalBytesSent    uint64
 	TotalBytesRecv    uint64
 
-	RuleStats   sync.Map // map[string]*Metrics
-	UserStats   sync.Map // map[string]*Metrics
-	ServerStats sync.Map // map[string]*Metrics
-	TunnelStats sync.Map // map[string]*Metrics
-	ProxyStats  sync.Map // map[string]*Metrics
+	RuleStats     sync.Map // map[string]*Metrics
+	UserStats     sync.Map // map[string]*Metrics
+	ServerStats   sync.Map // map[string]*Metrics
+	TunnelStats   sync.Map // map[string]*Metrics
+	ProxyStats    sync.Map // map[string]*Metrics
+	EndpointStats sync.Map // map[string]*Metrics - per endpoint statistics
 
 	// For auth-aware masking in stats
 	Config *Config
@@ -65,6 +82,9 @@ type StatsCollector struct {
 	recordChan chan RecordData // Channel for async stats processing
 	wg         sync.WaitGroup  // Wait for all workers to finish
 	closed     atomic.Bool     // Closed flag for graceful shutdown
+
+	// IP statistics (24-hour rolling window)
+	IPStats sync.Map // map[string]*[]time.Time
 }
 
 // NewStatsCollector creates and initializes a new StatsCollector.
@@ -130,11 +150,19 @@ type RecordData struct {
 	UserKey      string
 	ServerKey    string
 	TunnelKey    string
+	EndpointKey  string // Format: "tunnelName:endpointName"
 	ProxyKey     string
 	BytesSent    uint64
 	BytesRecv    uint64
 	ResponseTime time.Duration
 	IsError      bool
+
+	// Protocol-specific fields
+	Protocol   string // "http" or "rawtcp"
+	StatusCode int    // HTTP status code (only valid for HTTP)
+
+	// Client information
+	ClientIP string // Client IP address for IP statistics
 }
 
 // Record processes a RecordData event asynchronously.
@@ -166,7 +194,13 @@ func (sc *StatsCollector) statsWorker() {
 		sc.updateMetricsForDim(&sc.UserStats, data.UserKey, data)
 		sc.updateMetricsForDim(&sc.ServerStats, data.ServerKey, data)
 		sc.updateMetricsForDim(&sc.TunnelStats, data.TunnelKey, data)
+		sc.updateMetricsForDim(&sc.EndpointStats, data.EndpointKey, data)
 		sc.updateMetricsForDim(&sc.ProxyStats, data.ProxyKey, data)
+
+		// Record IP statistics with traffic data
+		if data.ClientIP != "" {
+			sc.recordIPRequest(data.ClientIP, data.Protocol, data.BytesSent, data.BytesRecv)
+		}
 	}
 }
 
@@ -185,6 +219,161 @@ func (sc *StatsCollector) Close() {
 	sc.wg.Wait()
 }
 
+// IPStatsData holds per-IP statistics including timestamps and traffic by protocol
+type IPStatsData struct {
+	Timestamps      []time.Time
+	TotalRequests   uint64 // Total accumulated requests
+	HTTPBytesSent   uint64
+	HTTPBytesRecv   uint64
+	RawTCPBytesSent uint64
+	RawTCPBytesRecv uint64
+}
+
+// recordIPRequest records a request from a specific IP address with traffic data.
+// It maintains a 24-hour rolling window by filtering out old timestamps.
+func (sc *StatsCollector) recordIPRequest(ip string, protocol string, bytesSent, bytesRecv uint64) {
+	if ip == "" {
+		return
+	}
+
+	now := time.Now()
+	cutoff := now.Add(-24 * time.Hour)
+
+	// Load or create the stats data for this IP
+	value, _ := sc.IPStats.LoadOrStore(ip, &IPStatsData{
+		Timestamps: []time.Time{},
+	})
+	data := value.(*IPStatsData)
+
+	// Increment total requests
+	atomic.AddUint64(&data.TotalRequests, 1)
+
+	// Filter out timestamps older than 24 hours and add the new one
+	filtered := make([]time.Time, 0, len(data.Timestamps)+1)
+	for _, t := range data.Timestamps {
+		if t.After(cutoff) {
+			filtered = append(filtered, t)
+		}
+	}
+	filtered = append(filtered, now)
+	data.Timestamps = filtered
+
+	// Update traffic stats by protocol
+	if protocol == "http" {
+		atomic.AddUint64(&data.HTTPBytesSent, bytesSent)
+		atomic.AddUint64(&data.HTTPBytesRecv, bytesRecv)
+	} else if protocol == "rawtcp" {
+		atomic.AddUint64(&data.RawTCPBytesSent, bytesSent)
+		atomic.AddUint64(&data.RawTCPBytesRecv, bytesRecv)
+	}
+}
+
+// GetTopIPsAsDimensionStats retrieves the top N active IPs as DimensionStats for storage.
+func (sc *StatsCollector) GetTopIPsAsDimensionStats(limit int) map[string]*DimensionStats {
+	type ipItem struct {
+		IP   string
+		Reqs int
+		Data *IPStatsData
+	}
+
+	items := make([]ipItem, 0)
+	cutoff := time.Now().Add(-24 * time.Hour)
+
+	sc.IPStats.Range(func(key, value interface{}) bool {
+		ip := key.(string)
+		data := value.(*IPStatsData)
+
+		// Quick check for activity in last 24h
+		if len(data.Timestamps) > 0 {
+			last := data.Timestamps[len(data.Timestamps)-1]
+			if last.After(cutoff) {
+				items = append(items, ipItem{IP: ip, Reqs: len(data.Timestamps), Data: data})
+			}
+		}
+		return true
+	})
+
+	// Sort by recent request count
+	sort.Slice(items, func(i, j int) bool {
+		return items[i].Reqs > items[j].Reqs
+	})
+
+	// Take top N
+	if len(items) > limit {
+		items = items[:limit]
+	}
+
+	result := make(map[string]*DimensionStats)
+	for _, item := range items {
+		d := item.Data
+		result[item.IP] = &DimensionStats{
+			Requests:        atomic.LoadUint64(&d.TotalRequests),
+			HTTPBytesSent:   atomic.LoadUint64(&d.HTTPBytesSent),
+			HTTPBytesRecv:   atomic.LoadUint64(&d.HTTPBytesRecv),
+			RawTCPBytesSent: atomic.LoadUint64(&d.RawTCPBytesSent),
+			RawTCPBytesRecv: atomic.LoadUint64(&d.RawTCPBytesRecv),
+			// Aggregate totals
+			BytesSent: atomic.LoadUint64(&d.HTTPBytesSent) + atomic.LoadUint64(&d.RawTCPBytesSent),
+			BytesRecv: atomic.LoadUint64(&d.HTTPBytesRecv) + atomic.LoadUint64(&d.RawTCPBytesRecv),
+		}
+	}
+	return result
+}
+
+// IPRequestStats represents statistics for a single IP address.
+type IPRequestStats struct {
+	IP              string    `json:"ip"`
+	Requests        int       `json:"requests"`
+	HTTPBytesSent   uint64    `json:"httpBytesSent"`
+	HTTPBytesRecv   uint64    `json:"httpBytesRecv"`
+	RawTCPBytesSent uint64    `json:"rawTcpBytesSent"`
+	RawTCPBytesRecv uint64    `json:"rawTcpBytesRecv"`
+	FirstSeen       time.Time `json:"firstSeen"`
+	LastSeen        time.Time `json:"lastSeen"`
+}
+
+// GetIPStats returns IP request statistics for the past 24 hours, sorted by request count (descending).
+func (sc *StatsCollector) GetIPStats() []IPRequestStats {
+	cutoff := time.Now().Add(-24 * time.Hour)
+	stats := make([]IPRequestStats, 0)
+
+	sc.IPStats.Range(func(key, value interface{}) bool {
+		ip := key.(string)
+		ipData := value.(*IPStatsData)
+
+		// Filter timestamps within 24 hours
+		recent := make([]time.Time, 0)
+		for _, t := range ipData.Timestamps {
+			if t.After(cutoff) {
+				recent = append(recent, t)
+			}
+		}
+
+		// Only include IPs with requests in the past 24 hours
+		if len(recent) > 0 {
+			stats = append(stats, IPRequestStats{
+				IP:              ip,
+				Requests:        len(recent),
+				HTTPBytesSent:   atomic.LoadUint64(&ipData.HTTPBytesSent),
+				HTTPBytesRecv:   atomic.LoadUint64(&ipData.HTTPBytesRecv),
+				RawTCPBytesSent: atomic.LoadUint64(&ipData.RawTCPBytesSent),
+				RawTCPBytesRecv: atomic.LoadUint64(&ipData.RawTCPBytesRecv),
+				FirstSeen:       recent[0],
+				LastSeen:        recent[len(recent)-1],
+			})
+		}
+
+		return true
+	})
+
+	// Sort by request count (descending)
+	sort.Slice(stats, func(i, j int) bool {
+		return stats[i].Requests > stats[j].Requests
+	})
+
+	return stats
+}
+
 // updateMetricsForDim updates the metrics for a specific dimension (rule, user, etc.).
 func (sc *StatsCollector) updateMetricsForDim(m *sync.Map, key string, data RecordData) {
 	if key == "" {
@@ -198,6 +387,24 @@ func (sc *StatsCollector) updateMetricsForDim(m *sync.Map, key string, data Reco
 	atomic.AddUint64(&metrics.RequestCount, 1)
 	if data.IsError {
 		atomic.AddUint64(&metrics.Errors, 1)
+	}
+
+	// Protocol-specific counting and traffic tracking
+	if data.Protocol == "http" {
+		atomic.AddUint64(&metrics.HTTPRequests, 1)
+		atomic.AddUint64(&metrics.HTTPBytesSent, data.BytesSent)
+		atomic.AddUint64(&metrics.HTTPBytesRecv, data.BytesRecv)
+
+		// Status code classification
+		if data.StatusCode >= 100 && data.StatusCode < 400 {
+			atomic.AddUint64(&metrics.HTTPSuccess, 1)
+		} else if data.StatusCode >= 400 && data.StatusCode < 600 {
+			atomic.AddUint64(&metrics.HTTPFailure, 1)
+		}
+	} else if data.Protocol == "rawtcp" {
+		atomic.AddUint64(&metrics.RawTCPRequests, 1)
+		atomic.AddUint64(&metrics.RawTCPBytesSent, data.BytesSent)
+		atomic.AddUint64(&metrics.RawTCPBytesRecv, data.BytesRecv)
 	}
 
 	// Use mutex for min/max updates and time tracking
@@ -309,12 +516,27 @@ type PublicQPSMetric struct {
 }
 
 type PublicMetrics struct {
-	RequestCount uint64              `json:"requestCount"`
-	Errors       uint64              `json:"errors"`
-	BytesSent    PublicNumericMetric `json:"bytesSent"`
-	BytesRecv    PublicNumericMetric `json:"bytesRecv"`
-	ResponseTime PublicTimeMetric    `json:"responseTime"`
-	QPS          PublicQPSMetric     `json:"qps"`
+	RequestCount uint64 `json:"requestCount"`
+	Errors       uint64 `json:"errors"`
+
+	// Protocol-specific counters
+	HTTPRequests   uint64 `json:"httpRequests"`
+	HTTPSuccess    uint64 `json:"httpSuccess"`
+	HTTPFailure    uint64 `json:"httpFailure"`
+	RawTCPRequests uint64 `json:"rawTcpRequests"`
+
+	// Total traffic (backward compatibility)
+	BytesSent PublicNumericMetric `json:"bytesSent"`
+	BytesRecv PublicNumericMetric `json:"bytesRecv"`
+
+	// Protocol-separated traffic
+	HTTPBytesSent   uint64 `json:"httpBytesSent"`
+	HTTPBytesRecv   uint64 `json:"httpBytesRecv"`
+	RawTCPBytesSent uint64 `json:"rawTcpBytesSent"`
+	RawTCPBytesRecv uint64 `json:"rawTcpBytesRecv"`
+
+	ResponseTime PublicTimeMetric `json:"responseTime"`
+	QPS          PublicQPSMetric  `json:"qps"`
 }
 
 type PublicStats struct {
@@ -427,7 +649,14 @@ func (sc *StatsCollector) GetMetricsForKey(m *sync.Map, key string) *PublicMetri
 	return &PublicMetrics{
 		RequestCount: requestCount,
 		Errors:       atomic.LoadUint64(&metrics.Errors),
-		QPS:          qpsMetric,
+
+		// Protocol-specific counters
+		HTTPRequests:   atomic.LoadUint64(&metrics.HTTPRequests),
+		HTTPSuccess:    atomic.LoadUint64(&metrics.HTTPSuccess),
+		HTTPFailure:    atomic.LoadUint64(&metrics.HTTPFailure),
+		RawTCPRequests: atomic.LoadUint64(&metrics.RawTCPRequests),
+
+		QPS: qpsMetric,
 		BytesSent: PublicNumericMetric{
 			Total: totalBytesSent,
 			Avg:   avgBytesSent,
@@ -440,6 +669,13 @@ func (sc *StatsCollector) GetMetricsForKey(m *sync.Map, key string) *PublicMetri
 			Min:   minBytesRecv,
 			Max:   metrics.BytesRecv.Max,
 		},
+
+		// Protocol-separated traffic
+		HTTPBytesSent:   atomic.LoadUint64(&metrics.HTTPBytesSent),
+		HTTPBytesRecv:   atomic.LoadUint64(&metrics.HTTPBytesRecv),
+		RawTCPBytesSent: atomic.LoadUint64(&metrics.RawTCPBytesSent),
+		RawTCPBytesRecv: atomic.LoadUint64(&metrics.RawTCPBytesRecv),
+
 		ResponseTime: PublicTimeMetric{
 			TotalMs: float64(totalResponseTime) / 1e6,
 			AvgMs:   avgResponseTimeMs,
@@ -521,7 +757,14 @@ func (sc *StatsCollector) buildPublicMetricsMap(m *sync.Map) map[string]*PublicM
 		publicMap[k] = &PublicMetrics{
 			RequestCount: requestCount,
 			Errors:       atomic.LoadUint64(&metrics.Errors),
-			QPS:          qpsMetric,
+
+			// Protocol-specific counters
+			HTTPRequests:   atomic.LoadUint64(&metrics.HTTPRequests),
+			HTTPSuccess:    atomic.LoadUint64(&metrics.HTTPSuccess),
+			HTTPFailure:    atomic.LoadUint64(&metrics.HTTPFailure),
+			RawTCPRequests: atomic.LoadUint64(&metrics.RawTCPRequests),
+
+			QPS: qpsMetric,
 			BytesSent: PublicNumericMetric{
 				Total: totalBytesSent,
 				Avg:   avgBytesSent,
@@ -534,6 +777,13 @@ func (sc *StatsCollector) buildPublicMetricsMap(m *sync.Map) map[string]*PublicM
 				Min:   minBytesRecv,
 				Max:   metrics.BytesRecv.Max,
 			},
+
+			// Protocol-separated traffic
+			HTTPBytesSent:   atomic.LoadUint64(&metrics.HTTPBytesSent),
+			HTTPBytesRecv:   atomic.LoadUint64(&metrics.HTTPBytesRecv),
+			RawTCPBytesSent: atomic.LoadUint64(&metrics.RawTCPBytesSent),
+			RawTCPBytesRecv: atomic.LoadUint64(&metrics.RawTCPBytesRecv),
+
 			ResponseTime: PublicTimeMetric{
 				TotalMs: float64(totalResponseTime) / 1e6,
 				AvgMs:   avgResponseTimeMs,

@@ -96,32 +96,13 @@ func (htm *HybridTunnelManager) FindTunnelForEndpoint(endpointName string) (stri
 }
 
 // GetEndpointsInfo 获取端点信息
-func (htm *HybridTunnelManager) GetEndpointsInfo(tunnelName string) map[string]*EndpointInfo {
+func (htm *HybridTunnelManager) GetEndpointsInfo(tunnelName string, stats *StatsCollector) map[string]*EndpointInfo {
 	if htm.tcpManager == nil {
 		return nil
 	}
 
-	// Get basic endpoint info from TCP manager
-	info := htm.tcpManager.GetEndpointsInfo(tunnelName)
-	if info == nil {
-		return nil
-	}
-
-	// Populate statistics for each endpoint
-	htm.mu.RLock()
-	statsCollector := htm.statsCollector
-	htm.mu.RUnlock()
-
-	if statsCollector != nil {
-		// Get tunnel-level statistics
-		tunnelStats := statsCollector.GetMetricsForKey(&statsCollector.TunnelStats, tunnelName)
-
-		// Apply the same tunnel-level stats to all endpoints
-		for _, ep := range info {
-			ep.Stats = tunnelStats
-		}
-	}
-
+	// Get endpoint info with per-endpoint statistics from TCP manager
+	info := htm.tcpManager.GetEndpointsInfo(tunnelName, stats)
 	return info
 }
 

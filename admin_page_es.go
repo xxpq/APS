@@ -194,6 +194,8 @@ var admin_page_js = `
         }
         setAuthStatus(true);
         showNotification('success', '登录成功', '欢迎回来!');
+        // 登录成功后自动跳转到统计界面
+        switchTab('tab-stats');
       } catch (err) {
         showNotification('error', '登录失败', err.message || err);
       }
@@ -359,7 +361,7 @@ var admin_page_js = `
             <td>${key}</td>
             <td>${m.requestCount ?? "-"}</td>
             <td>${m.errors ?? "-"}</td>
-            <td>${fmtNum(m.qps)}</td>
+            <td>${fmtQPS(m.qps)}</td>
             <td>${fmtNum(m.bytesRecv?.avg)} / ${m.bytesRecv?.min ?? "-"} / ${m.bytesRecv?.max ?? "-"}</td>
             <td>${fmtNum(m.bytesSent?.avg)} / ${m.bytesSent?.min ?? "-"} / ${m.bytesSent?.max ?? "-"}</td>
             <td>${fmtNum(m.responseTime?.avgMs)} / ${m.responseTime?.minMs ?? "-"} / ${m.responseTime?.maxMs ?? "-"}</td>
@@ -851,6 +853,7 @@ async function loadTunnelEndpoints(tunnelName) {
         "<td>" + (ep.remoteAddr || "-") + "</td>" +
         "<td>" + (ep.onlineTime || "-") + "</td>" +
         "<td>" + (ep.lastActivity || "-") + "</td>" +
+        "<td>" + (ep.latency || "-") + "</td>" +
         "<td>" + (stats.requestCount ?? "-") + "</td>" +
         "<td>" + (stats.errors ?? "-") + "</td>" +
         "<td>" + fmtQPS(stats.qps) + "</td>" +

@@ -51,6 +51,9 @@ func (p *MapRemoteProxy) handleWebSocket(w http.ResponseWriter, r *http.Request)
 			BytesRecv:    bytesRecv,
 			ResponseTime: responseTime,
 			IsError:      isError,
+			Protocol:     "http", // WebSocket is HTTP upgrade
+			StatusCode:   101,    // WebSocket upgrade status code
+			ClientIP:     getClientIP(r),
 		})
 	}()
 
@@ -134,7 +137,7 @@ func (p *MapRemoteProxy) handleWebSocket(w http.ResponseWriter, r *http.Request)
 			log.Printf("[WS] %v", err)
 			return
 		}
-		
+
 		tunnelName = foundTunnel
 		endpointName = foundEndpoint
 		tunnelKey = tunnelName

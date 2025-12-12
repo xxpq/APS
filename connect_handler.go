@@ -127,13 +127,7 @@ func (p *MapRemoteProxy) handleConnectTunnel(w http.ResponseWriter, r *http.Requ
 
 	// Check all applicable quotas
 	for source, quotaLimit := range quotas {
-		var initialUsage int64
-		p.dataStore.mu.Lock()
-		if usage, ok := p.dataStore.QuotaUsage[source]; ok {
-			initialUsage = usage.TrafficUsed
-		}
-		p.dataStore.mu.Unlock()
-		quota, err := p.trafficShaper.GetTrafficQuota(source, quotaLimit, initialUsage)
+		quota, err := p.trafficShaper.GetTrafficQuota(source, quotaLimit)
 		if err != nil {
 			log.Printf("[TRAFFIC] Error creating quota for %s: %v", source, err)
 			continue
@@ -148,13 +142,7 @@ func (p *MapRemoteProxy) handleConnectTunnel(w http.ResponseWriter, r *http.Requ
 
 	// Check all applicable request quotas
 	for source, quotaLimit := range requestQuotas {
-		var initialUsage int64
-		p.dataStore.mu.Lock()
-		if usage, ok := p.dataStore.QuotaUsage[source]; ok {
-			initialUsage = usage.RequestsUsed
-		}
-		p.dataStore.mu.Unlock()
-		quota, err := p.trafficShaper.GetRequestQuota(source, quotaLimit, initialUsage)
+		quota, err := p.trafficShaper.GetRequestQuota(source, quotaLimit)
 		if err != nil {
 			log.Printf("[TRAFFIC] Error creating request quota for %s: %v", source, err)
 			continue
@@ -180,7 +168,7 @@ func (p *MapRemoteProxy) handleConnectTunnel(w http.ResponseWriter, r *http.Requ
 	}
 
 	// Get a tracking quota object for the writer
-	trackingQuota, _ := p.trafficShaper.GetTrafficQuota(limiterKey, "", 0)
+	trackingQuota, _ := p.trafficShaper.GetTrafficQuota(limiterKey, "")
 
 	destConn, err := net.DialTimeout("tcp", destHost, 10*time.Second)
 	if err != nil {
@@ -261,6 +249,9 @@ func (p *MapRemoteProxy) handleConnectTunnel(w http.ResponseWriter, r *http.Requ
 		BytesRecv:    uint64(bytesRecv),
 		ResponseTime: responseTime,
 		IsError:      isError,
+		Protocol:     "http", // CONNECT is HTTP method
+		StatusCode:   200,    // Successful connection
+		ClientIP:     getClientIP(r),
 	})
 
 	log.Printf("[CONNECT] %s - Connection closed. Sent: %d, Recv: %d", r.Host, bytesSent, bytesRecv)

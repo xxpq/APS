@@ -40,7 +40,7 @@ type TunnelManagerInterface interface {
 	SendProxyConnect(ctx context.Context, tunnelName, endpointName string, host string, port int, useTLS bool, clientConn net.Conn, clientIP string) (<-chan struct{}, error)
 	GetRandomEndpointFromTunnels(tunnelNames []string) (string, string, error)
 	FindTunnelForEndpoint(endpointName string) (string, bool)
-	GetEndpointsInfo(tunnelName string) map[string]*EndpointInfo
+	GetEndpointsInfo(tunnelName string, stats *StatsCollector) map[string]*EndpointInfo
 	MeasureEndpointLatency(tunnelName, endpointName string) (time.Duration, error)
 
 	// 统计和管理方法

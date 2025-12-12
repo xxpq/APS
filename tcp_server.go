@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -23,15 +24,15 @@ type RawTCPServer struct {
 	tunnelManager TunnelManagerInterface
 	trafficShaper *TrafficShaper
 	stats         *StatsCollector
-	dataStore     *DataStore
-	mappings      []*Mapping
-	mu            sync.Mutex
-	closed        bool
+	// dataStore     *DataStore // Removed, no longer needed
+	mappings []*Mapping
+	mu       sync.Mutex
+	closed   bool
 }
 
 // NewRawTCPServer creates a new raw TCP server
 func NewRawTCPServer(name string, config *ListenConfig, appConfig *Config, mappings []*Mapping,
-	tunnelManager TunnelManagerInterface, trafficShaper *TrafficShaper, stats *StatsCollector, dataStore *DataStore) *RawTCPServer {
+	tunnelManager TunnelManagerInterface, trafficShaper *TrafficShaper, stats *StatsCollector) *RawTCPServer {
 	return &RawTCPServer{
 		name:          name,
 		config:        config,
@@ -40,7 +41,6 @@ func NewRawTCPServer(name string, config *ListenConfig, appConfig *Config, mappi
 		tunnelManager: tunnelManager,
 		trafficShaper: trafficShaper,
 		stats:         stats,
-		dataStore:     dataStore,
 	}
 }
 
@@ -49,7 +49,7 @@ func (s *RawTCPServer) Start() error {
 	// Determine bind address
 	host := "127.0.0.1"
 	if s.config.Public == nil || *s.config.Public {
-		host = "0.0.0.0"
+	host = "0.0.0.0"
 	}
 	addr := fmt.Sprintf("%s:%d", host, s.config.Port)
 
@@ -118,6 +118,36 @@ func (s *RawTCPServer) handleConnection(clientConn net.Conn) {
 	s.stats.IncActiveConnections()
 	defer s.stats.DecActiveConnections()
 
+	// Variables for stats recording
+	var (
+		bytesSent   uint64
+		bytesRecv   uint64
+		isError     bool
+		ruleKey     string
+		userKey     string
+		tunnelKey   string
+		endpointKey string
+	)
+
+	// Defer stats recording
+	defer func() {
+		responseTime := time.Since(startTime)
+		s.stats.Record(RecordData{
+			RuleKey:      ruleKey,
+			UserKey:      userKey,
+			ServerKey:    s.name,
+			TunnelKey:    tunnelKey,
+			EndpointKey:  endpointKey,
+			BytesSent:    bytesSent,
+			BytesRecv:    bytesRecv,
+			ResponseTime: responseTime,
+			IsError:      isError,
+			Protocol:     "rawtcp",
+			StatusCode:   0, // TCP has no status code
+			ClientIP:     clientConn.RemoteAddr().String(),
+		})
+	}()
+
 	clientAddr := clientConn.RemoteAddr().String()
 	log.Printf("[RAW TCP] New connection from %s on server '%s'", clientAddr, s.name)
 
@@ -125,8 +155,14 @@ func (s *RawTCPServer) handleConnection(clientConn net.Conn) {
 	mapping := s.findMapping()
 	if mapping == nil {
 		log.Printf("[RAW TCP] No mapping found for server '%s'", s.name)
+		isError = true
 		clientConn.Close()
 		return
+	}
+
+	// Set ruleKey from mapping
+	if mapping != nil {
+		ruleKey = mapping.GetFromURL()
 	}
 
 	// Check firewall rules (server firewall takes priority over mapping firewall)
@@ -164,11 +200,17 @@ func (s *RawTCPServer) handleConnection(clientConn net.Conn) {
 	// via.tunnels -> mapping.tunnelNames
 	// via.endpoints -> mapping.endpointNames
 	if mapping.Via != nil && (len(mapping.tunnelNames) > 0 || len(mapping.endpointNames) > 0) {
-		s.forwardViaTunnel(clientConn, mapping, targetHost, targetPort, useTLS, clientAddr)
+		// Extract tunnel key and endpoint key for stats
+		tunnelName, endpointName, _ := s.getTunnelAndEndpoint(mapping)
+		if tunnelName != "" {
+			tunnelKey = tunnelName
+			endpointKey = tunnelName + ":" + endpointName
+		}
+		s.forwardViaTunnel(clientConn, mapping, targetHost, targetPort, useTLS, clientAddr, &bytesSent, &bytesRecv)
 	} else if mapping.resolvedProxy != nil {
-		s.forwardViaProxy(clientConn, mapping, targetHost, targetPort)
+		s.forwardViaProxy(clientConn, mapping, targetHost, targetPort, &bytesSent, &bytesRecv)
 	} else {
-		s.forwardDirect(clientConn, targetHost, targetPort)
+		s.forwardDirect(clientConn, targetHost, targetPort, &bytesSent, &bytesRecv)
 	}
 
 	responseTime := time.Since(startTime)
@@ -259,7 +301,7 @@ func parseTCPURL(rawURL string) (host string, port int, useTLS bool, err error) 
 }
 
 // forwardDirect forwards the connection directly to the target
-func (s *RawTCPServer) forwardDirect(clientConn net.Conn, targetHost string, targetPort int) {
+func (s *RawTCPServer) forwardDirect(clientConn net.Conn, targetHost string, targetPort int, bytesSent, bytesRecv *uint64) {
 	targetAddr := net.JoinHostPort(targetHost, strconv.Itoa(targetPort))
 	log.Printf("[RAW TCP] Forwarding to %s (direct)", targetAddr)
 
@@ -271,16 +313,16 @@ func (s *RawTCPServer) forwardDirect(clientConn net.Conn, targetHost string, tar
 	log.Printf("[RAW TCP] Connected to target %s, starting bidirectional copy", targetAddr)
 
 	// Don't defer close here - bidirectionalCopy will handle closing
-	s.bidirectionalCopy(clientConn, targetConn)
+	s.bidirectionalCopy(clientConn, targetConn, bytesSent, bytesRecv)
 	log.Printf("[RAW TCP] Bidirectional copy finished for %s", targetAddr)
 }
 
 // forwardViaProxy forwards the connection via HTTP CONNECT proxy
-func (s *RawTCPServer) forwardViaProxy(clientConn net.Conn, mapping *Mapping, targetHost string, targetPort int) {
+func (s *RawTCPServer) forwardViaProxy(clientConn net.Conn, mapping *Mapping, targetHost string, targetPort int, bytesSent, bytesRecv *uint64) {
 	proxyURL := mapping.resolvedProxy.GetRandomProxy()
 	if proxyURL == "" {
 		log.Printf("[RAW TCP] No proxy available")
-		s.forwardDirect(clientConn, targetHost, targetPort)
+		s.forwardDirect(clientConn, targetHost, targetPort, bytesSent, bytesRecv)
 		return
 	}
 
@@ -343,11 +385,11 @@ func (s *RawTCPServer) forwardViaProxy(clientConn net.Conn, mapping *Mapping, ta
 
 	log.Printf("[RAW TCP] CONNECT tunnel established via proxy")
 	// bidirectionalCopy will close both connections
-	s.bidirectionalCopy(clientConn, proxyConn)
+	s.bidirectionalCopy(clientConn, proxyConn, bytesSent, bytesRecv)
 }
 
 // forwardViaTunnel forwards the connection via the tunnel
-func (s *RawTCPServer) forwardViaTunnel(clientConn net.Conn, mapping *Mapping, targetHost string, targetPort int, useTLS bool, clientAddr string) {
+func (s *RawTCPServer) forwardViaTunnel(clientConn net.Conn, mapping *Mapping, targetHost string, targetPort int, useTLS bool, clientAddr string, bytesSent, bytesRecv *uint64) {
 	log.Printf("[RAW TCP] Forwarding to %s:%d via tunnel (client: %s)", targetHost, targetPort, clientAddr)
 
 	// Get tunnel and endpoint
@@ -355,11 +397,18 @@ func (s *RawTCPServer) forwardViaTunnel(clientConn net.Conn, mapping *Mapping, t
 	if err != nil {
 		log.Printf("[RAW TCP] Failed to get tunnel/endpoint: %v", err)
 		// Fallback to direct connection
-		s.forwardDirect(clientConn, targetHost, targetPort)
+		s.forwardDirect(clientConn, targetHost, targetPort, bytesSent, bytesRecv)
 		return
 	}
 
 	log.Printf("[RAW TCP] Using tunnel '%s' endpoint '%s'", tunnelName, endpointName)
+
+	// Wrap clientConn to count bytes
+	countedConn := &CountedConn{
+		Conn:      clientConn,
+		bytesSent: bytesSent,
+		bytesRecv: bytesRecv,
+	}
 
 	// Use TunnelManager to establish proxy connection
 	// NOTE: SendProxyConnect starts proxyClientReadLoop which handles bidirectional data flow
@@ -369,7 +418,7 @@ func (s *RawTCPServer) forwardViaTunnel(clientConn net.Conn, mapping *Mapping, t
 
 	// Pass client IP for security audit logging on endpoint
 	log.Printf("[RAW TCP] Calling SendProxyConnect for %s:%d", targetHost, targetPort)
-	done, err := s.tunnelManager.SendProxyConnect(ctx, tunnelName, endpointName, targetHost, targetPort, useTLS, clientConn, clientAddr)
+	done, err := s.tunnelManager.SendProxyConnect(ctx, tunnelName, endpointName, targetHost, targetPort, useTLS, countedConn, clientAddr)
 	if err != nil {
 		log.Printf("[RAW TCP] Tunnel proxy connect failed: %v", err)
 		clientConn.Close()
@@ -422,8 +471,7 @@ func (s *RawTCPServer) getTunnelAndEndpoint(mapping *Mapping) (tunnelName, endpo
 }
 
 // bidirectionalCopy copies data between two connections bidirectionally
-func (s *RawTCPServer) bidirectionalCopy(conn1, conn2 net.Conn) {
-	var bytesSent, bytesRecv int64
+func (s *RawTCPServer) bidirectionalCopy(conn1, conn2 net.Conn, bytesSent, bytesRecv *uint64) {
 	var wg sync.WaitGroup
 	var once sync.Once
 
@@ -443,7 +491,7 @@ func (s *RawTCPServer) bidirectionalCopy(conn1, conn2 net.Conn) {
 		buf := GetMediumBuffer()
 		defer PutMediumBuffer(buf)
 		n, err := io.CopyBuffer(conn2, conn1, buf)
-		bytesRecv = n
+		*bytesRecv = uint64(n)
 		if err != nil && !isClosedConnError(err) {
 			log.Printf("[RAW TCP] Copy conn1->conn2 error: %v", err)
 		}
@@ -456,7 +504,7 @@ func (s *RawTCPServer) bidirectionalCopy(conn1, conn2 net.Conn) {
 		buf := GetMediumBuffer()
 		defer PutMediumBuffer(buf)
 		n, err := io.CopyBuffer(conn1, conn2, buf)
-		bytesSent = n
+		*bytesSent = uint64(n)
 		if err != nil && !isClosedConnError(err) {
 			log.Printf("[RAW TCP] Copy conn2->conn1 error: %v", err)
 		}
@@ -466,10 +514,8 @@ func (s *RawTCPServer) bidirectionalCopy(conn1, conn2 net.Conn) {
 	// Wait for both goroutines to complete
 	wg.Wait()
 
-	s.stats.AddBytesSent(uint64(bytesSent))
-	s.stats.AddBytesRecv(uint64(bytesRecv))
-
-	log.Printf("[RAW TCP] Transfer complete. Sent: %d bytes, Received: %d bytes", bytesSent, bytesRecv)
+	// Stats are already recorded via pointers, no need to add here
+	log.Printf("[RAW TCP] Transfer complete. Sent: %d bytes, Received: %d bytes", *bytesSent, *bytesRecv)
 }
 
 // isClosedConnError checks if the error is due to a closed connection
@@ -529,4 +575,27 @@ func encodeBase64(s string) string {
 	}
 
 	return result.String()
+}
+
+// CountedConn wraps a net.Conn to count bytes sent and received
+type CountedConn struct {
+	net.Conn
+	bytesSent *uint64
+	bytesRecv *uint64
+}
+
+func (c *CountedConn) Read(b []byte) (n int, err error) {
+	n, err = c.Conn.Read(b)
+	if n > 0 {
+		atomic.AddUint64(c.bytesRecv, uint64(n))
+	}
+	return
+}
+
+func (c *CountedConn) Write(b []byte) (n int, err error) {
+	n, err = c.Conn.Write(b)
+	if n > 0 {
+		atomic.AddUint64(c.bytesSent, uint64(n))
+	}
+	return
 }

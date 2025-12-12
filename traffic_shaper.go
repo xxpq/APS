@@ -80,53 +80,114 @@ func (ts *TrafficShaper) GetLimiter(key, rateLimitStr string) (*rate.Limiter, er
 
 // GetTrafficQuota returns a traffic quota tracker for a given key and quota string (e.g., "10gb").
 // If the tracker doesn't exist, it's created.
-func (ts *TrafficShaper) GetTrafficQuota(key, quotaStr string, initialUsage int64) (*TrafficQuota, error) {
+func (ts *TrafficShaper) GetTrafficQuota(key, quotaStr string) (*TrafficQuota, error) {
 	if quotaStr == "" {
 		return nil, nil
 	}
 
-	if quota, ok := ts.quotas.Load(key); ok {
-		return quota.(*TrafficQuota), nil
+	// Try to load existing quota
+	val, loaded := ts.quotas.Load(key)
+	if loaded {
+		if quota, ok := val.(*TrafficQuota); ok {
+			// Update limit if it has changed
+			limit, err := parseSize(quotaStr)
+			if err != nil {
+				return nil, fmt.Errorf("invalid traffic quota format for key '%s': %w", key, err)
+			}
+			quota.mu.Lock()
+			quota.Limit = limit
+			quota.mu.Unlock()
+			return quota, nil
+		}
 	}
 
+	// Lock and double-check
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
 
-	// Double check after lock
-	if quota, ok := ts.quotas.Load(key); ok {
-		return quota.(*TrafficQuota), nil
+	val, loaded = ts.quotas.Load(key)
+	if loaded { // Another goroutine might have created it
+		if quota, ok := val.(*TrafficQuota); ok {
+			limit, err := parseSize(quotaStr)
+			if err != nil {
+				return nil, fmt.Errorf("invalid traffic quota format for key '%s': %w", key, err)
+			}
+			quota.mu.Lock()
+			quota.Limit = limit
+			quota.mu.Unlock()
+			return quota, nil
+		}
 	}
 
+	// Create new quota
 	limit, err := parseSize(quotaStr)
 	if err != nil {
 		return nil, fmt.Errorf("invalid traffic quota format for key '%s': %w", key, err)
 	}
+	
+	// Check if initialUsage was already loaded in NewTrafficShaper for this key
+	var initialUsed int64
+	if val, ok := ts.quotas.Load(key); ok {
+		// Existing entry might be a RequestQuota, handle this
+		if existingTQ, ok := val.(*TrafficQuota); ok {
+			initialUsed = existingTQ.Used
+		}
+	}
 
-	quota := &TrafficQuota{Limit: limit, Used: initialUsage}
+	quota := &TrafficQuota{
+		Limit: limit,
+		Used:  initialUsed, // Use loaded initial usage if available
+	}
 	ts.quotas.Store(key, quota)
 	return quota, nil
 }
 
-// GetRequestQuota returns a request quota tracker for a given key and limit.
+// GetRequestQuota returns a request quota tracker for a given key and quota limit.
 // If the tracker doesn't exist, it's created.
-func (ts *TrafficShaper) GetRequestQuota(key string, limit int64, initialUsage int64) (*RequestQuota, error) {
-	if limit <= 0 {
+func (ts *TrafficShaper) GetRequestQuota(key string, quotaLimit int64) (*RequestQuota, error) {
+	if quotaLimit <= 0 {
 		return nil, nil
 	}
 
-	if quota, ok := ts.quotas.Load(key); ok {
-		return quota.(*RequestQuota), nil
+	// Try to load existing quota
+	val, loaded := ts.quotas.Load(key)
+	if loaded {
+		if quota, ok := val.(*RequestQuota); ok {
+			// Update limit if it has changed
+			quota.mu.Lock()
+			quota.Limit = quotaLimit
+			quota.mu.Unlock()
+			return quota, nil
+		}
 	}
 
+	// Lock and double-check
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
 
-	// Double check after lock
-	if quota, ok := ts.quotas.Load(key); ok {
-		return quota.(*RequestQuota), nil
+	val, loaded = ts.quotas.Load(key)
+	if loaded { // Another goroutine might have created it
+		if quota, ok := val.(*RequestQuota); ok {
+			quota.mu.Lock()
+			quota.Limit = quotaLimit
+			quota.mu.Unlock()
+			return quota, nil
+		}
 	}
 
-	quota := &RequestQuota{Limit: limit, Used: initialUsage}
+	// Create new quota
+	// Check if initialUsage was already loaded in NewTrafficShaper for this key
+	var initialUsed int64
+	if val, ok := ts.quotas.Load(key); ok {
+		if existingRQ, ok := val.(*RequestQuota); ok {
+			initialUsed = existingRQ.Used
+		}
+	}
+
+	quota := &RequestQuota{
+		Limit: quotaLimit,
+		Used:  initialUsed, // Use loaded initial usage if available
+	}
 	ts.quotas.Store(key, quota)
 	return quota, nil
 }

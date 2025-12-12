@@ -274,55 +274,49 @@ func (tm *TCPTunnelManager) SendRequestStream(ctx context.Context, tunnelName, e
 			pipeWriter.Close()
 
 		}()
-		for {
-			select {
-			case msg, ok := <-pending.responseChan:
-				if !ok {
-					DebugLog("[TCP TUNNEL] Response channel closed for %s", requestID)
+		for msg := range pending.responseChan {
+			DebugLog("[TCP TUNNEL] Received chunk message type %d for %s", msg.Type, requestID)
+			switch msg.Type {
+			case MsgTypeResponseChunk:
+				var chunk ResponseChunkPayloadTCP
+				if err := msg.ParseJSON(&chunk); err != nil {
+					pipeWriter.CloseWithError(err)
 					return
 				}
-				DebugLog("[TCP TUNNEL] Received chunk message type %d for %s", msg.Type, requestID)
-				switch msg.Type {
-				case MsgTypeResponseChunk:
-					var chunk ResponseChunkPayloadTCP
-					if err := msg.ParseJSON(&chunk); err != nil {
-						pipeWriter.CloseWithError(err)
-						return
-					}
-					decryptedChunk, err := decrypt(chunk.Data, tm.config.Tunnels[tunnelName].Password)
+				decryptedChunk, err := decrypt(chunk.Data, tm.config.Tunnels[tunnelName].Password)
+				if err != nil {
+					pipeWriter.CloseWithError(err)
+					return
+				}
+				// Write with retry for transient failures
+				written := 0
+				for written < len(decryptedChunk) {
+					n, err := pipeWriter.Write(decryptedChunk[written:])
+					written += n
 					if err != nil {
-						pipeWriter.CloseWithError(err)
 						return
 					}
-					// Write with retry for transient failures
-					written := 0
-					for written < len(decryptedChunk) {
-						n, err := pipeWriter.Write(decryptedChunk[written:])
-						written += n
-						if err != nil {
-							return
-						}
-					}
-				case MsgTypeResponseEnd:
-					var end ResponseEndPayloadTCP
-					if err := msg.ParseJSON(&end); err != nil {
-						pipeWriter.CloseWithError(err)
-						return
-					}
-					if end.Error != "" {
-						pipeWriter.CloseWithError(errors.New(end.Error))
-					}
+				}
+			case MsgTypeResponseEnd:
+				var end ResponseEndPayloadTCP
+				if err := msg.ParseJSON(&end); err != nil {
+					pipeWriter.CloseWithError(err)
 					return
 				}
+				if end.Error != "" {
+					pipeWriter.CloseWithError(errors.New(end.Error))
+				}
+				return
 			}
 		}
+		DebugLog("[TCP TUNNEL] Response channel closed for %s", requestID)
 	}()
 
 	return pipeReader, headerBytes, nil
 }
 
 // GetEndpointsInfo returns information about endpoints in a tunnel
-func (tm *TCPTunnelManager) GetEndpointsInfo(tunnelName string) map[string]*EndpointInfo {
+func (tm *TCPTunnelManager) GetEndpointsInfo(tunnelName string, stats *StatsCollector) map[string]*EndpointInfo {
 	tm.mu.RLock()
 	tunnel, exists := tm.tunnels[tunnelName]
 	tm.mu.RUnlock()
@@ -336,11 +330,20 @@ func (tm *TCPTunnelManager) GetEndpointsInfo(tunnelName string) map[string]*Endp
 	for endpointName, endpoints := range tunnel.endpoints {
 		if len(endpoints) > 0 {
 			ep := endpoints[0]
+
+			// Get per-endpoint statistics from StatsCollector
+			var endpointStats *PublicMetrics
+			if stats != nil {
+				endpointKey := tunnelName + ":" + endpointName
+				endpointStats = stats.GetMetricsForKey(&stats.EndpointStats, endpointKey)
+			}
+
 			info[endpointName] = &EndpointInfo{
 				Name:             ep.EndpointName,
 				RemoteAddr:       ep.RemoteAddr,
 				OnlineTime:       ep.OnlineTime,
 				LastActivityTime: ep.LastActivityTime,
+				Stats:            endpointStats,
 			}
 		}
 	}

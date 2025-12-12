@@ -31,7 +31,7 @@ type ServerManager struct {
 	wg            sync.WaitGroup
 	config        *Config
 	configFile    string
-	dataStore     *DataStore
+	// dataStore     *DataStore // Removed, replaced by statsDB for persistence
 	harManager    *HarLoggerManager
 	tunnelManager TunnelManagerInterface
 	scriptRunner  *ScriptRunner
@@ -39,16 +39,16 @@ type ServerManager struct {
 	stats         *StatsCollector
 	staticCache   *StaticCacheManager
 	replayManager *ReplayManager
+	statsDB       *StatsDB
 }
 
-func NewServerManager(config *Config, configFile string, dataStore *DataStore, harManager *HarLoggerManager, tunnelManager TunnelManagerInterface, scriptRunner *ScriptRunner, trafficShaper *TrafficShaper, stats *StatsCollector, staticCache *StaticCacheManager, replayManager *ReplayManager) *ServerManager {
+func NewServerManager(config *Config, configFile string, harManager *HarLoggerManager, tunnelManager TunnelManagerInterface, scriptRunner *ScriptRunner, trafficShaper *TrafficShaper, stats *StatsCollector, staticCache *StaticCacheManager, replayManager *ReplayManager, statsDB *StatsDB) *ServerManager {
 	return &ServerManager{
 		servers:       make(map[string]*http.Server),
 		tcpServers:    make(map[string]*RawTCPServer),
 		muxes:         make(map[string]*ConnectionMux),
 		config:        config,
 		configFile:    configFile,
-		dataStore:     dataStore,
 		harManager:    harManager,
 		tunnelManager: tunnelManager,
 		scriptRunner:  scriptRunner,
@@ -56,6 +56,7 @@ func NewServerManager(config *Config, configFile string, dataStore *DataStore, h
 		stats:         stats,
 		staticCache:   staticCache,
 		replayManager: replayManager,
+		statsDB:       statsDB,
 	}
 }
 
@@ -104,7 +105,7 @@ func (sm *ServerManager) Start(name string, serverConfig *ListenConfig, isACMEEn
 	// Check if this is a rawTCP server
 	if serverConfig.RawTCP {
 		tcpServer := NewRawTCPServer(name, serverConfig, sm.config, serverMappings[name],
-			sm.tunnelManager, sm.trafficShaper, sm.stats, sm.dataStore)
+			sm.tunnelManager, sm.trafficShaper, sm.stats)
 		if err := tcpServer.Start(); err != nil {
 			log.Printf("Failed to start TCP server '%s': %v", name, err)
 			return
@@ -115,7 +116,7 @@ func (sm *ServerManager) Start(name string, serverConfig *ListenConfig, isACMEEn
 	}
 
 	// HTTP server
-	handler := createServerHandler(name, serverMappings[name], serverConfig, sm.config, sm.configFile, sm.dataStore, sm.harManager, sm.tunnelManager, sm.scriptRunner, sm.trafficShaper, sm.stats, sm.staticCache, sm.replayManager, isACMEEnabled)
+	handler := createServerHandler(name, serverMappings[name], serverConfig, sm.config, sm.configFile, sm.harManager, sm.tunnelManager, sm.scriptRunner, sm.trafficShaper, sm.stats, sm.staticCache, sm.replayManager, isACMEEnabled, sm.statsDB)
 	server, mux := startServer(name, serverConfig, handler, sm.tunnelManager)
 	if server != nil {
 		sm.servers[name] = server
@@ -250,7 +251,6 @@ func (sm *ServerManager) StopAll() {
 
 func main() {
 	configFile := flag.String("config", "config.json", "Path to configuration file")
-	dataFile := flag.String("data", "data.json", "Path to data file for quota persistence")
 	flag.Parse()
 
 	log.Println("===========================================")
@@ -268,9 +268,17 @@ func main() {
 
 	InitACME(config)
 
-	dataStore, err := LoadDataStore(*dataFile)
+	// Initialize StatsDB
+	statsDB, err := NewStatsDB("stats.db")
 	if err != nil {
-		log.Fatalf("Failed to load data store: %v", err)
+		log.Fatalf("Failed to initialize stats db: %v", err)
+	}
+	defer statsDB.Close()
+
+	// Load initial quota usage from DB
+	initialQuotaUsage, err := statsDB.LoadAllQuotaUsage()
+	if err != nil {
+		log.Fatalf("Failed to load initial quota usage from DB: %v", err)
 	}
 
 	harManager := NewHarLoggerManager(config)
@@ -278,7 +286,7 @@ func main() {
 
 	tunnelManager := NewHybridTunnelManager(config, nil) // 使用混合隧道管理器
 	scriptRunner := NewScriptRunner(config.Scripting)
-	trafficShaper := NewTrafficShaper(dataStore.QuotaUsage)
+	trafficShaper := NewTrafficShaper(initialQuotaUsage)
 	statsCollector := NewStatsCollector(config)
 	defer statsCollector.Close() // Ensure graceful shutdown of async stats workers
 
@@ -290,7 +298,7 @@ func main() {
 	tunnelManager.SetStatsCollector(statsCollector)
 	replayManager := NewReplayManager(config)
 
-	serverManager := NewServerManager(config, *configFile, dataStore, harManager, tunnelManager, scriptRunner, trafficShaper, statsCollector, staticCache, replayManager)
+	serverManager := NewServerManager(config, *configFile, harManager, tunnelManager, scriptRunner, trafficShaper, statsCollector, staticCache, replayManager, statsDB)
 
 	watcher, err := NewConfigWatcher(*configFile, config, serverManager)
 	if err != nil {
@@ -301,8 +309,9 @@ func main() {
 
 	serverManager.StartAll()
 
-	startQuotaPersistence(dataStore, trafficShaper, *dataFile)
-	startStatsCollection(dataStore, statsCollector, *dataFile)
+	// Start quota persistence (now saving to DB)
+	startQuotaPersistence(trafficShaper, statsDB)
+	startStatsCollection(statsCollector, statsDB)
 
 	log.Println("===========================================")
 	log.Printf("Loaded %d mapping rules:", len(config.Mappings))
@@ -375,9 +384,9 @@ func (sm *ServerManager) StartAll() {
 	}
 }
 
-func createServerHandler(serverName string, mappings []*Mapping, serverConfig *ListenConfig, config *Config, configFile string, dataStore *DataStore, harManager *HarLoggerManager, tunnelManager TunnelManagerInterface, scriptRunner *ScriptRunner, trafficShaper *TrafficShaper, stats *StatsCollector, staticCache *StaticCacheManager, replayManager *ReplayManager, isACMEEnabled bool) http.Handler {
+func createServerHandler(serverName string, mappings []*Mapping, serverConfig *ListenConfig, config *Config, configFile string, harManager *HarLoggerManager, tunnelManager TunnelManagerInterface, scriptRunner *ScriptRunner, trafficShaper *TrafficShaper, stats *StatsCollector, staticCache *StaticCacheManager, replayManager *ReplayManager, isACMEEnabled bool, statsDB *StatsDB) http.Handler {
 	mux := http.NewServeMux()
-	proxy := NewMapRemoteProxy(config, dataStore, harManager, tunnelManager, scriptRunner, trafficShaper, stats, staticCache, serverName)
+	proxy := NewMapRemoteProxy(config, harManager, tunnelManager, scriptRunner, trafficShaper, stats, staticCache, serverName)
 
 	// 如果 cert 是 auto，注册证书下载处理器
 	if certStr, ok := serverConfig.Cert.(string); ok && certStr == "auto" {
@@ -394,7 +403,7 @@ func createServerHandler(serverName string, mappings []*Mapping, serverConfig *L
 		mux.HandleFunc("/.api/stats", stats.ServeHTTP)
 
 		// 注册管理面板处理器
-		adminHandlers := NewAdminHandlers(config, configFile, dataStore)
+		adminHandlers := NewAdminHandlers(config, configFile, stats, statsDB)
 		// 设置tunnel管理器引用，用于查询endpoint状态
 		adminHandlers.SetTunnelManager(tunnelManager)
 		adminHandlers.RegisterHandlers(mux)
@@ -504,35 +513,29 @@ func startServer(name string, config *ListenConfig, handler http.Handler, tunnel
 	}
 	return server, mux
 }
-func startQuotaPersistence(dataStore *DataStore, trafficShaper *TrafficShaper, dataFile string) {
+func startQuotaPersistence(trafficShaper *TrafficShaper, statsDB *StatsDB) {
 	ticker := time.NewTicker(10 * time.Second)
 	go func() {
 		for range ticker.C {
 			trafficShaper.quotas.Range(func(key, value interface{}) bool {
 				sourceKey := key.(string)
-				dataStore.mu.Lock()
+				var trafficUsed, requestsUsed int64
 				if tq, ok := value.(*TrafficQuota); ok {
-					if _, ok := dataStore.QuotaUsage[sourceKey]; !ok {
-						dataStore.QuotaUsage[sourceKey] = &QuotaUsageData{}
-					}
-					dataStore.QuotaUsage[sourceKey].TrafficUsed = tq.Used
-				} else if rq, ok := value.(*RequestQuota); ok {
-					if _, ok := dataStore.QuotaUsage[sourceKey]; !ok {
-						dataStore.QuotaUsage[sourceKey] = &QuotaUsageData{}
-					}
-					dataStore.QuotaUsage[sourceKey].RequestsUsed = rq.Used
+					trafficUsed = tq.Used
 				}
-				dataStore.mu.Unlock()
+				if rq, ok := value.(*RequestQuota); ok {
+					requestsUsed = rq.Used
+				}
+				if err := statsDB.SaveQuotaUsage(sourceKey, trafficUsed, requestsUsed); err != nil {
+					log.Printf("[QUOTA] Error saving quota usage to DB for %s: %v", sourceKey, err)
+				}
 				return true
 			})
-			if err := SaveDataStore(dataStore, dataFile); err != nil {
-				log.Printf("[QUOTA] Error saving quota usage: %v", err)
-			}
 		}
 	}()
 }
 
-func startStatsCollection(dataStore *DataStore, stats *StatsCollector, dataFile string) {
+func startStatsCollection(stats *StatsCollector, statsDB *StatsDB) {
 	ticker := time.NewTicker(1 * time.Minute)
 	go func() {
 		for range ticker.C {
@@ -597,12 +600,12 @@ func startStatsCollection(dataStore *DataStore, stats *StatsCollector, dataFile 
 				return true
 			})
 
-			// Add snapshot to data store
-			dataStore.AddSnapshot(snapshot)
+			// Collect dimensional stats - IPs (Top 200)
+			snapshot.IPs = stats.GetTopIPsAsDimensionStats(200)
 
-			// Save to disk
-			if err := SaveDataStore(dataStore, dataFile); err != nil {
-				log.Printf("[STATS] Error saving time series data: %v", err)
+			// Save to DB
+			if err := statsDB.AddSnapshot(snapshot); err != nil {
+				log.Printf("[STATS] Error saving snapshot to DB: %v", err)
 			}
 		}
 	}()
@@ -626,5 +629,15 @@ func extractDimensionStats(m *Metrics) *DimensionStats {
 		BytesSent:   totalBytesSent,
 		Errors:      atomic.LoadUint64(&m.Errors),
 		AvgRespTime: avgRespTime,
+
+		// Protocol-specific statistics
+		HTTPRequests:    atomic.LoadUint64(&m.HTTPRequests),
+		HTTPSuccess:     atomic.LoadUint64(&m.HTTPSuccess),
+		HTTPFailure:     atomic.LoadUint64(&m.HTTPFailure),
+		RawTCPRequests:  atomic.LoadUint64(&m.RawTCPRequests),
+		HTTPBytesSent:   atomic.LoadUint64(&m.HTTPBytesSent),
+		HTTPBytesRecv:   atomic.LoadUint64(&m.HTTPBytesRecv),
+		RawTCPBytesSent: atomic.LoadUint64(&m.RawTCPBytesSent),
+		RawTCPBytesRecv: atomic.LoadUint64(&m.RawTCPBytesRecv),
 	}
 }

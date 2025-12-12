@@ -52,12 +52,6 @@ type StaticCacheConfig struct {
 	FileType []string `json:"file_type,omitempty"` // 可缓存的文件扩展名，如果指定则覆盖默认值
 }
 
-type DataStore struct {
-	QuotaUsage      map[string]*QuotaUsageData `json:"quotaUsage,omitempty"`
-	TimeSeriesStats []TimeSeriesSnapshot       `json:"timeSeriesStats,omitempty"`
-	mu              sync.Mutex
-}
-
 // TimeSeriesSnapshot represents a point-in-time statistics snapshot with dimensional data
 type TimeSeriesSnapshot struct {
 	Timestamp int64 `json:"timestamp"` // Unix timestamp in seconds
@@ -71,6 +65,7 @@ type TimeSeriesSnapshot struct {
 	Servers map[string]*DimensionStats `json:"servers,omitempty"`
 	Tunnels map[string]*DimensionStats `json:"tunnels,omitempty"`
 	Proxies map[string]*DimensionStats `json:"proxies,omitempty"`
+	IPs     map[string]*DimensionStats `json:"ips,omitempty"`
 }
 
 // GlobalStats contains system-wide statistics
@@ -89,45 +84,16 @@ type DimensionStats struct {
 	BytesSent   uint64  `json:"bytesSent"`
 	Errors      uint64  `json:"errors"`
 	AvgRespTime float64 `json:"avgRespTime"` // milliseconds
-}
 
-// AddSnapshot adds a new snapshot and removes data older than 24 hours
-func (ds *DataStore) AddSnapshot(snapshot TimeSeriesSnapshot) {
-	ds.mu.Lock()
-	defer ds.mu.Unlock()
-
-	// Add new snapshot
-	ds.TimeSeriesStats = append(ds.TimeSeriesStats, snapshot)
-
-	// Clean up snapshots older than 24 hours
-	now := snapshot.Timestamp
-	cutoff := now - 24*60*60
-
-	filtered := []TimeSeriesSnapshot{}
-	for _, s := range ds.TimeSeriesStats {
-		if s.Timestamp >= cutoff {
-			filtered = append(filtered, s)
-		}
-	}
-	ds.TimeSeriesStats = filtered
-}
-
-// GetQuotaUsages 批量获取多个 source 的配额使用情况（单次加锁）
-func (ds *DataStore) GetQuotaUsages(sources []string) map[string]*QuotaUsageData {
-	result := make(map[string]*QuotaUsageData, len(sources))
-	ds.mu.Lock()
-	defer ds.mu.Unlock()
-	for _, source := range sources {
-		if usage, ok := ds.QuotaUsage[source]; ok {
-			result[source] = usage
-		}
-	}
-	return result
-}
-
-type QuotaUsageData struct {
-	TrafficUsed  int64 `json:"trafficUsed"`
-	RequestsUsed int64 `json:"requestsUsed"`
+	// Protocol-specific statistics
+	HTTPRequests    uint64 `json:"httpRequests"`
+	HTTPSuccess     uint64 `json:"httpSuccess"`
+	HTTPFailure     uint64 `json:"httpFailure"`
+	RawTCPRequests  uint64 `json:"rawTcpRequests"`
+	HTTPBytesSent   uint64 `json:"httpBytesSent"`
+	HTTPBytesRecv   uint64 `json:"httpBytesRecv"`
+	RawTCPBytesSent uint64 `json:"rawTcpBytesSent"`
+	RawTCPBytesRecv uint64 `json:"rawTcpBytesRecv"`
 }
 
 type ProxyConfig struct {
@@ -693,57 +659,6 @@ func LoadConfig(filename string) (*Config, error) {
 	}
 
 	return &config, nil
-}
-
-func LoadDataStore(filename string) (*DataStore, error) {
-	file, err := os.Open(filename)
-	if err != nil {
-		if os.IsNotExist(err) {
-			log.Printf("Data file '%s' not found, creating a new one.", filename)
-			return &DataStore{
-				QuotaUsage:      make(map[string]*QuotaUsageData),
-				TimeSeriesStats: []TimeSeriesSnapshot{},
-			}, nil
-		}
-		return nil, err
-	}
-	defer file.Close()
-
-	var dataStore DataStore
-	decoder := json.NewDecoder(file)
-	if err := decoder.Decode(&dataStore); err != nil {
-		log.Printf("Error decoding data file '%s', starting with empty data: %v", filename, err)
-		// If the file is corrupted or empty, start with a fresh data store
-		return &DataStore{
-			QuotaUsage:      make(map[string]*QuotaUsageData),
-			TimeSeriesStats: []TimeSeriesSnapshot{},
-		}, nil
-	}
-
-	if dataStore.QuotaUsage == nil {
-		dataStore.QuotaUsage = make(map[string]*QuotaUsageData)
-	}
-
-	if dataStore.TimeSeriesStats == nil {
-		dataStore.TimeSeriesStats = []TimeSeriesSnapshot{}
-	}
-
-	return &dataStore, nil
-}
-
-func SaveDataStore(dataStore *DataStore, filename string) error {
-	dataStore.mu.Lock()
-	defer dataStore.mu.Unlock()
-
-	file, err := os.OpenFile(filename, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-
-	encoder := json.NewEncoder(file)
-	encoder.SetIndent("", "  ")
-	return encoder.Encode(dataStore)
 }
 
 func processConfig(config *Config) error {
