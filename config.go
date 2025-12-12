@@ -439,7 +439,7 @@ type RuleAuth struct {
 	Groups       []string `json:"groups,omitempty"`
 	AuthProvider string   `json:"authProvider,omitempty"` // 引用 authProviders 的 key
 	AuthUrl      string   `json:"authUrl,omitempty"`      // 第三方认证URL (内联)
-	AuthLevel    *int     `json:"authLevel,omitempty"`    // 认证等级: 0=不传, 1=只传token, 2=只传info, 3=token+info
+	AuthLevel    *int     `json:"authLevel,omitempty"`    // 认证等级: 0=不传, 1=只传token, 2=只传info, 3=token+hash, 4=token+info
 }
 
 type ListenConfig struct {

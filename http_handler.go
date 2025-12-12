@@ -4,7 +4,11 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/md5"
 	"crypto/tls"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -290,7 +294,7 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	// Check third-party authentication if configured
 	authUrl, authLevel := p.resolveAuthConfig(mapping)
 	if matched && mapping != nil && authUrl != "" {
-		if authorized, info := p.checkThirdPartyAuth(r, authUrl); !authorized {
+		if authorized, info, hash := p.checkThirdPartyAuth(r, authUrl); !authorized {
 			isError = true
 			http.Error(w, "Unauthorized (Third-party)", http.StatusUnauthorized)
 			return
@@ -310,7 +314,7 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 
-			// Level 2: Pass user info
+			// Level 2: Pass user info (APS-AUTH-INFO), remove token
 			if authLevel == 2 {
 				r.Header.Set("APS-AUTH-INFO", info)
 				if r.Header.Get("Authorization") != "" {
@@ -318,8 +322,16 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 
-			// Level 3: Pass both
+			// Level 3: Pass token + hash (APS-AUTH-HASH)
 			if authLevel == 3 {
+				if r.Header.Get("Authorization") == "" && token != "" {
+					r.Header.Set("Authorization", "Bearer "+token)
+				}
+				r.Header.Set("APS-AUTH-HASH", hash)
+			}
+
+			// Level 4: Pass token + user info (APS-AUTH-INFO)
+			if authLevel == 4 {
 				if r.Header.Get("Authorization") == "" && token != "" {
 					r.Header.Set("Authorization", "Bearer "+token)
 				}
@@ -1278,25 +1290,31 @@ func (p *MapRemoteProxy) extractToken(r *http.Request) string {
 }
 
 // checkThirdPartyAuth performs third-party authentication
-// Returns (authorized, info)
-func (p *MapRemoteProxy) checkThirdPartyAuth(r *http.Request, authUrl string) (bool, string) {
+// Returns (authorized, info, hash)
+func (p *MapRemoteProxy) checkThirdPartyAuth(r *http.Request, authUrl string) (bool, string, string) {
 	token := p.extractToken(r)
 	if token == "" {
 		log.Printf("[AUTH] No token found in request")
-		return false, ""
+		return false, "", ""
 	}
 
 	authCache := GetAuthCache()
 	cacheKey := authCache.GenerateCacheKey(token, r.Method, r.Host, r.URL.Path)
 
-	// Check cache
-	if body, found := authCache.Get(cacheKey); found {
+	// 1. Check fresh cache
+	if body, hash, found := authCache.Get(cacheKey); found {
 		log.Printf("[AUTH] Cache HIT for token %s", maskToken(token))
-		return true, body
+		return true, body, hash
+	}
+
+	// 2. Check stale cache for optimization
+	var staleBody, staleHash string
+	var hasStale bool
+	if staleBody, staleHash, hasStale = authCache.GetStale(cacheKey); hasStale {
+		log.Printf("[AUTH] Stale cache found for token %s (hash: %s)", maskToken(token), staleHash)
 	}
 
 	// Build Auth Request URL
-	// Assume AuthUrl is a base URL.
 	authBase := authUrl
 	if strings.HasSuffix(authBase, "*") {
 		authBase = strings.TrimSuffix(authBase, "*")
@@ -1313,34 +1331,76 @@ func (p *MapRemoteProxy) checkThirdPartyAuth(r *http.Request, authUrl string) (b
 	authReq, err := http.NewRequest("GET", targetAuthURL, nil)
 	if err != nil {
 		log.Printf("[AUTH] Failed to create auth request: %v", err)
-		return false, ""
+		return false, "", ""
 	}
 
 	// Forward token
 	authReq.Header.Set("Authorization", "Bearer "+token)
 
+	// Optimization: Send Hash if available
+	if hasStale && staleHash != "" {
+		authReq.Header.Set("APS-USER-HASH", staleHash)
+	}
+
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(authReq)
 	if err != nil {
 		log.Printf("[AUTH] Auth request failed: %v", err)
-		return false, ""
+		return false, "", ""
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusOK {
 		bodyBytes, _ := io.ReadAll(resp.Body)
-		bodyStr := string(bodyBytes)
-		if bodyStr == "" {
-			bodyStr = "1"
+		
+		var finalBody string
+		var finalHash string
+
+		// If server returned empty body and we sent a hash, it means "Not Modified" (logic match)
+		if len(bodyBytes) == 0 && hasStale && staleHash != "" {
+			log.Printf("[AUTH] Auth server returned empty body with matching hash, reusing stale data")
+			finalBody = staleBody
+			finalHash = staleHash
+		} else {
+			// New data or fallback
+			finalBody = string(bodyBytes)
+			if finalBody == "" {
+				finalBody = "1" // Fallback for empty body without hash match context
+			}
+			
+			// Calculate new hash
+			finalHash = calculateUserHash(finalBody)
 		}
 		
 		// Cache result asynchronously
-		go authCache.Set(cacheKey, bodyStr, 1*time.Hour)
+		go authCache.Set(cacheKey, finalBody, finalHash, 1*time.Hour)
 		
-		return true, bodyStr
+		return true, finalBody, finalHash
 	}
 
 	log.Printf("[AUTH] Auth failed with status %d", resp.StatusCode)
-	return false, ""
+	return false, "", ""
+}
+
+// calculateUserHash calculates MD5(Base64(CanonicalJSON(body)))
+func calculateUserHash(body string) string {
+	var data interface{}
+	var sortedBytes []byte
+	
+	// Try to unmarshal as JSON to sort keys
+	if err := json.Unmarshal([]byte(body), &data); err == nil {
+		if b, err := json.Marshal(data); err == nil {
+			sortedBytes = b
+		}
+	}
+	
+	// If unmarshal failed or marshal failed, fallback to raw body
+	if sortedBytes == nil {
+		sortedBytes = []byte(body)
+	}
+	
+	encoded := base64.StdEncoding.EncodeToString(sortedBytes)
+	sum := md5.Sum([]byte(encoded))
+	return hex.EncodeToString(sum[:])
 }
 

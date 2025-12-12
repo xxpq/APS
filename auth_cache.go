@@ -8,6 +8,7 @@ import (
 // AuthCacheEntry represents a cached authentication result
 type AuthCacheEntry struct {
 	Body      string // Response body from auth service
+	Hash      string // MD5(Base64(CanonicalJSON(Body)))
 	ExpiresAt time.Time
 }
 
@@ -28,45 +29,48 @@ func GetAuthCache() *AuthCache {
 }
 
 // GenerateCacheKey generates a cache key from token and request path
-// Key format: SHA256(token + ":" + method + ":" + host + ":" + path)
-// However, the prompt says "token + path".
-// And for revocation "revoke?token=xxx", we need to be able to find entries by token.
-// If we hash, we can't easily find all entries for a token without scanning or a secondary index.
-// Given the requirement to revoke by token, and assuming "token" is the primary identifier,
-// we will use a key structure that allows us to filter.
-// Or we just store: key = token + "|" + path.
-// When revoking 'token', we iterate and delete all keys starting with 'token|'.
 func (ac *AuthCache) GenerateCacheKey(token, method, host, path string) string {
-	// Simple concatenation. Token can be long, but it's the prefix for revocation.
 	return token + "|" + method + "|" + host + "|" + path
 }
 
-// Get retrieves a cached entry
-func (ac *AuthCache) Get(key string) (string, bool) {
+// Get retrieves a cached entry if it is not expired
+func (ac *AuthCache) Get(key string) (string, string, bool) {
 	ac.mu.RLock()
 	defer ac.mu.RUnlock()
 
 	entry, ok := ac.cache[key]
 	if !ok {
-		return "", false
+		return "", "", false
 	}
 
 	if time.Now().After(entry.ExpiresAt) {
-		// Lazy expiration cleanup could be here, or just return false
-		// We'll leave cleanup to a dedicated routine or just let it sit until overwritten/revoked for simplicity in this MVP
-		return "", false
+		return "", "", false
 	}
 
-	return entry.Body, true
+	return entry.Body, entry.Hash, true
+}
+
+// GetStale retrieves a cached entry even if it is expired, along with its hash
+func (ac *AuthCache) GetStale(key string) (string, string, bool) {
+	ac.mu.RLock()
+	defer ac.mu.RUnlock()
+
+	entry, ok := ac.cache[key]
+	if !ok {
+		return "", "", false
+	}
+
+	return entry.Body, entry.Hash, true
 }
 
 // Set adds or updates a cache entry
-func (ac *AuthCache) Set(key string, body string, ttl time.Duration) {
+func (ac *AuthCache) Set(key string, body string, hash string, ttl time.Duration) {
 	ac.mu.Lock()
 	defer ac.mu.Unlock()
 
 	ac.cache[key] = &AuthCacheEntry{
 		Body:      body,
+		Hash:      hash,
 		ExpiresAt: time.Now().Add(ttl),
 	}
 }

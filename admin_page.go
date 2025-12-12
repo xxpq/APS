@@ -520,7 +520,8 @@ var admin_page_content = `
               <option value="0">0 - 不传递Token</option>
               <option value="1">1 - 仅传递Token</option>
               <option value="2">2 - 仅传递用户信息</option>
-              <option value="3">3 - 传递Token+用户信息</option>
+              <option value="3">3 - 传递Token+Hash</option>
+              <option value="4">4 - 传递Token+用户信息</option>
             </select>
           </div>
         </div>
@@ -549,7 +550,8 @@ var admin_page_content = `
               <option value="0">0 - 不传递Token</option>
               <option value="1">1 - 仅传递Token</option>
               <option value="2">2 - 仅传递用户信息</option>
-              <option value="3">3 - 传递Token+用户信息</option>
+              <option value="3">3 - 传递Token+Hash</option>
+              <option value="4">4 - 传递Token+用户信息</option>
             </select>
           </div>
         </div>
