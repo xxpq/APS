@@ -61,6 +61,11 @@ const (
 
 	// Configuration management
 	MsgTypeConfigUpdate uint8 = 0x40 // APS pushes config update to endpoint
+
+	// Key negotiation for dynamic encryption
+	MsgTypeKeyRequest  uint8 = 0x50 // Request new session key negotiation
+	MsgTypeKeyResponse uint8 = 0x51 // Response with encrypted new key
+	MsgTypeKeyConfirm  uint8 = 0x52 // Confirmation key is activated
 )
 
 const headerSize = 5
@@ -294,6 +299,17 @@ func runTCPTunnelSession(ctx context.Context) bool {
 
 	log.Println("Successfully registered with TCP tunnel server")
 
+	// Initialize session key manager
+	password := *tunnelPassword
+	if runtimeConfig != nil && runtimeConfig.Password != "" {
+		password = runtimeConfig.Password
+	}
+	keyManager := NewSessionKeyManager(password)
+	if err := keyManager.DeriveInitialKey(); err != nil {
+		log.Printf("Failed to derive initial key: %v", err)
+		return true
+	}
+
 	// Start message handling loop
 	done := make(chan struct{})
 	go func() {
@@ -309,8 +325,16 @@ func runTCPTunnelSession(ctx context.Context) bool {
 				}
 				return
 			}
-			go handleTCPMessage(tc, msg)
+			go handleTCPMessage(tc, msg, keyManager)
 		}
+	}()
+
+	// Start auto key rotation (endpoint can also initiate)
+	go func() {
+		time.Sleep(5 * time.Second) // Wait for connection to stabilize
+		keyManager.StartAutoRotation(func() error {
+			return initiateKeyRotation(tc, keyManager)
+		})
 	}()
 
 	// Heartbeat loop
@@ -330,7 +354,7 @@ func runTCPTunnelSession(ctx context.Context) bool {
 }
 
 // handleTCPMessage handles incoming messages
-func handleTCPMessage(tc *TunnelConn, msg *TunnelMessage) {
+func handleTCPMessage(tc *TunnelConn, msg *TunnelMessage, km *SessionKeyManager) {
 	switch msg.Type {
 	case MsgTypeRequest:
 		handleTCPRequest(tc, msg)
@@ -351,7 +375,7 @@ func handleTCPMessage(tc *TunnelConn, msg *TunnelMessage) {
 	case MsgTypeCancel:
 		// TODO: Handle cancellation
 	case MsgTypeConfigUpdate:
-		handleConfigUpdate(msg)
+		handleConfigUpdate(tc, msg)
 	}
 }
 
@@ -624,7 +648,7 @@ type ConfigUpdatePayload struct {
 }
 
 // handleConfigUpdate handles configuration update pushed from APS
-func handleConfigUpdate(msg *TunnelMessage) {
+func handleConfigUpdate(tc *TunnelConn, msg *TunnelMessage) {
 	var payload ConfigUpdatePayload
 	if err := msg.ParseJSON(&payload); err != nil {
 		log.Printf("[CONFIG] Failed to parse config update: %v", err)
@@ -637,6 +661,15 @@ func handleConfigUpdate(msg *TunnelMessage) {
 	runtimeConfigMu.Lock()
 	if runtimeConfig == nil {
 		runtimeConfig = &EndpointRuntimeConfig{}
+	}
+
+	// Check for critical changes that require reconnection
+	shouldReconnect := false
+	if payload.TunnelName != "" && payload.TunnelName != runtimeConfig.TunnelName {
+		shouldReconnect = true
+	}
+	if payload.EndpointName != "" && payload.EndpointName != runtimeConfig.EndpointName {
+		shouldReconnect = true
 	}
 
 	// Update fields from payload
@@ -657,6 +690,12 @@ func handleConfigUpdate(msg *TunnelMessage) {
 	}
 	runtimeConfigMu.Unlock()
 
+	if shouldReconnect {
+		log.Printf("[CONFIG] Critical configuration changed (tunnel/endpoint name), reconnecting...")
+		tc.Close()
+		return
+	}
+
 	log.Printf("[CONFIG] Updated runtime config: tunnel=%s, endpoint=%s, portMappings=%d",
 		payload.TunnelName, payload.EndpointName, len(payload.PortMappings))
 
@@ -672,4 +711,105 @@ func handleConfigUpdate(msg *TunnelMessage) {
 
 		log.Println("[CONFIG] P2P components restarted successfully")
 	}()
+}
+
+// initiateKeyRotation initiates a new key rotation by sending a key request
+func initiateKeyRotation(tc *TunnelConn, km *SessionKeyManager) error {
+	req, err := km.GenerateKeyRequest()
+	if err != nil {
+		log.Printf("[KEY] Failed to generate key request: %v", err)
+		return err
+	}
+
+	payload, err := MarshalKeyRequest(req)
+	if err != nil {
+		log.Printf("[KEY] Failed to marshal key request: %v", err)
+		return err
+	}
+
+	if err := tc.WriteMessage(&TunnelMessage{Type: MsgTypeKeyRequest, Payload: payload}); err != nil {
+		log.Printf("[KEY] Failed to send key request: %v", err)
+		return err
+	}
+
+	log.Printf("[KEY] Key rotation initiated")
+	return nil
+}
+
+// handleKeyRequest handles an incoming key rotation request
+func handleKeyRequest(tc *TunnelConn, msg *TunnelMessage, km *SessionKeyManager) {
+	req, err := UnmarshalKeyRequest(msg.Payload)
+	if err != nil {
+		log.Printf("[KEY] Failed to parse key request: %v", err)
+		return
+	}
+
+	resp, err := km.HandleKeyRequest(req)
+	if err != nil {
+		log.Printf("[KEY] Failed to handle key request: %v", err)
+		return
+	}
+
+	payload, err := MarshalKeyResponse(resp)
+	if err != nil {
+		log.Printf("[KEY] Failed to marshal key response: %v", err)
+		return
+	}
+
+	if err := tc.WriteMessage(&TunnelMessage{Type: MsgTypeKeyResponse, Payload: payload}); err != nil {
+		log.Printf("[KEY] Failed to send key response: %v", err)
+		return
+	}
+
+	log.Printf("[KEY] Key response sent")
+}
+
+// handleKeyResponse handles a key response and sends confirmation
+func handleKeyResponse(tc *TunnelConn, msg *TunnelMessage, km *SessionKeyManager) {
+	resp, err := UnmarshalKeyResponse(msg.Payload)
+	if err != nil {
+		log.Printf("[KEY] Failed to parse key response: %v", err)
+		return
+	}
+
+	confirm, err := km.HandleKeyResponse(resp)
+	if err != nil {
+		log.Printf("[KEY] Failed to handle key response: %v", err)
+		return
+	}
+
+	payload, err := MarshalKeyConfirm(confirm)
+	if err != nil {
+		log.Printf("[KEY] Failed to marshal key confirm: %v", err)
+		return
+	}
+
+	if err := tc.WriteMessage(&TunnelMessage{Type: MsgTypeKeyConfirm, Payload: payload}); err != nil {
+		log.Printf("[KEY] Failed to send key confirm: %v", err)
+		return
+	}
+
+	// Activate key on initiator side after sending confirm
+	if err := km.ActivateKey(); err != nil {
+		log.Printf("[KEY] Failed to activate key: %v", err)
+		return
+	}
+
+	log.Printf("[KEY] Key rotation completed (initiator)")
+}
+
+// handleKeyConfirm handles key confirmation and activates the new key
+func handleKeyConfirm(tc *TunnelConn, msg *TunnelMessage, km *SessionKeyManager) {
+	confirm, err := UnmarshalKeyConfirm(msg.Payload)
+	if err != nil {
+		log.Printf("[KEY] Failed to parse key confirm: %v", err)
+		return
+	}
+
+	if err := km.HandleKeyConfirm(confirm); err != nil {
+		log.Printf("[KEY] Failed to handle key confirm: %v", err)
+		return
+	}
+
+	log.Printf("[KEY] Key rotation completed (responder)")
 }

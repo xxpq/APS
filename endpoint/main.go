@@ -366,9 +366,63 @@ func main() {
 }
 
 func createServiceConfig() (*service.Config, error) {
-	serviceName := fmt.Sprintf("APS-Endpoint-%s", *name)
-	displayName := fmt.Sprintf("APS Endpoint (%s)", *name)
-	description := fmt.Sprintf("APS Endpoint service for endpoint '%s'.", *name)
+	var serviceNameSuffix string
+
+	// Check if -name flag was explicitly set
+	var isNameSet bool
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == "name" {
+			isNameSet = true
+		}
+	})
+
+	// If using CID, try to fetch config to get the real endpoint name
+	if *configID != "" {
+		var fetchedName string
+		if *serverAddr != "" {
+			fmt.Println("Fetching configuration from APS...")
+			config, err := FetchConfigFromAPS(*serverAddr, *configID)
+			if err == nil && config != nil {
+				fetchedName = config.EndpointName
+				fmt.Printf("Successfully fetched configuration for endpoint: %s\n", fetchedName)
+			} else {
+				fmt.Printf("Warning: Failed to fetch configuration: %v\n", err)
+			}
+		}
+
+		if isNameSet {
+			// User provided -name, use it for service name suffix (as requested)
+			serviceNameSuffix = *name
+		} else {
+			// User didn't provide -name
+			if fetchedName != "" {
+				// Use fetched name
+				serviceNameSuffix = fetchedName
+			} else {
+				// Fetch failed and no name provided
+				return nil, fmt.Errorf("failed to fetch configuration and no -name specified. Please use -name to specify a service name suffix")
+			}
+		}
+	} else {
+		// Legacy mode (no CID), use -name (default or provided)
+		serviceNameSuffix = *name
+	}
+
+	// Sanitize service name suffix to be safe for service name
+	serviceNameSuffix = strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+			return r
+		}
+		return -1
+	}, serviceNameSuffix)
+
+	if serviceNameSuffix == "" {
+		return nil, fmt.Errorf("service name suffix is empty after sanitization")
+	}
+
+	serviceName := fmt.Sprintf("APS-Endpoint-%s", serviceNameSuffix)
+	displayName := fmt.Sprintf("APS Endpoint (%s)", serviceNameSuffix)
+	description := fmt.Sprintf("APS Endpoint service for endpoint '%s'.", serviceNameSuffix)
 
 	var args []string
 	for _, arg := range os.Args[1:] {

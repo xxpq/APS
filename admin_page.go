@@ -438,7 +438,7 @@ var admin_page_content = `
         </div>
         <div class="table-wrap">
           <table class="bx--data-table carbon-table">
-            <thead><tr><th>配置ID</th><th>隧道名称</th><th>节点名称</th><th>端口映射</th><th>P2P设置</th><th>操作</th></tr></thead>
+            <thead><tr><th>配置ID</th><th>隧道名称</th><th>节点名称</th><th>端口映射</th><th>P2P</th><th>LAN发现</th><th>最大中继</th><th>操作</th></tr></thead>
             <tbody id="endpoints-tbody"></tbody>
           </table>
         </div>

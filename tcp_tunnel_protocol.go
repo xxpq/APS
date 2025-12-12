@@ -34,6 +34,11 @@ const (
 
 	// Configuration management
 	MsgTypeConfigUpdate uint8 = 0x40 // APS pushes config update to endpoint
+
+	// Key negotiation for dynamic encryption
+	MsgTypeKeyRequest  uint8 = 0x50 // Request new session key negotiation
+	MsgTypeKeyResponse uint8 = 0x51 // Response with encrypted new key
+	MsgTypeKeyConfirm  uint8 = 0x52 // Confirmation key is activated
 )
 
 // Message header size: 4 bytes length + 1 byte type

@@ -33,6 +33,9 @@ type TCPEndpoint struct {
 	OnlineTime       time.Time
 	LastActivityTime time.Time
 
+	// Session key manager for dynamic encryption
+	KeyManager *SessionKeyManager
+
 	// Pending requests and proxy connections
 	mu              sync.Mutex
 	pendingRequests map[string]*tcpPendingRequest  // requestID -> pending
@@ -233,6 +236,14 @@ func (s *TCPTunnelServer) handleConnection(conn net.Conn) {
 		done:             make(chan struct{}),
 	}
 
+	// Initialize per-connection session key manager
+	endpoint.KeyManager = NewSessionKeyManager(reg.Password)
+	if err := endpoint.KeyManager.DeriveInitialKey(); err != nil {
+		DebugLog("[TCP TUNNEL] Failed to derive initial key for %s: %v", remoteAddr, err)
+		tc.Close()
+		return
+	}
+
 	// Register endpoint
 	s.mu.Lock()
 	s.endpoints[endpoint.ID] = endpoint
@@ -257,6 +268,15 @@ func (s *TCPTunnelServer) handleConnection(conn net.Conn) {
 	// Start goroutines for read/write
 	go endpoint.writeLoop()
 	go endpoint.readLoop(s)
+
+	// Start auto key rotation (APS initiates first key negotiation after a delay)
+	go func() {
+		time.Sleep(5 * time.Second) // Wait for connection to stabilize
+		endpoint.initiateKeyRotation()
+		endpoint.KeyManager.StartAutoRotation(func() error {
+			return endpoint.initiateKeyRotation()
+		})
+	}()
 
 	// Wait for endpoint to disconnect
 	<-endpoint.done
@@ -416,6 +436,12 @@ func (ep *TCPEndpoint) readLoop(server *TCPTunnelServer) {
 			ep.handlePortForwardDataRoute(server, msg)
 		case MsgTypePortForwardClose:
 			ep.handlePortForwardCloseRoute(server, msg)
+		case MsgTypeKeyRequest:
+			ep.handleKeyRequest(msg)
+		case MsgTypeKeyResponse:
+			ep.handleKeyResponse(msg)
+		case MsgTypeKeyConfirm:
+			ep.handleKeyConfirm(msg)
 		default:
 			DebugLog("[TCP TUNNEL] Unknown message type %d from endpoint %s", msg.Type, ep.ID)
 		}
@@ -788,4 +814,121 @@ func (ep *TCPEndpoint) handlePortForwardCloseRoute(server *TCPTunnelServer, msg 
 		}
 	}
 	server.mu.RUnlock()
+}
+
+// initiateKeyRotation initiates a new key rotation by sending a key request
+func (ep *TCPEndpoint) initiateKeyRotation() error {
+	if ep.KeyManager == nil {
+		return nil
+	}
+
+	req, err := ep.KeyManager.GenerateKeyRequest()
+	if err != nil {
+		DebugLog("[KEY] Failed to generate key request for %s: %v", ep.EndpointName, err)
+		return err
+	}
+
+	payload, err := MarshalKeyRequest(req)
+	if err != nil {
+		DebugLog("[KEY] Failed to marshal key request: %v", err)
+		return err
+	}
+
+	if err := ep.Conn.WriteMessage(&TunnelMessage{Type: MsgTypeKeyRequest, Payload: payload}); err != nil {
+		DebugLog("[KEY] Failed to send key request to %s: %v", ep.EndpointName, err)
+		return err
+	}
+
+	DebugLog("[KEY] Key rotation initiated for endpoint %s", ep.EndpointName)
+	return nil
+}
+
+// handleKeyRequest handles an incoming key rotation request
+func (ep *TCPEndpoint) handleKeyRequest(msg *TunnelMessage) {
+	if ep.KeyManager == nil {
+		return
+	}
+
+	req, err := UnmarshalKeyRequest(msg.Payload)
+	if err != nil {
+		DebugLog("[KEY] Failed to parse key request from %s: %v", ep.EndpointName, err)
+		return
+	}
+
+	resp, err := ep.KeyManager.HandleKeyRequest(req)
+	if err != nil {
+		DebugLog("[KEY] Failed to handle key request from %s: %v", ep.EndpointName, err)
+		return
+	}
+
+	payload, err := MarshalKeyResponse(resp)
+	if err != nil {
+		DebugLog("[KEY] Failed to marshal key response: %v", err)
+		return
+	}
+
+	if err := ep.Conn.WriteMessage(&TunnelMessage{Type: MsgTypeKeyResponse, Payload: payload}); err != nil {
+		DebugLog("[KEY] Failed to send key response to %s: %v", ep.EndpointName, err)
+		return
+	}
+
+	DebugLog("[KEY] Key response sent to endpoint %s", ep.EndpointName)
+}
+
+// handleKeyResponse handles a key response and sends confirmation
+func (ep *TCPEndpoint) handleKeyResponse(msg *TunnelMessage) {
+	if ep.KeyManager == nil {
+		return
+	}
+
+	resp, err := UnmarshalKeyResponse(msg.Payload)
+	if err != nil {
+		DebugLog("[KEY] Failed to parse key response from %s: %v", ep.EndpointName, err)
+		return
+	}
+
+	confirm, err := ep.KeyManager.HandleKeyResponse(resp)
+	if err != nil {
+		DebugLog("[KEY] Failed to handle key response from %s: %v", ep.EndpointName, err)
+		return
+	}
+
+	payload, err := MarshalKeyConfirm(confirm)
+	if err != nil {
+		DebugLog("[KEY] Failed to marshal key confirm: %v", err)
+		return
+	}
+
+	if err := ep.Conn.WriteMessage(&TunnelMessage{Type: MsgTypeKeyConfirm, Payload: payload}); err != nil {
+		DebugLog("[KEY] Failed to send key confirm to %s: %v", ep.EndpointName, err)
+		return
+	}
+
+	// Activate key on initiator side after sending confirm
+	if err := ep.KeyManager.ActivateKey(); err != nil {
+		DebugLog("[KEY] Failed to activate key: %v", err)
+		return
+	}
+
+	DebugLog("[KEY] Key rotation completed for endpoint %s (initiator)", ep.EndpointName)
+}
+
+// handleKeyConfirm handles key confirmation and activates the new key
+func (ep *TCPEndpoint) handleKeyConfirm(msg *TunnelMessage) {
+	if ep.KeyManager == nil {
+		return
+	}
+
+	confirm, err := UnmarshalKeyConfirm(msg.Payload)
+	if err != nil {
+		DebugLog("[KEY] Failed to parse key confirm from %s: %v", ep.EndpointName, err)
+		return
+	}
+
+	if err := ep.KeyManager.HandleKeyConfirm(confirm); err != nil {
+		DebugLog("[KEY] Failed to handle key confirm from %s: %v", ep.EndpointName, err)
+		return
+	}
+
+	DebugLog("[KEY] Key rotation completed for endpoint %s (responder)", ep.EndpointName)
 }

@@ -743,6 +743,14 @@ func (h *AdminHandlers) handleEndpointConfigs(w http.ResponseWriter, r *http.Req
 			return
 		}
 
+		// Inherit password from tunnel config if endpoint doesn't have its own
+		effectivePassword := endpoint.Password
+		if effectivePassword == "" && h.config.Tunnels != nil {
+			if tunnel, ok := h.config.Tunnels[endpoint.TunnelName]; ok {
+				effectivePassword = tunnel.Password
+			}
+		}
+
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
@@ -750,7 +758,7 @@ func (h *AdminHandlers) handleEndpointConfigs(w http.ResponseWriter, r *http.Req
 				"id":           configID,
 				"tunnelName":   endpoint.TunnelName,
 				"endpointName": endpoint.EndpointName,
-				"password":     endpoint.Password,
+				"password":     effectivePassword,
 				"portMappings": endpoint.PortMappings,
 				"p2p":          endpoint.P2P,
 			},
@@ -792,7 +800,10 @@ func (h *AdminHandlers) handleEndpointConfigs(w http.ResponseWriter, r *http.Req
 		}
 		ep := req.Endpoint
 		// If updating existing endpoint and password is empty, preserve original password
+		var oldTunnelName, oldEndpointName string
 		if existingEp, exists := h.config.Endpoints[req.Name]; exists && existingEp != nil {
+			oldTunnelName = existingEp.TunnelName
+			oldEndpointName = existingEp.EndpointName
 			if ep.Password == "" {
 				ep.Password = existingEp.Password
 			}
@@ -809,7 +820,16 @@ func (h *AdminHandlers) handleEndpointConfigs(w http.ResponseWriter, r *http.Req
 		json.NewEncoder(w).Encode(map[string]string{"status": "upserted"})
 
 		// Push config update to connected endpoint (if online)
-		go h.pushConfigToEndpoint(ep.TunnelName, ep.EndpointName, &ep)
+		// Use old names to find the active connection if names were changed
+		targetTunnel := ep.TunnelName
+		targetEndpoint := ep.EndpointName
+		if oldTunnelName != "" {
+			targetTunnel = oldTunnelName
+		}
+		if oldEndpointName != "" {
+			targetEndpoint = oldEndpointName
+		}
+		go h.pushConfigToEndpoint(targetTunnel, targetEndpoint, &ep)
 
 	case http.MethodDelete:
 		name := r.URL.Query().Get("name")

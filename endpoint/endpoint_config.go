@@ -42,7 +42,7 @@ type ConfigResponse struct {
 
 // FetchConfigFromAPS retrieves endpoint configuration from APS server
 func FetchConfigFromAPS(apsAddr, configID string) (*EndpointRuntimeConfig, error) {
-	url := fmt.Sprintf("http://%s/.api/endpoints/%s", apsAddr, configID)
+	url := fmt.Sprintf("http://%s/.api/endpoints?id=%s", apsAddr, configID)
 
 	client := &http.Client{
 		Timeout: 30 * time.Second,

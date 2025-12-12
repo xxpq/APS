@@ -2624,18 +2624,26 @@ async function loadEndpoints() {
     Object.keys(data || {}).forEach(function(id){
       var ep = data[id] || {};
       var portMappingsStr = (ep.portMappings && ep.portMappings.length > 0) ? ep.portMappings.length + "个映射" : "无";
-      var p2pStr = [];
+      
+      // P2P and LAN default to true if not specified
+      var p2pEnabled = true;
+      var lanEnabled = true;
+      var maxHops = 3;
       if (ep.p2pSettings) {
-        if (ep.p2pSettings.enabled !== false) p2pStr.push("P2P");
-        if (ep.p2pSettings.lanDiscovery !== false) p2pStr.push("LAN");
+        p2pEnabled = ep.p2pSettings.enabled !== false;
+        lanEnabled = ep.p2pSettings.lanDiscovery !== false;
+        maxHops = ep.p2pSettings.maxRelayHops || 3;
       }
+      
       var tr = document.createElement("tr");
       tr.innerHTML =
         "<td>" + id + "</td>" +
         "<td>" + (ep.tunnelName || "") + "</td>" +
         "<td>" + (ep.endpointName || "") + "</td>" +
         "<td>" + portMappingsStr + "</td>" +
-        "<td>" + (p2pStr.length > 0 ? p2pStr.join(", ") : "禁用") + "</td>" +
+        "<td>" + (p2pEnabled ? "<span style='color:#0e6027'>启用</span>" : "<span style='color:#da1e28'>禁用</span>") + "</td>" +
+        "<td>" + (lanEnabled ? "<span style='color:#0e6027'>启用</span>" : "<span style='color:#da1e28'>禁用</span>") + "</td>" +
+        "<td>" + maxHops + "</td>" +
         "<td><button class='bx--btn bx--btn--sm bx--btn--ghost' onclick='openEditEndpointModal(\"" + id.replace(/"/g, '&quot;') + "\")'>编辑</button> " +
         "<button class='bx--btn bx--btn--sm bx--btn--danger--ghost' onclick='deleteEndpoint(\"" + id.replace(/"/g, '&quot;') + "\")'>删除</button></td>";
       if (tbody) tbody.appendChild(tr);
@@ -2726,7 +2734,19 @@ async function confirmAddEndpoint() {
   var stunServers = document.getElementById("add-endpoint-stun").value.trim();
   var maxHops = document.getElementById("add-endpoint-max-hops").value;
   
-  if (!id) { if (msg) msg.textContent = "配置ID必填"; return; }
+  // Auto-generate UUID if config ID is empty
+  if (!id) {
+    if (typeof crypto !== 'undefined' && crypto.randomUUID) {
+      id = crypto.randomUUID();
+    } else {
+      // Fallback UUID generation
+      id = 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+        var r = Math.random() * 16 | 0, v = c === 'x' ? r : (r & 0x3 | 0x8);
+        return v.toString(16);
+      });
+    }
+    document.getElementById("add-endpoint-id").value = id;
+  }
   if (!tunnelName) { if (msg) msg.textContent = "隧道名称必填"; return; }
   if (!endpointName) { if (msg) msg.textContent = "节点名称必填"; return; }
   
@@ -2848,6 +2868,15 @@ document.getElementById("btn-endpoints-load").addEventListener("click", loadEndp
 document.getElementById("btn-endpoints-add").addEventListener("click", openAddEndpointModal);
 document.getElementById("confirm-add-endpoint").addEventListener("click", confirmAddEndpoint);
 document.getElementById("confirm-edit-endpoint").addEventListener("click", confirmEditEndpoint);
+
+// Export endpoint functions to window for onclick handlers
+window.loadEndpoints = loadEndpoints;
+window.openAddEndpointModal = openAddEndpointModal;
+window.openEditEndpointModal = openEditEndpointModal;
+window.deleteEndpoint = deleteEndpoint;
+window.confirmAddEndpoint = confirmAddEndpoint;
+window.confirmEditEndpoint = confirmEditEndpoint;
+window.populateTunnelSelectorsForEndpoints = populateTunnelSelectorsForEndpoints;
 
 }); // End of DOMContentLoaded
 `
