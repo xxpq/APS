@@ -384,8 +384,9 @@ var admin_page_js = `
 
     // 字节格式化函数 - 转换为K, M, G, T, P单位
     function fmtBytes(bytes) {
-      if (bytes == null || isNaN(bytes) || bytes === 0) return bytes === 0 ? "0 B" : "-";
-      
+      if (bytes == null || isNaN(bytes)) return "-"; // Keep "-" for null/NaN
+      if (bytes === 0) return "0.00 B"; // Handle 0 explicitly with two decimal places
+
       const units = ['B', 'K', 'M', 'G', 'T', 'P'];
       const threshold = 1024;
       let unitIndex = 0;
@@ -396,11 +397,8 @@ var admin_page_js = `
         unitIndex++;
       }
       
-      if (unitIndex === 0) {
-        return value.toString() + ' ' + units[unitIndex];
-      } else {
-        return value.toFixed(2) + ' ' + units[unitIndex];
-      }
+      // Apply toFixed(2) consistently for all units
+      return value.toFixed(2) + ' ' + units[unitIndex];
     }
 
     function fmtQPS(qps) {
