@@ -25,6 +25,15 @@ const (
 	MsgTypeProxyClose      uint8 = 0x23 // TCP proxy close
 	MsgTypeHeartbeat       uint8 = 0xF0 // Heartbeat/keepalive
 	MsgTypeCancel          uint8 = 0xF1 // Cancel request
+
+	// Port forwarding between endpoints
+	MsgTypePortForwardRequest  uint8 = 0x30 // Request port forward through APS
+	MsgTypePortForwardResponse uint8 = 0x31 // Response to port forward request
+	MsgTypePortForwardData     uint8 = 0x32 // Port forward data
+	MsgTypePortForwardClose    uint8 = 0x33 // Port forward close
+
+	// Configuration management
+	MsgTypeConfigUpdate uint8 = 0x40 // APS pushes config update to endpoint
 )
 
 // Message header size: 4 bytes length + 1 byte type

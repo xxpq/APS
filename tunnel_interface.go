@@ -48,6 +48,9 @@ type TunnelManagerInterface interface {
 	GetPoolStats() map[string]interface{}
 	Cleanup()
 	UpdateTunnels(newConfig *Config)
+
+	// Config hot reload
+	SendConfigUpdate(tunnelName, endpointName string, payload []byte) error
 }
 
 // 确保HybridTunnelManager实现这个接口

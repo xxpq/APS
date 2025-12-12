@@ -41,9 +41,10 @@ type ServerManager struct {
 	replayManager *ReplayManager
 	statsDB       *StatsDB
 	loggingDB     *LoggingDB
+	logBroadcaster *LogBroadcaster
 }
 
-func NewServerManager(config *Config, configFile string, harManager *HarLoggerManager, tunnelManager TunnelManagerInterface, scriptRunner *ScriptRunner, trafficShaper *TrafficShaper, stats *StatsCollector, staticCache *StaticCacheManager, replayManager *ReplayManager, statsDB *StatsDB, loggingDB *LoggingDB) *ServerManager {
+func NewServerManager(config *Config, configFile string, harManager *HarLoggerManager, tunnelManager TunnelManagerInterface, scriptRunner *ScriptRunner, trafficShaper *TrafficShaper, stats *StatsCollector, staticCache *StaticCacheManager, replayManager *ReplayManager, statsDB *StatsDB, loggingDB *LoggingDB, logBroadcaster *LogBroadcaster) *ServerManager {
 	return &ServerManager{
 		servers:       make(map[string]*http.Server),
 		tcpServers:    make(map[string]*RawTCPServer),
@@ -59,6 +60,7 @@ func NewServerManager(config *Config, configFile string, harManager *HarLoggerMa
 		replayManager: replayManager,
 		statsDB:       statsDB,
 		loggingDB:     loggingDB,
+		logBroadcaster: logBroadcaster,
 	}
 }
 
@@ -118,7 +120,7 @@ func (sm *ServerManager) Start(name string, serverConfig *ListenConfig, isACMEEn
 	}
 
 	// HTTP server
-	handler := createServerHandler(name, serverMappings[name], serverConfig, sm.config, sm.configFile, sm.harManager, sm.tunnelManager, sm.scriptRunner, sm.trafficShaper, sm.stats, sm.staticCache, sm.replayManager, isACMEEnabled, sm.statsDB, sm.loggingDB)
+	handler := createServerHandler(name, serverMappings[name], serverConfig, sm.config, sm.configFile, sm.harManager, sm.tunnelManager, sm.scriptRunner, sm.trafficShaper, sm.stats, sm.staticCache, sm.replayManager, isACMEEnabled, sm.statsDB, sm.loggingDB, sm.logBroadcaster)
 	server, mux := startServer(name, serverConfig, handler, sm.tunnelManager)
 	if server != nil {
 		sm.servers[name] = server
@@ -284,6 +286,10 @@ func main() {
 	}
 	defer loggingDB.Close()
 
+	// Initialize LogBroadcaster to capture logs for SSE
+	logBroadcaster := NewLogBroadcaster(os.Stderr)
+	log.SetOutput(logBroadcaster)
+
 	// Load initial quota usage from DB
 	initialQuotaUsage, err := statsDB.LoadAllQuotaUsage()
 	if err != nil {
@@ -307,7 +313,7 @@ func main() {
 	tunnelManager.SetStatsCollector(statsCollector)
 	replayManager := NewReplayManager(config)
 
-	serverManager := NewServerManager(config, *configFile, harManager, tunnelManager, scriptRunner, trafficShaper, statsCollector, staticCache, replayManager, statsDB, loggingDB)
+	serverManager := NewServerManager(config, *configFile, harManager, tunnelManager, scriptRunner, trafficShaper, statsCollector, staticCache, replayManager, statsDB, loggingDB, logBroadcaster)
 
 	watcher, err := NewConfigWatcher(*configFile, config, serverManager)
 	if err != nil {
@@ -394,7 +400,7 @@ func (sm *ServerManager) StartAll() {
 	}
 }
 
-func createServerHandler(serverName string, mappings []*Mapping, serverConfig *ListenConfig, config *Config, configFile string, harManager *HarLoggerManager, tunnelManager TunnelManagerInterface, scriptRunner *ScriptRunner, trafficShaper *TrafficShaper, stats *StatsCollector, staticCache *StaticCacheManager, replayManager *ReplayManager, isACMEEnabled bool, statsDB *StatsDB, loggingDB *LoggingDB) http.Handler {
+func createServerHandler(serverName string, mappings []*Mapping, serverConfig *ListenConfig, config *Config, configFile string, harManager *HarLoggerManager, tunnelManager TunnelManagerInterface, scriptRunner *ScriptRunner, trafficShaper *TrafficShaper, stats *StatsCollector, staticCache *StaticCacheManager, replayManager *ReplayManager, isACMEEnabled bool, statsDB *StatsDB, loggingDB *LoggingDB, logBroadcaster *LogBroadcaster) http.Handler {
 	mux := http.NewServeMux()
 	proxy := NewMapRemoteProxy(config, harManager, tunnelManager, scriptRunner, trafficShaper, stats, staticCache, loggingDB, serverName)
 
@@ -417,7 +423,7 @@ func createServerHandler(serverName string, mappings []*Mapping, serverConfig *L
 		mux.HandleFunc("/.api/stats", stats.ServeHTTP)
 
 		// 注册管理面板处理器
-		adminHandlers := NewAdminHandlers(config, configFile, stats, statsDB, loggingDB)
+		adminHandlers := NewAdminHandlers(config, configFile, stats, statsDB, loggingDB, logBroadcaster)
 		// 设置tunnel管理器引用，用于查询endpoint状态
 		adminHandlers.SetTunnelManager(tunnelManager)
 		adminHandlers.RegisterHandlers(mux)

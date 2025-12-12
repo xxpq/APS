@@ -358,3 +358,16 @@ func (tm *TCPTunnelManager) Stop() {
 		tm.server.Stop()
 	}
 }
+
+// SendConfigUpdate sends a config update message to a connected endpoint
+func (tm *TCPTunnelManager) SendConfigUpdate(tunnelName, endpointName string, payload []byte) error {
+	ep, err := tm.GetEndpoint(tunnelName, endpointName)
+	if err != nil {
+		return err
+	}
+	msg := &TunnelMessage{
+		Type:    MsgTypeConfigUpdate,
+		Payload: payload,
+	}
+	return ep.Conn.WriteMessage(msg)
+}

@@ -410,6 +410,12 @@ func (ep *TCPEndpoint) readLoop(server *TCPTunnelServer) {
 			ep.handleProxyData(msg)
 		case MsgTypeProxyClose:
 			ep.handleProxyClose(msg)
+		case MsgTypePortForwardRequest:
+			ep.handlePortForwardRequest(server, msg)
+		case MsgTypePortForwardData:
+			ep.handlePortForwardDataRoute(server, msg)
+		case MsgTypePortForwardClose:
+			ep.handlePortForwardCloseRoute(server, msg)
 		default:
 			DebugLog("[TCP TUNNEL] Unknown message type %d from endpoint %s", msg.Type, ep.ID)
 		}
@@ -667,4 +673,119 @@ func (ep *TCPEndpoint) proxyClientReadLoop(connectionID string, pc *tcpProxyConn
 			return
 		}
 	}
+}
+
+// Port forward payload types (must match endpoint side)
+type PortForwardRequestPayload struct {
+	ConnectionID   string `json:"connection_id"`
+	TargetEndpoint string `json:"target_endpoint"` // Which endpoint to forward to
+	RemoteTarget   string `json:"remote_target"`   // IP:Port on target endpoint's network
+	ClientIP       string `json:"client_ip"`       // Original client IP
+}
+
+type PortForwardResponsePayload struct {
+	ConnectionID string `json:"connection_id"`
+	Success      bool   `json:"success"`
+	Error        string `json:"error,omitempty"`
+}
+
+type PortForwardDataPayload struct {
+	ConnectionID string `json:"connection_id"`
+	Data         []byte `json:"data"`
+}
+
+type PortForwardClosePayload struct {
+	ConnectionID string `json:"connection_id"`
+	Reason       string `json:"reason,omitempty"`
+}
+
+// handlePortForwardRequest handles a port forward request from an endpoint
+// Routes the request to the target endpoint
+func (ep *TCPEndpoint) handlePortForwardRequest(server *TCPTunnelServer, msg *TunnelMessage) {
+	var payload PortForwardRequestPayload
+	if err := msg.ParseJSON(&payload); err != nil {
+		DebugLog("[TCP TUNNEL] Invalid port forward request: %v", err)
+		return
+	}
+
+	DebugLog("[PORT-FWD] Request from %s to endpoint %s -> %s",
+		ep.EndpointName, payload.TargetEndpoint, payload.RemoteTarget)
+
+	// Find the target endpoint in the same tunnel
+	var targetEp *TCPEndpoint
+	server.mu.RLock()
+	for _, endpoint := range server.endpoints {
+		if endpoint.TunnelName == ep.TunnelName &&
+			endpoint.EndpointName == payload.TargetEndpoint {
+			targetEp = endpoint
+			break
+		}
+	}
+	server.mu.RUnlock()
+
+	if targetEp == nil {
+		DebugLog("[PORT-FWD] Target endpoint %s not found in tunnel %s",
+			payload.TargetEndpoint, ep.TunnelName)
+		ep.SendJSON(MsgTypePortForwardResponse, PortForwardResponsePayload{
+			ConnectionID: payload.ConnectionID,
+			Success:      false,
+			Error:        "target endpoint not found",
+		})
+		return
+	}
+
+	// Forward the request to the target endpoint (msg type changes for target)
+	// Target endpoint will connect to RemoteTarget and send response
+	if err := targetEp.SendJSON(MsgTypePortForwardRequest, payload); err != nil {
+		DebugLog("[PORT-FWD] Failed to forward request to %s: %v",
+			payload.TargetEndpoint, err)
+		ep.SendJSON(MsgTypePortForwardResponse, PortForwardResponsePayload{
+			ConnectionID: payload.ConnectionID,
+			Success:      false,
+			Error:        "failed to reach target endpoint",
+		})
+		return
+	}
+
+	DebugLog("[PORT-FWD] Request forwarded to %s for connection %s",
+		payload.TargetEndpoint, payload.ConnectionID)
+}
+
+// handlePortForwardDataRoute routes port forward data between endpoints
+func (ep *TCPEndpoint) handlePortForwardDataRoute(server *TCPTunnelServer, msg *TunnelMessage) {
+	var payload PortForwardDataPayload
+	if err := msg.ParseJSON(&payload); err != nil {
+		DebugLog("[TCP TUNNEL] Invalid port forward data: %v", err)
+		return
+	}
+
+	// Route data to the other endpoint in the connection
+	// For now, broadcast to all endpoints in the same tunnel (connection ID will filter)
+	server.mu.RLock()
+	for _, endpoint := range server.endpoints {
+		if endpoint.ID != ep.ID && endpoint.TunnelName == ep.TunnelName {
+			endpoint.SendJSON(MsgTypePortForwardData, payload)
+		}
+	}
+	server.mu.RUnlock()
+}
+
+// handlePortForwardCloseRoute routes port forward close to the other endpoint
+func (ep *TCPEndpoint) handlePortForwardCloseRoute(server *TCPTunnelServer, msg *TunnelMessage) {
+	var payload PortForwardClosePayload
+	if err := msg.ParseJSON(&payload); err != nil {
+		DebugLog("[TCP TUNNEL] Invalid port forward close: %v", err)
+		return
+	}
+
+	DebugLog("[PORT-FWD] Close for connection %s: %s", payload.ConnectionID, payload.Reason)
+
+	// Route close to other endpoints in the same tunnel
+	server.mu.RLock()
+	for _, endpoint := range server.endpoints {
+		if endpoint.ID != ep.ID && endpoint.TunnelName == ep.TunnelName {
+			endpoint.SendJSON(MsgTypePortForwardClose, payload)
+		}
+	}
+	server.mu.RUnlock()
 }

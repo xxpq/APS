@@ -30,21 +30,47 @@ func init() {
 }
 
 type Config struct {
-	Debug             *bool                    `json:"debug,omitempty"`             // Debug模式开关
-	LogLevel          *int                     `json:"logLevel,omitempty"`          // 日志等级: 0=不记录, 1=基本请求, 2=完整请求(含body和header)
-	LogRetentionHours *int                     `json:"logRetentionHours,omitempty"` // 日志保留时长(小时)，默认24小时
-	Servers           map[string]*ListenConfig `json:"servers"`
-	Proxies           map[string]*ProxyConfig  `json:"proxies,omitempty"`
-	Tunnels           map[string]*TunnelConfig `json:"tunnels,omitempty"`
-	Auth              *AuthConfig                         `json:"auth,omitempty"`
-	AuthProviders     map[string]*AuthProviderConfig      `json:"authProviders,omitempty"` // 第三方认证提供商配置
-	P12s              map[string]*P12Config               `json:"p12s,omitempty"`
-	Scripting         *ScriptingConfig                    `json:"scripting,omitempty"`
-	StaticCache       *StaticCacheConfig                  `json:"static_cache,omitempty"` // 静态文件缓存配置
-	Firewalls         map[string]*FirewallRule            `json:"firewalls,omitempty"`    // 防火墙规则组配置
-	Mappings          []Mapping                           `json:"mappings"`
-	Version           int64                               `json:"version,omitempty"` // 配置版本号，用于并发编辑检测
+	Debug             *bool                          `json:"debug,omitempty"`             // Debug模式开关
+	LogLevel          *int                           `json:"logLevel,omitempty"`          // 日志等级: 0=不记录, 1=基本请求, 2=完整请求(含body和header)
+	LogRetentionHours *int                           `json:"logRetentionHours,omitempty"` // 日志保留时长(小时)，默认24小时
+	Servers           map[string]*ListenConfig       `json:"servers"`
+	Proxies           map[string]*ProxyConfig        `json:"proxies,omitempty"`
+	Tunnels           map[string]*TunnelConfig       `json:"tunnels,omitempty"`
+	Endpoints         map[string]*EndpointConfig_APS `json:"endpoints,omitempty"` // Endpoint configurations for P2P management
+	Auth              *AuthConfig                    `json:"auth,omitempty"`
+	AuthProviders     map[string]*AuthProviderConfig `json:"authProviders,omitempty"` // 第三方认证提供商配置
+	P12s              map[string]*P12Config          `json:"p12s,omitempty"`
+	Scripting         *ScriptingConfig               `json:"scripting,omitempty"`
+	StaticCache       *StaticCacheConfig             `json:"static_cache,omitempty"` // 静态文件缓存配置
+	Firewalls         map[string]*FirewallRule       `json:"firewalls,omitempty"`    // 防火墙规则组配置
+	Mappings          []Mapping                      `json:"mappings"`
+	Version           int64                          `json:"version,omitempty"` // 配置版本号，用于并发编辑检测
 	mu                sync.RWMutex
+}
+
+// EndpointConfig_APS holds configuration for an endpoint in APS
+type EndpointConfig_APS struct {
+	TunnelName        string                `json:"tunnelName"`
+	EndpointName      string                `json:"endpointName"`
+	Password          string                `json:"password,omitempty"`
+	PortMappings      []EndpointPortMapping `json:"portMappings,omitempty"`
+	P2P               *EndpointP2PSettings  `json:"p2p,omitempty"`
+	LogLevel          *int                  `json:"logLevel,omitempty"`
+	LogRetentionHours *int                  `json:"logRetentionHours,omitempty"`
+}
+
+// EndpointPortMapping defines a port mapping between endpoints
+type EndpointPortMapping struct {
+	LocalPort      int    `json:"localPort"`      // Port this endpoint listens on
+	RemoteTarget   string `json:"remoteTarget"`   // IP:Port on the remote endpoint's network
+	TargetEndpoint string `json:"targetEndpoint"` // Which endpoint to forward traffic to
+}
+
+// EndpointP2PSettings holds P2P connection settings for an endpoint
+type EndpointP2PSettings struct {
+	StunServers        []string `json:"stunServers,omitempty"`
+	EnableLANDiscovery bool     `json:"lanDiscovery,omitempty"`
+	MaxRelayHops       int      `json:"maxRelayHops,omitempty"` // Default 3
 }
 
 // AuthProviderConfig 第三方认证配置

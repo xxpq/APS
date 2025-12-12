@@ -52,6 +52,15 @@ const (
 	MsgTypeProxyClose      uint8 = 0x23
 	MsgTypeHeartbeat       uint8 = 0xF0
 	MsgTypeCancel          uint8 = 0xF1
+
+	// Port forwarding between endpoints
+	MsgTypePortForwardRequest  uint8 = 0x30
+	MsgTypePortForwardResponse uint8 = 0x31
+	MsgTypePortForwardData     uint8 = 0x32
+	MsgTypePortForwardClose    uint8 = 0x33
+
+	// Configuration management
+	MsgTypeConfigUpdate uint8 = 0x40 // APS pushes config update to endpoint
 )
 
 const headerSize = 5
@@ -247,11 +256,11 @@ func runTCPTunnelSession(ctx context.Context) bool {
 		tcpConn.SetKeepAlivePeriod(60 * time.Second)
 	}
 
-	// Send registration
+	// Send registration using effective config values
 	if err := tc.SendJSON(MsgTypeRegister, RegisterPayload{
-		TunnelName:   *tunnelName,
-		EndpointName: *name,
-		Password:     *tunnelPassword,
+		TunnelName:   GetEffectiveTunnelName(),
+		EndpointName: GetEffectiveEndpointName(),
+		Password:     GetEffectivePassword(),
 	}); err != nil {
 		log.Printf("Failed to send registration: %v", err)
 		return true
@@ -331,10 +340,18 @@ func handleTCPMessage(tc *TunnelConn, msg *TunnelMessage) {
 		handleTCPProxyData(msg)
 	case MsgTypeProxyClose:
 		handleTCPProxyClose(msg)
+	case MsgTypePortForwardResponse:
+		handlePortForwardResponse(tc, msg)
+	case MsgTypePortForwardData:
+		handlePortForwardDataMsg(msg)
+	case MsgTypePortForwardClose:
+		handlePortForwardCloseMsg(msg)
 	case MsgTypeHeartbeat:
 		// Heartbeat - do nothing
 	case MsgTypeCancel:
 		// TODO: Handle cancellation
+	case MsgTypeConfigUpdate:
+		handleConfigUpdate(msg)
 	}
 }
 
@@ -352,7 +369,7 @@ func handleTCPRequest(tc *TunnelConn, msg *TunnelMessage) {
 	}
 
 	// Decrypt request data
-	decryptedData, err := decrypt(reqPayload.Data, *tunnelPassword)
+	decryptedData, err := decrypt(reqPayload.Data, GetEffectivePassword())
 	if err != nil {
 		log.Printf("[ERROR %s] Decryption failed: %v", requestID, err)
 		sendTCPErrorResponse(tc, requestID, "decryption failed")
@@ -406,7 +423,7 @@ func handleTCPRequest(tc *TunnelConn, msg *TunnelMessage) {
 		return
 	}
 
-	encryptedHeader, err := encrypt(headerBytes, *tunnelPassword)
+	encryptedHeader, err := encrypt(headerBytes, GetEffectivePassword())
 	if err != nil {
 		log.Printf("[ERROR %s] Failed to encrypt response header: %v", requestID, err)
 		sendTCPErrorResponse(tc, requestID, "failed to encrypt response header")
@@ -431,7 +448,7 @@ func handleTCPRequest(tc *TunnelConn, msg *TunnelMessage) {
 	for {
 		n, err := resp.Body.Read(buf)
 		if n > 0 {
-			encryptedChunk, encErr := encrypt(buf[:n], *tunnelPassword)
+			encryptedChunk, encErr := encrypt(buf[:n], GetEffectivePassword())
 			if encErr != nil {
 				log.Printf("[ERROR %s] Failed to encrypt chunk: %v", requestID, encErr)
 				sendTCPErrorResponse(tc, requestID, "failed to encrypt chunk")
@@ -476,7 +493,7 @@ func handleTCPProxyConnect(tc *TunnelConn, msg *TunnelMessage) {
 	}
 
 	connID := payload.ConnectionID
-	address := fmt.Sprintf("%s:%d", payload.Host, payload.Port)
+	address := net.JoinHostPort(payload.Host, fmt.Sprintf("%d", payload.Port))
 	log.Printf("[PROXY %s] Connecting to %s (client: %s)", connID, address, payload.ClientIP)
 
 	// Connect to target
@@ -595,4 +612,64 @@ func sendTCPErrorResponse(tc *TunnelConn, requestID, errorMsg string) {
 		ID:    requestID,
 		Error: errorMsg,
 	})
+}
+
+// ConfigUpdatePayload is the payload for config update messages from APS
+type ConfigUpdatePayload struct {
+	TunnelName   string              `json:"tunnelName"`
+	EndpointName string              `json:"endpointName"`
+	Password     string              `json:"password,omitempty"`
+	PortMappings []PortMappingConfig `json:"portMappings,omitempty"`
+	P2PSettings  *P2PSettings        `json:"p2pSettings,omitempty"`
+}
+
+// handleConfigUpdate handles configuration update pushed from APS
+func handleConfigUpdate(msg *TunnelMessage) {
+	var payload ConfigUpdatePayload
+	if err := msg.ParseJSON(&payload); err != nil {
+		log.Printf("[CONFIG] Failed to parse config update: %v", err)
+		return
+	}
+
+	log.Printf("[CONFIG] Received config update from APS")
+
+	// Update runtime config
+	runtimeConfigMu.Lock()
+	if runtimeConfig == nil {
+		runtimeConfig = &EndpointRuntimeConfig{}
+	}
+
+	// Update fields from payload
+	if payload.TunnelName != "" {
+		runtimeConfig.TunnelName = payload.TunnelName
+	}
+	if payload.EndpointName != "" {
+		runtimeConfig.EndpointName = payload.EndpointName
+	}
+	if payload.Password != "" {
+		runtimeConfig.Password = payload.Password
+	}
+	if payload.PortMappings != nil {
+		runtimeConfig.PortMappings = payload.PortMappings
+	}
+	if payload.P2PSettings != nil {
+		runtimeConfig.P2PSettings = payload.P2PSettings
+	}
+	runtimeConfigMu.Unlock()
+
+	log.Printf("[CONFIG] Updated runtime config: tunnel=%s, endpoint=%s, portMappings=%d",
+		payload.TunnelName, payload.EndpointName, len(payload.PortMappings))
+
+	// Hot reload P2P components
+	go func() {
+		log.Println("[CONFIG] Restarting P2P components with new configuration...")
+
+		// Stop existing P2P components
+		stopP2PComponents()
+
+		// Re-initialize with new config
+		initializeP2PComponents()
+
+		log.Println("[CONFIG] P2P components restarted successfully")
+	}()
 }

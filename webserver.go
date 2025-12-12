@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -44,7 +45,7 @@ func (h *AuthHandlers) handleRevoke(w http.ResponseWriter, r *http.Request) {
 	count := GetAuthCache().RevokeByToken(token)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"status": "success",
+		"status":  "success",
 		"revoked": count,
 	})
 }
@@ -110,10 +111,11 @@ type AdminHandlers struct {
 	statsCollector *StatsCollector
 	statsDB        *StatsDB
 	loggingDB      *LoggingDB
+	logBroadcaster *LogBroadcaster
 }
 
 // NewAdminHandlers creates a new AdminHandlers instance.
-func NewAdminHandlers(config *Config, configPath string, statsCollector *StatsCollector, statsDB *StatsDB, loggingDB *LoggingDB) *AdminHandlers {
+func NewAdminHandlers(config *Config, configPath string, statsCollector *StatsCollector, statsDB *StatsDB, loggingDB *LoggingDB, logBroadcaster *LogBroadcaster) *AdminHandlers {
 	return &AdminHandlers{
 		config:         config,
 		configPath:     configPath,
@@ -121,6 +123,7 @@ func NewAdminHandlers(config *Config, configPath string, statsCollector *StatsCo
 		statsCollector: statsCollector,
 		statsDB:        statsDB,
 		loggingDB:      loggingDB,
+		logBroadcaster: logBroadcaster,
 	}
 }
 
@@ -140,11 +143,13 @@ func (h *AdminHandlers) RegisterHandlers(mux *http.ServeMux) {
 	mux.HandleFunc("/.api/proxies", h.handleProxies)
 	mux.HandleFunc("/.api/tunnels", h.handleTunnels)
 	mux.HandleFunc("/.api/tunnels/endpoints", h.handleTunnelEndpoints)
+	mux.HandleFunc("/.api/endpoints", h.handleEndpointConfigs) // Endpoint configuration for P2P management
 	mux.HandleFunc("/.api/servers", h.handleServers)
 	mux.HandleFunc("/.api/rules", h.handleRules)
 	mux.HandleFunc("/.api/firewalls", h.handleFirewalls)
 	mux.HandleFunc("/.api/auth_providers", h.handleAuthProviders)
 	mux.HandleFunc("/.api/log", h.handleLogs)
+	mux.HandleFunc("/.api/act", h.handleAct)
 	mux.HandleFunc("/.api/stats/timeseries", h.handleTimeSeriesStats)
 	mux.HandleFunc("/.api/stats/ip", func(w http.ResponseWriter, r *http.Request) {
 		// Admin authentication check
@@ -708,6 +713,162 @@ func (h *AdminHandlers) handleTunnels(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// ===== Endpoint配置管理 =====
+func (h *AdminHandlers) handleEndpointConfigs(w http.ResponseWriter, r *http.Request) {
+	// GET with ?id= parameter allows unauthenticated access for endpoints to fetch their config
+	// All other operations require admin authentication
+	configID := r.URL.Query().Get("id")
+
+	if r.Method == http.MethodGet && configID != "" {
+		// Allow endpoint clients to fetch their own config without admin auth
+		h.configMux.RLock()
+		defer h.configMux.RUnlock()
+
+		if h.config.Endpoints == nil {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"error":   "endpoint not found",
+			})
+			return
+		}
+
+		endpoint, exists := h.config.Endpoints[configID]
+		if !exists {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"error":   "endpoint not found",
+			})
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": true,
+			"config": map[string]interface{}{
+				"id":           configID,
+				"tunnelName":   endpoint.TunnelName,
+				"endpointName": endpoint.EndpointName,
+				"password":     endpoint.Password,
+				"portMappings": endpoint.PortMappings,
+				"p2p":          endpoint.P2P,
+			},
+		})
+		return
+	}
+
+	// All other operations require admin authentication
+	if !isAdminRequest(r, h.config) {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		h.configMux.RLock()
+		defer h.configMux.RUnlock()
+		resp := make(map[string]*EndpointConfig_APS)
+		if h.config.Endpoints != nil {
+			for name, ep := range h.config.Endpoints {
+				resp[name] = ep
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+
+	case http.MethodPost:
+		var req struct {
+			Name     string             `json:"name"`
+			Endpoint EndpointConfig_APS `json:"endpoint"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" {
+			http.Error(w, "Invalid payload", http.StatusBadRequest)
+			return
+		}
+		h.configMux.Lock()
+		if h.config.Endpoints == nil {
+			h.config.Endpoints = make(map[string]*EndpointConfig_APS)
+		}
+		ep := req.Endpoint
+		// If updating existing endpoint and password is empty, preserve original password
+		if existingEp, exists := h.config.Endpoints[req.Name]; exists && existingEp != nil {
+			if ep.Password == "" {
+				ep.Password = existingEp.Password
+			}
+		}
+		h.config.Endpoints[req.Name] = &ep
+		if err := h.saveConfigLocked(); err != nil {
+			h.configMux.Unlock()
+			http.Error(w, "Failed to persist config", http.StatusInternalServerError)
+			return
+		}
+		h.configMux.Unlock()
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"status": "upserted"})
+
+		// Push config update to connected endpoint (if online)
+		go h.pushConfigToEndpoint(ep.TunnelName, ep.EndpointName, &ep)
+
+	case http.MethodDelete:
+		name := r.URL.Query().Get("name")
+		if name == "" {
+			http.Error(w, "name is required", http.StatusBadRequest)
+			return
+		}
+		h.configMux.Lock()
+		defer h.configMux.Unlock()
+		if h.config.Endpoints != nil {
+			delete(h.config.Endpoints, name)
+		}
+		if err := h.saveConfigLocked(); err != nil {
+			http.Error(w, "Failed to persist config", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"status": "deleted"})
+
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// pushConfigToEndpoint sends a config update message to a connected endpoint
+func (h *AdminHandlers) pushConfigToEndpoint(tunnelName, endpointName string, config *EndpointConfig_APS) {
+	if h.tunnelManager == nil {
+		log.Println("[CONFIG] Cannot push config: tunnel manager not set")
+		return
+	}
+
+	// Build config update payload
+	payload := map[string]interface{}{
+		"tunnelName":   config.TunnelName,
+		"endpointName": config.EndpointName,
+		"portMappings": config.PortMappings,
+		"p2pSettings":  config.P2P,
+	}
+
+	// Only include password if it's set
+	if config.Password != "" {
+		payload["password"] = config.Password
+	}
+
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		log.Printf("[CONFIG] Failed to marshal config update payload: %v", err)
+		return
+	}
+
+	// Send config update via tunnel manager interface
+	if err := h.tunnelManager.SendConfigUpdate(tunnelName, endpointName, payloadBytes); err != nil {
+		log.Printf("[CONFIG] Failed to send config update to %s/%s: %v", tunnelName, endpointName, err)
+		return
+	}
+
+	log.Printf("[CONFIG] Config update pushed to endpoint %s/%s", tunnelName, endpointName)
+}
+
 // ===== 服务器管理 =====
 func (h *AdminHandlers) handleServers(w http.ResponseWriter, r *http.Request) {
 	if !isAdminRequest(r, h.config) {
@@ -1081,6 +1242,48 @@ func (h *AdminHandlers) handleLogs(w http.ResponseWriter, r *http.Request) {
 
 	default:
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (h *AdminHandlers) handleAct(w http.ResponseWriter, r *http.Request) {
+	if !isAdminRequest(r, h.config) {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "Streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+
+	if h.logBroadcaster == nil {
+		http.Error(w, "Log broadcaster not initialized", http.StatusInternalServerError)
+		return
+	}
+
+	ch := h.logBroadcaster.Subscribe()
+	defer h.logBroadcaster.Unsubscribe(ch)
+
+	// Send initial comment to establish connection
+	fmt.Fprintf(w, ": Connected to log stream\n\n")
+	flusher.Flush()
+
+	ctx := r.Context()
+	for {
+		select {
+		case msg := <-ch:
+			// Write data: <msg>\n\n
+			fmt.Fprintf(w, "data: %s\n\n", msg)
+			flusher.Flush()
+		case <-ctx.Done():
+			return
+		}
 	}
 }
 

@@ -25,15 +25,16 @@ var admin_page_content = `
   <!-- Mobile sidebar overlay -->
   <div class="mobile-sidebar-overlay" id="sidebar-overlay"></div>
   
-  <!-- Mobile sidebar -->
   <div class="mobile-sidebar" id="mobile-sidebar">
     <a class="mobile-nav-item auth-required" href="#" data-tab="tab-stats">统计</a>
     <a class="mobile-nav-item auth-required" href="#" data-tab="tab-rules">路由</a>
     <a class="mobile-nav-item auth-required" href="#" data-tab="tab-servers">服务</a>
     <a class="mobile-nav-item auth-required" href="#" data-tab="tab-tunnels">隧道</a>
+    <a class="mobile-nav-item auth-required" href="#" data-tab="tab-endpoints">节点</a>
     <a class="mobile-nav-item auth-required" href="#" data-tab="tab-firewalls">安全</a>
     <a class="mobile-nav-item auth-required" href="#" data-tab="tab-auth-providers">认证</a>
     <a class="mobile-nav-item auth-required" href="#" data-tab="tab-logs">日志</a>
+    <a class="mobile-nav-item auth-required" href="#" data-tab="tab-act">动态</a>
     <a class="mobile-nav-item auth-required" href="#" data-tab="tab-proxies">代理</a>
     <a class="mobile-nav-item auth-required" href="#" data-tab="tab-users">用户</a>
     <a class="mobile-nav-item auth-required" href="#" data-tab="tab-config">配置</a>
@@ -49,9 +50,11 @@ var admin_page_content = `
         <li class="auth-required"><a class="bx--header__menu-item" href="#" data-tab="tab-rules">路由</a></li>
         <li class="auth-required"><a class="bx--header__menu-item" href ="#" data-tab="tab-servers">服务</a></li>
         <li class="auth-required"><a class="bx--header__menu-item" href="#" data-tab="tab-tunnels">隧道</a></li>
+        <li class="auth-required"><a class="bx--header__menu-item" href="#" data-tab="tab-endpoints">节点</a></li>
         <li class="auth-required"><a class="bx--header__menu-item" href="#" data-tab="tab-firewalls">安全</a></li>
         <li class="auth-required"><a class="bx--header__menu-item" href="#" data-tab="tab-auth-providers">认证</a></li>
         <li class="auth-required"><a class="bx--header__menu-item" href="#" data-tab="tab-logs">日志</a></li>
+        <li class="auth-required"><a class="bx--header__menu-item" href="#" data-tab="tab-act">动态</a></li>
         <li class="auth-required"><a class="bx--header__menu-item" href="#" data-tab="tab-proxies">代理</a></li>
         <li class="auth-required"><a class="bx--header__menu-item" href="#" data-tab="tab-users">用户</a></li>
         <li class="auth-required"><a class="bx--header__menu-item" href="#" data-tab="tab-config">配置</a></li>
@@ -433,6 +436,91 @@ var admin_page_content = `
       </div>
     </div>
 
+    <!-- 节点配置管理 -->
+    <section id="tab-endpoints" class="bx--tab-content hidden" role="tabpanel" aria-labelledby="节点">
+      <div class="bx--tile">
+        <div class="flex mb-2">
+          <button id="btn-endpoints-load" class="bx--btn bx--btn--secondary">加载节点</button>
+          <button id="btn-endpoints-add" class="bx--btn bx--btn--primary">新增节点</button>
+        </div>
+        <div class="table-wrap">
+          <table class="bx--data-table carbon-table">
+            <thead><tr><th>配置ID</th><th>隧道名称</th><th>节点名称</th><th>端口映射</th><th>P2P设置</th><th>操作</th></tr></thead>
+            <tbody id="endpoints-tbody"></tbody>
+          </table>
+        </div>
+        <div id="endpoints-msg" class="mt-2"></div>
+      </div>
+    </section>
+
+    <!-- 新增节点对话框 -->
+    <div data-modal id="endpoint-add-modal" class="bx--modal" role="dialog">
+      <div class="bx--modal-container" style="max-width: 700px;">
+        <div class="bx--modal-header">
+          <p class="bx--modal-header__heading">新增节点配置</p>
+          <button class="bx--modal-close" type="button" data-modal-close aria-label="关闭">
+            <svg class="bx--modal-close__icon" width="16" height="16" viewBox="0 0 16 16"><path d="M12 4.7L11.3 4 8 7.3 4.7 4 4 4.7 7.3 8 4 11.3 4.7 12 8 8.7 11.3 12 12 11.3 8.7 8z"/></svg>
+          </button>
+        </div>
+        <div class="bx--modal-content">
+          <div class="bx--form-item"><label class="bx--label">配置ID *</label><input id="add-endpoint-id" type="text" class="bx--text-input" placeholder="唯一标识符，用于节点连接"></div>
+          <div class="bx--form-item mt-1"><label class="bx--label">隧道名称 *</label><select id="add-endpoint-tunnel" class="bx--select"></select></div>
+          <div class="bx--form-item mt-1"><label class="bx--label">节点名称 *</label><input id="add-endpoint-name" type="text" class="bx--text-input" placeholder="节点的显示名称"></div>
+          <div class="bx--form-item mt-1"><label class="bx--label">通信密码</label><input id="add-endpoint-password" type="password" class="bx--text-input" placeholder="留空使用隧道密码"></div>
+          <div class="bx--form-item mt-1">
+            <label class="bx--label">端口映射 (JSON数组)</label>
+            <textarea id="add-endpoint-port-mappings" class="bx--text-input" rows="4" placeholder='[{"localPort": 8080, "targetEndpoint": "other-ep", "remoteTarget": "127.0.0.1:80"}]'></textarea>
+            <div class="bx--form__helper-text">localPort: 本地监听端口, targetEndpoint: 目标节点名, remoteTarget: 目标地址</div>
+          </div>
+          <div class="bx--form-item mt-1">
+            <label class="bx--label">P2P设置</label>
+            <div class="bx--checkbox-wrapper"><input id="add-endpoint-p2p-enabled" type="checkbox" class="bx--checkbox" checked><label for="add-endpoint-p2p-enabled" class="bx--checkbox-label"><span class="bx--checkbox-label-text">启用P2P</span></label></div>
+            <div class="bx--checkbox-wrapper mt-1"><input id="add-endpoint-lan-enabled" type="checkbox" class="bx--checkbox" checked><label for="add-endpoint-lan-enabled" class="bx--checkbox-label"><span class="bx--checkbox-label-text">启用LAN发现</span></label></div>
+          </div>
+          <div class="bx--form-item mt-1"><label class="bx--label">STUN服务器 (逗号分隔)</label><input id="add-endpoint-stun" type="text" class="bx--text-input" placeholder="stun.miwifi.com:3478"></div>
+          <div class="bx--form-item mt-1"><label class="bx--label">最大中继跳数</label><input id="add-endpoint-max-hops" type="number" class="bx--text-input" placeholder="3" value="3"></div>
+        </div>
+        <div class="bx--modal-footer">
+          <button class="bx--btn bx--btn--secondary" type="button" data-modal-close>取消</button>
+          <button class="bx--btn bx--btn--primary" type="button" id="confirm-add-endpoint">确认新增</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 编辑节点对话框 -->
+    <div data-modal id="endpoint-edit-modal" class="bx--modal" role="dialog">
+      <div class="bx--modal-container" style="max-width: 700px;">
+        <div class="bx--modal-header">
+          <p class="bx--modal-header__heading">编辑节点配置</p>
+          <button class="bx--modal-close" type="button" data-modal-close aria-label="关闭">
+            <svg class="bx--modal-close__icon" width="16" height="16" viewBox="0 0 16 16"><path d="M12 4.7L11.3 4 8 7.3 4.7 4 4 4.7 7.3 8 4 11.3 4.7 12 8 8.7 11.3 12 12 11.3 8.7 8z"/></svg>
+          </button>
+        </div>
+        <div class="bx--modal-content">
+          <input type="hidden" id="edit-endpoint-original-id">
+          <div class="bx--form-item"><label class="bx--label">配置ID *</label><input id="edit-endpoint-id" type="text" class="bx--text-input"></div>
+          <div class="bx--form-item mt-1"><label class="bx--label">隧道名称 *</label><select id="edit-endpoint-tunnel" class="bx--select"></select></div>
+          <div class="bx--form-item mt-1"><label class="bx--label">节点名称 *</label><input id="edit-endpoint-name" type="text" class="bx--text-input"></div>
+          <div class="bx--form-item mt-1"><label class="bx--label">通信密码 (留空不修改)</label><input id="edit-endpoint-password" type="password" class="bx--text-input"></div>
+          <div class="bx--form-item mt-1">
+            <label class="bx--label">端口映射 (JSON数组)</label>
+            <textarea id="edit-endpoint-port-mappings" class="bx--text-input" rows="4"></textarea>
+          </div>
+          <div class="bx--form-item mt-1">
+            <label class="bx--label">P2P设置</label>
+            <div class="bx--checkbox-wrapper"><input id="edit-endpoint-p2p-enabled" type="checkbox" class="bx--checkbox"><label for="edit-endpoint-p2p-enabled" class="bx--checkbox-label"><span class="bx--checkbox-label-text">启用P2P</span></label></div>
+            <div class="bx--checkbox-wrapper mt-1"><input id="edit-endpoint-lan-enabled" type="checkbox" class="bx--checkbox"><label for="edit-endpoint-lan-enabled" class="bx--checkbox-label"><span class="bx--checkbox-label-text">启用LAN发现</span></label></div>
+          </div>
+          <div class="bx--form-item mt-1"><label class="bx--label">STUN服务器 (逗号分隔)</label><input id="edit-endpoint-stun" type="text" class="bx--text-input"></div>
+          <div class="bx--form-item mt-1"><label class="bx--label">最大中继跳数</label><input id="edit-endpoint-max-hops" type="number" class="bx--text-input"></div>
+        </div>
+        <div class="bx--modal-footer">
+          <button class="bx--btn bx--btn--secondary" type="button" data-modal-close>取消</button>
+          <button class="bx--btn bx--btn--primary" type="button" id="confirm-edit-endpoint">确认保存</button>
+        </div>
+      </div>
+    </div>
+
     <!-- 服务管理 -->
     <section id="tab-servers" class="bx--tab-content hidden" role="tabpanel" aria-labelledby="服务">
       <div class="bx--tile">
@@ -625,6 +713,23 @@ var admin_page_content = `
            </div>
         </div>
         <div id="logs-msg" class="mt-2"></div>
+      </div>
+    </section>
+
+    <!-- 实时动态 -->
+    <section id="tab-act" class="bx--tab-content hidden" role="tabpanel" aria-labelledby="动态">
+      <div class="bx--tile" style="height: calc(100vh - 150px); display: flex; flex-direction: column;">
+        <div class="flex mb-2" style="align-items: center;">
+          <button id="btn-act-connect" class="bx--btn bx--btn--primary bx--btn--sm">连接</button>
+          <button id="btn-act-clear" class="bx--btn bx--btn--secondary bx--btn--sm" style="margin-left: 0.5rem;">清空</button>
+          <div style="margin-left: auto; display: flex; align-items: center; gap: 0.5rem;">
+            <div class="bx--checkbox-wrapper" style="margin:0;">
+                <input id="act-autoscroll" type="checkbox" class="bx--checkbox" checked>
+                <label for="act-autoscroll" class="bx--checkbox-label"><span class="bx--checkbox-label-text">自动滚动</span></label>
+            </div>
+          </div>
+        </div>
+        <div id="act-terminal" class="code-block" style="flex-grow: 1; overflow-y: auto; background-color: #1e1e1e; color: #f4f4f4; padding: 1rem; font-family: 'IBM Plex Mono', monospace; white-space: pre-wrap; font-size: 12px; border-radius: 4px;"></div>
       </div>
     </section>
 

@@ -103,7 +103,12 @@ var admin_page_js = `
         }
         else if (tabId === "tab-firewalls" && typeof loadFirewalls === "function") loadFirewalls();
         else if (tabId === "tab-auth-providers" && typeof loadAuthProviders === "function") loadAuthProviders();
+        else if (tabId === "tab-endpoints" && typeof loadEndpoints === "function") {
+          loadEndpoints();
+          if (typeof populateTunnelSelectorsForEndpoints === "function") populateTunnelSelectorsForEndpoints();
+        }
         else if (tabId === "tab-logs" && typeof loadLogs === "function") loadLogs();
+        else if (tabId === "tab-act") { /* No auto-load needed, manual connect */ }
         else if (tabId === "tab-config" && typeof loadConfig === "function") loadConfig();
       }, 100);
     }
@@ -157,6 +162,9 @@ var admin_page_js = `
       document.getElementById("api-token").value = savedToken;
       setAuthStatus(true);
     }
+
+    // Initialize Act (Dynamic Logs)
+    if (typeof initAct === "function") initAct();
     
     // 初始化默认tab的active状态
     setTimeout(function() {
@@ -424,6 +432,7 @@ var rulesUrl = "/.api/rules";
 var firewallsUrl = "/.api/firewalls";
 var authProvidersUrl = "/.api/auth_providers";
 var logsUrl = "/.api/log";
+var endpointsUrl = "/.api/endpoints";
 
 
 function buildAuthHeaders(base) {
@@ -532,6 +541,95 @@ function showNotification(type, title, subtitle) {
   setTimeout(function() {
     if (notification.parentNode) notification.remove();
   }, 5000);
+}
+
+
+// ===== 实时动态 (SSE) =====
+var actSource = null;
+
+function initAct() {
+    var btnConnect = document.getElementById("btn-act-connect");
+    var btnClear = document.getElementById("btn-act-clear");
+    
+    if (btnConnect) btnConnect.addEventListener("click", toggleActConnection);
+    if (btnClear) btnClear.addEventListener("click", function() {
+        var actTerminal = document.getElementById("act-terminal");
+        if (actTerminal) actTerminal.innerHTML = "";
+    });
+}
+
+function toggleActConnection() {
+    var btn = document.getElementById("btn-act-connect");
+    var actTerminal = document.getElementById("act-terminal");
+    
+    if (actSource) {
+        // Disconnect
+        actSource.close();
+        actSource = null;
+        if (btn) {
+            btn.textContent = "连接";
+            btn.classList.remove("bx--btn--danger");
+            btn.classList.add("bx--btn--primary");
+        }
+        appendActLog("Disconnected.");
+    } else {
+        // Connect
+        if (actTerminal) actTerminal.innerHTML = "";
+        appendActLog("Connecting to log stream...");
+        
+        var url = "/.api/act";
+        
+        actSource = new EventSource(url);
+        
+        actSource.onopen = function() {
+            if (btn) {
+                btn.textContent = "断开";
+                btn.classList.remove("bx--btn--primary");
+                btn.classList.add("bx--btn--danger");
+            }
+            appendActLog("Connected.");
+        };
+        
+        actSource.onmessage = function(event) {
+            appendActLog(event.data);
+        };
+        
+        actSource.onerror = function(err) {
+            console.error("SSE Error:", err);
+            // Don't show error on normal close or retry
+            if (actSource && actSource.readyState === EventSource.CLOSED) {
+                 appendActLog("Connection closed.");
+                 if (btn) {
+                     btn.textContent = "连接";
+                     btn.classList.remove("bx--btn--danger");
+                     btn.classList.add("bx--btn--primary");
+                 }
+                 actSource = null;
+            } else {
+                // Keep trying or show minimal error
+                // appendActLog("Connection error...");
+            }
+        };
+    }
+}
+
+function appendActLog(msg) {
+    var actTerminal = document.getElementById("act-terminal");
+    var actAutoScroll = document.getElementById("act-autoscroll");
+    
+    if (!actTerminal) return;
+    var div = document.createElement("div");
+    div.textContent = msg;
+    actTerminal.appendChild(div);
+    
+    // Limit buffer
+    if (actTerminal.childElementCount > 2000) {
+        actTerminal.removeChild(actTerminal.firstChild);
+    }
+
+    if (actAutoScroll && actAutoScroll.checked) {
+        actTerminal.scrollTop = actTerminal.scrollHeight;
+    }
 }
 
 
@@ -2465,6 +2563,268 @@ function setupAdvancedPanelToggles() {
   
   setTimeout(loadTimeSeriesData, 2000);
   setInterval(loadTimeSeriesData, 5 * 60 * 1000);
+
+// ===== 节点配置管理 =====
+var endpointAddModal, endpointEditModal;
+
+function initEndpointModals() {
+  var addModal = document.querySelector('#endpoint-add-modal');
+  var editModal = document.querySelector('#endpoint-edit-modal');
+  
+  if (addModal) {
+    addModal.addEventListener('click', function(e) {
+      if (e.target.closest('[data-modal-close]')) {
+        addModal.classList.remove('is-visible');
+      }
+    });
+  }
+  
+  if (editModal) {
+    editModal.addEventListener('click', function(e) {
+      if (e.target.closest('[data-modal-close]')) {
+        editModal.classList.remove('is-visible');
+      }
+    });
+  }
+}
+initEndpointModals();
+
+async function loadEndpoints() {
+  var msg = document.getElementById("endpoints-msg");
+  if (msg) msg.textContent = "";
+  try {
+    var res = await authFetch(endpointsUrl, { headers: buildAuthHeaders({}) });
+    if (!res.ok) throw new Error(await res.text());
+    var data = await res.json();
+    var tbody = document.getElementById("endpoints-tbody");
+    if (tbody) tbody.innerHTML = "";
+    Object.keys(data || {}).forEach(function(id){
+      var ep = data[id] || {};
+      var portMappingsStr = (ep.portMappings && ep.portMappings.length > 0) ? ep.portMappings.length + "个映射" : "无";
+      var p2pStr = [];
+      if (ep.p2pSettings) {
+        if (ep.p2pSettings.enabled !== false) p2pStr.push("P2P");
+        if (ep.p2pSettings.lanDiscovery !== false) p2pStr.push("LAN");
+      }
+      var tr = document.createElement("tr");
+      tr.innerHTML =
+        "<td>" + id + "</td>" +
+        "<td>" + (ep.tunnelName || "") + "</td>" +
+        "<td>" + (ep.endpointName || "") + "</td>" +
+        "<td>" + portMappingsStr + "</td>" +
+        "<td>" + (p2pStr.length > 0 ? p2pStr.join(", ") : "禁用") + "</td>" +
+        "<td><button class='bx--btn bx--btn--sm bx--btn--ghost' onclick='openEditEndpointModal(\"" + id.replace(/"/g, '&quot;') + "\")'>编辑</button> " +
+        "<button class='bx--btn bx--btn--sm bx--btn--danger--ghost' onclick='deleteEndpoint(\"" + id.replace(/"/g, '&quot;') + "\")'>删除</button></td>";
+      if (tbody) tbody.appendChild(tr);
+    });
+    if (msg) msg.textContent = "节点配置已加载";
+  } catch (e) {
+    if (msg) msg.textContent = "加载失败: " + (e.message || e);
+  }
+}
+
+async function populateTunnelSelectorsForEndpoints() {
+  try {
+    var res = await authFetch(tunnelsUrl, { headers: buildAuthHeaders({}) });
+    if (!res.ok) return;
+    var data = await res.json();
+    var tunnelNames = Object.keys(data || {});
+    
+    ["add-endpoint-tunnel", "edit-endpoint-tunnel"].forEach(function(id) {
+      var select = document.getElementById(id);
+      if (select) {
+        select.innerHTML = '<option value="">选择隧道...</option>';
+        tunnelNames.forEach(function(name) {
+          var opt = document.createElement("option");
+          opt.value = name;
+          opt.textContent = name;
+          select.appendChild(opt);
+        });
+      }
+    });
+  } catch (e) {
+    console.warn("加载隧道列表失败:", e);
+  }
+}
+
+function openAddEndpointModal() {
+  document.getElementById("add-endpoint-id").value = "";
+  document.getElementById("add-endpoint-tunnel").value = "";
+  document.getElementById("add-endpoint-name").value = "";
+  document.getElementById("add-endpoint-password").value = "";
+  document.getElementById("add-endpoint-port-mappings").value = "";
+  document.getElementById("add-endpoint-p2p-enabled").checked = true;
+  document.getElementById("add-endpoint-lan-enabled").checked = true;
+  document.getElementById("add-endpoint-stun").value = "";
+  document.getElementById("add-endpoint-max-hops").value = "3";
+  populateTunnelSelectorsForEndpoints();
+  var modal = document.querySelector('#endpoint-add-modal');
+  if (modal) modal.classList.add('is-visible');
+}
+
+async function openEditEndpointModal(endpointId) {
+  try {
+    var res = await authFetch(endpointsUrl, { headers: buildAuthHeaders({}) });
+    if (!res.ok) throw new Error(await res.text());
+    var data = await res.json();
+    var ep = data[endpointId] || {};
+    
+    await populateTunnelSelectorsForEndpoints();
+    
+    document.getElementById("edit-endpoint-original-id").value = endpointId;
+    document.getElementById("edit-endpoint-id").value = endpointId;
+    document.getElementById("edit-endpoint-tunnel").value = ep.tunnelName || "";
+    document.getElementById("edit-endpoint-name").value = ep.endpointName || "";
+    document.getElementById("edit-endpoint-password").value = "";
+    document.getElementById("edit-endpoint-port-mappings").value = ep.portMappings ? JSON.stringify(ep.portMappings, null, 2) : "";
+    document.getElementById("edit-endpoint-p2p-enabled").checked = ep.p2pSettings ? ep.p2pSettings.enabled !== false : true;
+    document.getElementById("edit-endpoint-lan-enabled").checked = ep.p2pSettings ? ep.p2pSettings.lanDiscovery !== false : true;
+    document.getElementById("edit-endpoint-stun").value = (ep.p2pSettings && ep.p2pSettings.stunServers) ? ep.p2pSettings.stunServers.join(", ") : "";
+    document.getElementById("edit-endpoint-max-hops").value = (ep.p2pSettings && ep.p2pSettings.maxRelayHops) ? ep.p2pSettings.maxRelayHops : "3";
+    
+    var modal = document.querySelector('#endpoint-edit-modal');
+    if (modal) modal.classList.add('is-visible');
+  } catch (e) {
+    var msg = document.getElementById("endpoints-msg");
+    if (msg) msg.textContent = "加载节点数据失败: " + (e.message || e);
+  }
+}
+
+async function confirmAddEndpoint() {
+  var msg = document.getElementById("endpoints-msg");
+  if (msg) msg.textContent = "";
+  var id = document.getElementById("add-endpoint-id").value.trim();
+  var tunnelName = document.getElementById("add-endpoint-tunnel").value;
+  var endpointName = document.getElementById("add-endpoint-name").value.trim();
+  var password = document.getElementById("add-endpoint-password").value;
+  var portMappingsStr = document.getElementById("add-endpoint-port-mappings").value.trim();
+  var p2pEnabled = document.getElementById("add-endpoint-p2p-enabled").checked;
+  var lanEnabled = document.getElementById("add-endpoint-lan-enabled").checked;
+  var stunServers = document.getElementById("add-endpoint-stun").value.trim();
+  var maxHops = document.getElementById("add-endpoint-max-hops").value;
+  
+  if (!id) { if (msg) msg.textContent = "配置ID必填"; return; }
+  if (!tunnelName) { if (msg) msg.textContent = "隧道名称必填"; return; }
+  if (!endpointName) { if (msg) msg.textContent = "节点名称必填"; return; }
+  
+  var portMappings = [];
+  if (portMappingsStr) {
+    try { portMappings = JSON.parse(portMappingsStr); } catch (e) { if (msg) msg.textContent = "端口映射JSON格式错误"; return; }
+  }
+  
+  var payload = {
+    tunnelName: tunnelName,
+    endpointName: endpointName,
+    password: password || undefined,
+    portMappings: portMappings,
+    p2pSettings: {
+      enabled: p2pEnabled,
+      lanDiscovery: lanEnabled,
+      stunServers: stunServers ? stunServers.split(",").map(function(s){return s.trim();}).filter(function(s){return s;}) : [],
+      maxRelayHops: parseInt(maxHops, 10) || 3
+    }
+  };
+  
+  try {
+    var res = await authFetch(endpointsUrl, { 
+      method: "POST", 
+      headers: buildAuthHeaders({ "Content-Type": "application/json" }), 
+      body: JSON.stringify({ name: id, endpoint: payload }) 
+    });
+    var text = await res.text();
+    if (!res.ok) throw new Error(text);
+    if (msg) msg.textContent = "新增成功";
+    var modal = document.querySelector('#endpoint-add-modal');
+    if (modal) modal.classList.remove('is-visible');
+    loadEndpoints();
+  } catch (e) {
+    if (msg) msg.textContent = "新增失败: " + (e.message || e);
+  }
+}
+
+async function confirmEditEndpoint() {
+  var msg = document.getElementById("endpoints-msg");
+  if (msg) msg.textContent = "";
+  var originalId = document.getElementById("edit-endpoint-original-id").value;
+  var id = document.getElementById("edit-endpoint-id").value.trim();
+  var tunnelName = document.getElementById("edit-endpoint-tunnel").value;
+  var endpointName = document.getElementById("edit-endpoint-name").value.trim();
+  var password = document.getElementById("edit-endpoint-password").value;
+  var portMappingsStr = document.getElementById("edit-endpoint-port-mappings").value.trim();
+  var p2pEnabled = document.getElementById("edit-endpoint-p2p-enabled").checked;
+  var lanEnabled = document.getElementById("edit-endpoint-lan-enabled").checked;
+  var stunServers = document.getElementById("edit-endpoint-stun").value.trim();
+  var maxHops = document.getElementById("edit-endpoint-max-hops").value;
+  
+  if (!id) { if (msg) msg.textContent = "配置ID必填"; return; }
+  if (!tunnelName) { if (msg) msg.textContent = "隧道名称必填"; return; }
+  if (!endpointName) { if (msg) msg.textContent = "节点名称必填"; return; }
+  
+  var portMappings = [];
+  if (portMappingsStr) {
+    try { portMappings = JSON.parse(portMappingsStr); } catch (e) { if (msg) msg.textContent = "端口映射JSON格式错误"; return; }
+  }
+  
+  var payload = {
+    tunnelName: tunnelName,
+    endpointName: endpointName,
+    portMappings: portMappings,
+    p2pSettings: {
+      enabled: p2pEnabled,
+      lanDiscovery: lanEnabled,
+      stunServers: stunServers ? stunServers.split(",").map(function(s){return s.trim();}).filter(function(s){return s;}) : [],
+      maxRelayHops: parseInt(maxHops, 10) || 3
+    }
+  };
+  if (password) payload.password = password;
+  
+  try {
+    // If ID changed, delete old and create new
+    if (originalId !== id) {
+      await authFetch(endpointsUrl + "?name=" + encodeURIComponent(originalId), { 
+        method: "DELETE", 
+        headers: buildAuthHeaders({}) 
+      });
+    }
+    var res = await authFetch(endpointsUrl, { 
+      method: "POST", 
+      headers: buildAuthHeaders({ "Content-Type": "application/json" }), 
+      body: JSON.stringify({ name: id, endpoint: payload }) 
+    });
+    var text = await res.text();
+    if (!res.ok) throw new Error(text);
+    if (msg) msg.textContent = "更新成功";
+    var modal = document.querySelector('#endpoint-edit-modal');
+    if (modal) modal.classList.remove('is-visible');
+    loadEndpoints();
+  } catch (e) {
+    if (msg) msg.textContent = "更新失败: " + (e.message || e);
+  }
+}
+
+async function deleteEndpoint(endpointId) {
+  if (!confirm("确定要删除节点配置 \"" + endpointId + "\" 吗？")) return;
+  var msg = document.getElementById("endpoints-msg");
+  if (msg) msg.textContent = "";
+  try {
+    var res = await authFetch(endpointsUrl + "?name=" + encodeURIComponent(endpointId), { 
+      method: "DELETE", 
+      headers: buildAuthHeaders({}) 
+    });
+    var text = await res.text();
+    if (!res.ok) throw new Error(text);
+    if (msg) msg.textContent = "删除成功";
+    loadEndpoints();
+  } catch (e) {
+    if (msg) msg.textContent = "删除失败: " + (e.message || e);
+  }
+}
+
+// Event listeners
+document.getElementById("btn-endpoints-load").addEventListener("click", loadEndpoints);
+document.getElementById("btn-endpoints-add").addEventListener("click", openAddEndpointModal);
+document.getElementById("confirm-add-endpoint").addEventListener("click", confirmAddEndpoint);
+document.getElementById("confirm-edit-endpoint").addEventListener("click", confirmEditEndpoint);
 
 }); // End of DOMContentLoaded
 `

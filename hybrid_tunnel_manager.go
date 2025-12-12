@@ -131,3 +131,11 @@ func (htm *HybridTunnelManager) Cleanup() {
 		htm.tcpManager.Stop()
 	}
 }
+
+// SendConfigUpdate sends a config update message to a connected endpoint
+func (htm *HybridTunnelManager) SendConfigUpdate(tunnelName, endpointName string, payload []byte) error {
+	if htm.tcpManager == nil {
+		return errors.New("TCP tunnel manager not initialized")
+	}
+	return htm.tcpManager.SendConfigUpdate(tunnelName, endpointName, payload)
+}
