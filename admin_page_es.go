@@ -101,6 +101,7 @@ var admin_page_js = `
           if (typeof populateFirewallSelectors === "function") populateFirewallSelectors();
         }
         else if (tabId === "tab-firewalls" && typeof loadFirewalls === "function") loadFirewalls();
+        else if (tabId === "tab-logs" && typeof loadLogs === "function") loadLogs();
         else if (tabId === "tab-config" && typeof loadConfig === "function") loadConfig();
       }, 100);
     }
@@ -330,8 +331,8 @@ var admin_page_js = `
     function renderStatsSummary(stats) {
       setText("stat-totalRequests", stats.totalRequests);
       setText("stat-activeConnections", stats.activeConnections);
-      setText("stat-totalBytesSent", stats.totalBytesSent);
-      setText("stat-totalBytesRecv", stats.totalBytesRecv);
+      setText("stat-totalBytesSent", fmtBytes(stats.totalBytesSent));
+      setText("stat-totalBytesRecv", fmtBytes(stats.totalBytesRecv));
     }
 
     function setText(id, v) {
@@ -362,8 +363,8 @@ var admin_page_js = `
             <td>${m.requestCount ?? "-"}</td>
             <td>${m.errors ?? "-"}</td>
             <td>${fmtQPS(m.qps)}</td>
-            <td>${fmtNum(m.bytesRecv?.avg)} / ${m.bytesRecv?.min ?? "-"} / ${m.bytesRecv?.max ?? "-"}</td>
-            <td>${fmtNum(m.bytesSent?.avg)} / ${m.bytesSent?.min ?? "-"} / ${m.bytesSent?.max ?? "-"}</td>
+            <td>${fmtBytes(m.bytesRecv?.avg)} / ${fmtBytes(m.bytesRecv?.min)} / ${fmtBytes(m.bytesRecv?.max)}</td>
+            <td>${fmtBytes(m.bytesSent?.avg)} / ${fmtBytes(m.bytesSent?.min)} / ${fmtBytes(m.bytesSent?.max)}</td>
             <td>${fmtNum(m.responseTime?.avgMs)} / ${m.responseTime?.minMs ?? "-"} / ${m.responseTime?.maxMs ?? "-"}</td>
           ` + "`" + `;
           tbody.appendChild(tr);
@@ -377,6 +378,27 @@ var admin_page_js = `
         if (!Number.isInteger(n)) return n.toFixed(2);
       }
       return String(n);
+    }
+
+    // 字节格式化函数 - 转换为K, M, G, T, P单位
+    function fmtBytes(bytes) {
+      if (bytes == null || isNaN(bytes) || bytes === 0) return bytes === 0 ? "0 B" : "-";
+      
+      const units = ['B', 'K', 'M', 'G', 'T', 'P'];
+      const threshold = 1024;
+      let unitIndex = 0;
+      let value = parseFloat(bytes);
+      
+      while (value >= threshold && unitIndex < units.length - 1) {
+        value /= threshold;
+        unitIndex++;
+      }
+      
+      if (unitIndex === 0) {
+        return value.toString() + ' ' + units[unitIndex];
+      } else {
+        return value.toFixed(2) + ' ' + units[unitIndex];
+      }
     }
 
     function fmtQPS(qps) {
@@ -400,6 +422,7 @@ var tunnelsUrl = "/.api/tunnels";
 var serversUrl = "/.api/servers";
 var rulesUrl = "/.api/rules";
 var firewallsUrl = "/.api/firewalls";
+var logsUrl = "/.api/log";
 
 
 function buildAuthHeaders(base) {
@@ -577,6 +600,8 @@ function openAddUserModal() {
   document.getElementById("add-user-admin").checked = false;
   document.getElementById("add-user-groups").value = "";
   document.getElementById("add-user-token").value = "";
+  document.getElementById("add-user-log-level").value = "";
+  document.getElementById("add-user-log-retention").value = "";
   var modal = document.querySelector('#user-add-modal');
   if (modal) modal.classList.add('is-visible');
 }
@@ -594,6 +619,8 @@ async function openEditUserModal(username) {
     document.getElementById("edit-user-admin").checked = !!u.admin;
     document.getElementById("edit-user-groups").value = (u.groups && u.groups.join ? u.groups.join(",") : "");
     document.getElementById("edit-user-token").value = u.token || "";
+    document.getElementById("edit-user-log-level").value = (u.logLevel !== undefined && u.logLevel !== null) ? u.logLevel : "";
+    document.getElementById("edit-user-log-retention").value = (u.logRetentionHours !== undefined && u.logRetentionHours !== null) ? u.logRetentionHours : "";
     
     var modal = document.querySelector('#user-edit-modal');
     if (modal) modal.classList.add('is-visible');
@@ -622,6 +649,11 @@ async function confirmAddUser() {
     groups: groups ? groups.split(",").map(function(s){return s.trim();}).filter(function(s){return s;}) : [] 
   };
   
+  var logLevel = document.getElementById("add-user-log-level").value;
+  if (logLevel !== "") payload.logLevel = parseInt(logLevel, 10);
+  var logRetention = document.getElementById("add-user-log-retention").value;
+  if (logRetention !== "") payload.logRetentionHours = parseInt(logRetention, 10);
+
   try {
     var res = await authFetch(usersUrl, { 
       method: "POST", 
@@ -658,6 +690,11 @@ async function confirmEditUser() {
   // 只有密码非空时才包含在payload中
   if (password && password.length > 0) payload.password = password;
   
+  var logLevel = document.getElementById("edit-user-log-level").value;
+  if (logLevel !== "") payload.logLevel = parseInt(logLevel, 10);
+  var logRetention = document.getElementById("edit-user-log-retention").value;
+  if (logRetention !== "") payload.logRetentionHours = parseInt(logRetention, 10);
+
   try {
     var res = await authFetch(usersUrl, { 
       method: "POST", 
@@ -738,6 +775,8 @@ async function loadProxies() {
 function openAddProxyModal() {
   document.getElementById("add-proxy-name").value = "";
   document.getElementById("add-proxy-urls").value = "";
+  document.getElementById("add-proxy-log-level").value = "";
+  document.getElementById("add-proxy-log-retention").value = "";
   var modal = document.querySelector('#proxy-add-modal');
   if (modal) modal.classList.add('is-visible');
 }
@@ -751,6 +790,8 @@ async function openEditProxyModal(name) {
     document.getElementById("edit-proxy-original-name").value = name;
     document.getElementById("edit-proxy-name").value = name;
     document.getElementById("edit-proxy-urls").value = (p.urls || []).join("\n");
+    document.getElementById("edit-proxy-log-level").value = (p.logLevel !== undefined && p.logLevel !== null) ? p.logLevel : "";
+    document.getElementById("edit-proxy-log-retention").value = (p.logRetentionHours !== undefined && p.logRetentionHours !== null) ? p.logRetentionHours : "";
     var modal = document.querySelector('#proxy-edit-modal');
     if (modal) modal.classList.add('is-visible');
   } catch (e) {
@@ -782,12 +823,17 @@ async function confirmAddProxy() {
 async function confirmEditProxy() {
   var msg = document.getElementById("proxies-msg");
   if (msg) msg.textContent = "";
-  var name = document.getElementById("edit-proxy-name").value.trim();
-  var raw = document.getElementById("edit-proxy-urls").value.trim();
   if (!name) { if (msg) msg.textContent = "代理名必填"; return; }
   var urls = raw ? raw.split(/\n|,/).map(function(s){return s.trim();}).filter(function(s){return s;}) : [];
+  
+  var payload = { urls: urls };
+  var logLevel = document.getElementById("edit-proxy-log-level").value;
+  if (logLevel !== "") payload.logLevel = parseInt(logLevel, 10);
+  var logRetention = document.getElementById("edit-proxy-log-retention").value;
+  if (logRetention !== "") payload.logRetentionHours = parseInt(logRetention, 10);
+
   try {
-    var res = await authFetch(proxiesUrl, { method: "POST", headers: buildAuthHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ name: name, proxy: { urls: urls } }) });
+    var res = await authFetch(proxiesUrl, { method: "POST", headers: buildAuthHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ name: name, proxy: payload }) });
     var text = await res.text();
     if (!res.ok) throw new Error(text);
     if (msg) msg.textContent = "更新成功";
@@ -857,8 +903,8 @@ async function loadTunnelEndpoints(tunnelName) {
         "<td>" + (stats.requestCount ?? "-") + "</td>" +
         "<td>" + (stats.errors ?? "-") + "</td>" +
         "<td>" + fmtQPS(stats.qps) + "</td>" +
-        "<td>" + (bytesSent.total ?? "-") + " / " + fmtNum(bytesSent.avg) + " / " + (bytesSent.min ?? "-") + " / " + (bytesSent.max ?? "-") + "</td>" +
-        "<td>" + (bytesRecv.total ?? "-") + " / " + fmtNum(bytesRecv.avg) + " / " + (bytesRecv.min ?? "-") + " / " + (bytesRecv.max ?? "-") + "</td>" +
+        "<td>" + fmtBytes(bytesSent.total) + " / " + fmtBytes(bytesSent.avg) + " / " + fmtBytes(bytesSent.min) + " / " + fmtBytes(bytesSent.max) + "</td>" +
+        "<td>" + fmtBytes(bytesRecv.total) + " / " + fmtBytes(bytesRecv.avg) + " / " + fmtBytes(bytesRecv.min) + " / " + fmtBytes(bytesRecv.max) + "</td>" +
         "<td>" + fmtNum(responseTime.avgMs) + " / " + (responseTime.minMs ?? "-") + " / " + (responseTime.maxMs ?? "-") + "</td>";
       tbody.appendChild(tr);
     });
@@ -902,6 +948,8 @@ function openAddTunnelModal() {
   document.getElementById("add-tunnel-name").value = "";
   document.getElementById("add-tunnel-password").value = "";
   document.getElementById("add-tunnel-servers").value = "";
+  document.getElementById("add-tunnel-log-level").value = "";
+  document.getElementById("add-tunnel-log-retention").value = "";
   var modal = document.querySelector('#tunnel-add-modal');
   if (modal) modal.classList.add('is-visible');
 }
@@ -916,6 +964,8 @@ async function openEditTunnelModal(name) {
     document.getElementById("edit-tunnel-name").value = name;
     document.getElementById("edit-tunnel-password").value = "";
     document.getElementById("edit-tunnel-servers").value = (t.servers || []).join(",");
+    document.getElementById("edit-tunnel-log-level").value = (t.logLevel !== undefined && t.logLevel !== null) ? t.logLevel : "";
+    document.getElementById("edit-tunnel-log-retention").value = (t.logRetentionHours !== undefined && t.logRetentionHours !== null) ? t.logRetentionHours : "";
     var modal = document.querySelector('#tunnel-edit-modal');
     if (modal) modal.classList.add('is-visible');
   } catch (e) {
@@ -932,8 +982,15 @@ async function confirmAddTunnel() {
   var serversRaw = document.getElementById("add-tunnel-servers").value.trim();
   if (!name) { if (msg) msg.textContent = "隧道名必填"; return; }
   var servers = serversRaw ? serversRaw.split(",").map(function(s){return s.trim();}).filter(function(s){return s;}) : [];
+  
+  var payload = { password: password || undefined, servers: servers };
+  var logLevel = document.getElementById("add-tunnel-log-level").value;
+  if (logLevel !== "") payload.logLevel = parseInt(logLevel, 10);
+  var logRetention = document.getElementById("add-tunnel-log-retention").value;
+  if (logRetention !== "") payload.logRetentionHours = parseInt(logRetention, 10);
+
   try {
-    var res = await authFetch(tunnelsUrl, { method: "POST", headers: buildAuthHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ name: name, tunnel: { password: password || undefined, servers: servers } }) });
+    var res = await authFetch(tunnelsUrl, { method: "POST", headers: buildAuthHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ name: name, tunnel: payload }) });
     var text = await res.text();
     if (!res.ok) throw new Error(text);
     if (msg) msg.textContent = "新增成功";
@@ -953,8 +1010,15 @@ async function confirmEditTunnel() {
   var serversRaw = document.getElementById("edit-tunnel-servers").value.trim();
   if (!name) { if (msg) msg.textContent = "隧道名必填"; return; }
   var servers = serversRaw ? serversRaw.split(",").map(function(s){return s.trim();}).filter(function(s){return s;}) : [];
+  
+  var payload = { password: password && password.length > 0 ? password : undefined, servers: servers };
+  var logLevel = document.getElementById("edit-tunnel-log-level").value;
+  if (logLevel !== "") payload.logLevel = parseInt(logLevel, 10);
+  var logRetention = document.getElementById("edit-tunnel-log-retention").value;
+  if (logRetention !== "") payload.logRetentionHours = parseInt(logRetention, 10);
+
   try {
-    var res = await authFetch(tunnelsUrl, { method: "POST", headers: buildAuthHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ name: name, tunnel: { password: password && password.length > 0 ? password : undefined, servers: servers } }) });
+    var res = await authFetch(tunnelsUrl, { method: "POST", headers: buildAuthHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ name: name, tunnel: payload }) });
     var text = await res.text();
     if (!res.ok) throw new Error(text);
     if (msg) msg.textContent = "更新成功";
@@ -1068,6 +1132,8 @@ function openAddServerModal() {
   document.getElementById("add-server-rawtcp").checked = false;
   document.getElementById("add-server-public").checked = true;  // default true
   document.getElementById("add-server-panel").checked = false;
+  document.getElementById("add-server-log-level").value = "";
+  document.getElementById("add-server-log-retention").value = "";
   populateFirewallSelectors();
   var modal = document.querySelector('#server-add-modal');
   if (modal) modal.classList.add('is-visible');
@@ -1093,6 +1159,8 @@ function openEditServerModal(name) {
       document.getElementById("edit-server-rawtcp").checked = s.rawTCP || false;
       document.getElementById("edit-server-public").checked = (s.public !== undefined ? s.public : true);  // default true
       document.getElementById("edit-server-panel").checked = s.panel || false;
+      document.getElementById("edit-server-log-level").value = (s.logLevel !== undefined && s.logLevel !== null) ? s.logLevel : "";
+      document.getElementById("edit-server-log-retention").value = (s.logRetentionHours !== undefined && s.logRetentionHours !== null) ? s.logRetentionHours : "";
       
       var modal = document.querySelector('#server-edit-modal');
       if (modal) modal.classList.add('is-visible');
@@ -1151,6 +1219,14 @@ async function confirmAddServer() {
   };
   if (cert) payload.cert = cert;
   if (firewall) payload.firewall = firewall;
+  payload.rawTCP = document.getElementById("add-server-rawtcp").checked;
+  payload.public = document.getElementById("add-server-public").checked;
+  payload.panel = document.getElementById("add-server-panel").checked;
+  
+  var logLevel = document.getElementById("add-server-log-level").value;
+  if (logLevel !== "") payload.logLevel = parseInt(logLevel, 10);
+  var logRetention = document.getElementById("add-server-log-retention").value;
+  if (logRetention !== "") payload.logRetentionHours = parseInt(logRetention, 10);
   
   try {
     var res = await authFetch(serversUrl, {
@@ -1185,6 +1261,14 @@ async function confirmEditServer() {
   };
   if (cert) payload.cert = cert;
   if (firewall) payload.firewall = firewall;
+  payload.rawTCP = document.getElementById("edit-server-rawtcp").checked;
+  payload.public = document.getElementById("edit-server-public").checked;
+  payload.panel = document.getElementById("edit-server-panel").checked;
+  
+  var logLevel = document.getElementById("edit-server-log-level").value;
+  if (logLevel !== "") payload.logLevel = parseInt(logLevel, 10);
+  var logRetention = document.getElementById("edit-server-log-retention").value;
+  if (logRetention !== "") payload.logRetentionHours = parseInt(logRetention, 10);
   
   try {
     var res = await authFetch(serversUrl, {
@@ -1257,6 +1341,8 @@ function openAddRuleModal() {
   if (addTo) addTo.value = "";
   if (addServers) addServers.value = "";
   if (addVia) addVia.value = "";
+  document.getElementById("add-rule-log-level").value = "";
+  document.getElementById("add-rule-log-retention").value = "";
   
   var modal = document.querySelector('#rule-add-modal');
   if (modal) modal.classList.add('is-visible');
@@ -1293,6 +1379,8 @@ function openEditRuleModal(index) {
         servers = Array.isArray(rule.servers) ? rule.servers.join(', ') : rule.servers;
       }
       document.getElementById("edit-rule-servers").value = servers;
+      document.getElementById("edit-rule-log-level").value = (rule.logLevel !== undefined && rule.logLevel !== null) ? rule.logLevel : "";
+      document.getElementById("edit-rule-log-retention").value = (rule.logRetentionHours !== undefined && rule.logRetentionHours !== null) ? rule.logRetentionHours : "";
       
       var modal = document.querySelector('#rule-edit-modal');
       if (modal) modal.classList.add('is-visible');
@@ -1401,6 +1489,11 @@ async function confirmAddRule() {
     }
   }
   
+  var logLevel = document.getElementById("add-rule-log-level").value;
+  if (logLevel !== "") rule.logLevel = parseInt(logLevel, 10);
+  var logRetention = document.getElementById("add-rule-log-retention").value;
+  if (logRetention !== "") rule.logRetentionHours = parseInt(logRetention, 10);
+
   try {
     var res = await authFetch(rulesUrl, {
       method: 'POST',
@@ -1452,6 +1545,11 @@ async function confirmEditRule() {
     }
   }
   
+  var logLevel = document.getElementById("edit-rule-log-level").value;
+  if (logLevel !== "") rule.logLevel = parseInt(logLevel, 10);
+  var logRetention = document.getElementById("edit-rule-log-retention").value;
+  if (logRetention !== "") rule.logRetentionHours = parseInt(logRetention, 10);
+
   try {
     // 删除旧规则
     var delRes = await authFetch(rulesUrl + '?index=' + index, {
@@ -1547,6 +1645,8 @@ function openAddFirewallModal() {
   if (nameEl) nameEl.value = '';
   if (allowEl) allowEl.value = '';
   if (blockEl) blockEl.value = '';
+  document.getElementById("add-firewall-log-level").value = "";
+  document.getElementById("add-firewall-log-retention").value = "";
   
   modal.classList.add('is-visible');
 }
@@ -1571,6 +1671,8 @@ function openEditFirewallModal(name) {
       if (nameEl) nameEl.value = name;
       if (allowEl) allowEl.value = parseFirewallRules(fw.allow).join('\n');
       if (blockEl) blockEl.value = parseFirewallRules(fw.block).join('\n');
+      document.getElementById("edit-firewall-log-level").value = (fw.logLevel !== undefined && fw.logLevel !== null) ? fw.logLevel : "";
+      document.getElementById("edit-firewall-log-retention").value = (fw.logRetentionHours !== undefined && fw.logRetentionHours !== null) ? fw.logRetentionHours : "";
       
       modal.classList.add('is-visible');
     })
@@ -1598,6 +1700,77 @@ async function deleteFirewall(name) {
     showNotification('error', '删除失败', e.message || e);
   }
 }
+
+async function confirmAddFirewall() {
+  var msg = document.getElementById("firewalls-msg");
+  if (msg) msg.textContent = "";
+  var name = document.getElementById("add-firewall-name").value.trim();
+  var allowRaw = document.getElementById("add-firewall-allow").value.trim();
+  var blockRaw = document.getElementById("add-firewall-block").value.trim();
+  
+  if (!name) { if (msg) msg.textContent = "名称必填"; return; }
+  
+  var allow = allowRaw ? allowRaw.split("\n").map(function(s){return s.trim();}).filter(Boolean) : [];
+  var block = blockRaw ? blockRaw.split("\n").map(function(s){return s.trim();}).filter(Boolean) : [];
+  
+  var firewall = { allow: allow, block: block };
+  var logLevel = document.getElementById("add-firewall-log-level").value;
+  if (logLevel !== "") firewall.logLevel = parseInt(logLevel, 10);
+  var logRetention = document.getElementById("add-firewall-log-retention").value;
+  if (logRetention !== "") firewall.logRetentionHours = parseInt(logRetention, 10);
+
+  try {
+    var res = await authFetch(firewallsUrl, { 
+      method: "POST", 
+      headers: buildAuthHeaders({ "Content-Type": "application/json" }), 
+      body: JSON.stringify({ name: name, firewall: firewall }) 
+    });
+    var text = await res.text();
+    if (!res.ok) throw new Error(text);
+    if (msg) msg.textContent = "新增成功";
+    var modal = document.querySelector('#firewall-add-modal');
+    if (modal) modal.classList.remove('is-visible');
+    loadFirewalls();
+  } catch (e) {
+    if (msg) msg.textContent = "新增失败: " + (e.message || e);
+  }
+}
+
+async function confirmEditFirewall() {
+  var msg = document.getElementById("firewalls-msg");
+  if (msg) msg.textContent = "";
+  var name = document.getElementById("edit-firewall-name").value.trim();
+  var allowRaw = document.getElementById("edit-firewall-allow").value.trim();
+  var blockRaw = document.getElementById("edit-firewall-block").value.trim();
+  
+  if (!name) { if (msg) msg.textContent = "名称必填"; return; }
+  
+  var allow = allowRaw ? allowRaw.split("\n").map(function(s){return s.trim();}).filter(Boolean) : [];
+  var block = blockRaw ? blockRaw.split("\n").map(function(s){return s.trim();}).filter(Boolean) : [];
+  
+  var firewall = { allow: allow, block: block };
+  var logLevel = document.getElementById("edit-firewall-log-level").value;
+  if (logLevel !== "") firewall.logLevel = parseInt(logLevel, 10);
+  var logRetention = document.getElementById("edit-firewall-log-retention").value;
+  if (logRetention !== "") firewall.logRetentionHours = parseInt(logRetention, 10);
+
+  try {
+    var res = await authFetch(firewallsUrl, { 
+      method: "POST", 
+      headers: buildAuthHeaders({ "Content-Type": "application/json" }), 
+      body: JSON.stringify({ name: name, firewall: firewall }) 
+    });
+    var text = await res.text();
+    if (!res.ok) throw new Error(text);
+    if (msg) msg.textContent = "更新成功";
+    var modal = document.querySelector('#firewall-edit-modal');
+    if (modal) modal.classList.remove('is-visible');
+    loadFirewalls();
+  } catch (e) {
+    if (msg) msg.textContent = "更新失败: " + (e.message || e);
+  }
+}
+
 
 
 // 填充防火墙下拉框
@@ -1675,6 +1848,122 @@ window.loadRules = loadRules;
 window.loadFirewalls = loadFirewalls;
 window.loadTunnelEndpoints = loadTunnelEndpoints;
 
+// ===== 日志 =====
+var currentLogPage = 1;
+var logPageSize = 20;
+
+async function loadLogs() {
+  var msg = document.getElementById("logs-msg");
+  if (msg) msg.textContent = "加载中...";
+  
+  var params = new URLSearchParams();
+  params.append("page", currentLogPage);
+  params.append("pageSize", logPageSize);
+  
+  // Filters
+  var startTime = document.getElementById("logs-start-time").value;
+  if(startTime) params.append("startTime", new Date(startTime).toISOString());
+  
+  var endTime = document.getElementById("logs-end-time").value;
+  if(endTime) params.append("endTime", new Date(endTime).toISOString());
+  
+  var protocols = document.getElementById("logs-protocols").value.trim();
+  if(protocols) params.append("protocols", protocols);
+  
+  var servers = document.getElementById("logs-servers").value.trim();
+  if(servers) params.append("servers", servers);
+  
+  var tunnels = document.getElementById("logs-tunnels").value.trim();
+  if(tunnels) params.append("tunnels", tunnels);
+  
+  var proxies = document.getElementById("logs-proxies").value.trim();
+  if(proxies) params.append("proxies", proxies);
+  
+  var users = document.getElementById("logs-users").value.trim();
+  if(users) params.append("users", users);
+  
+  var firewalls = document.getElementById("logs-firewalls").value.trim();
+  if(firewalls) params.append("firewalls", firewalls);
+
+  try {
+    var res = await authFetch(logsUrl + "?" + params.toString(), { headers: buildAuthHeaders({}) });
+    if (!res.ok) throw new Error(await res.text());
+    var data = await res.json();
+    
+    var tbody = document.getElementById("logs-tbody");
+    if (tbody) tbody.innerHTML = "";
+    
+    (data.logs || []).forEach(function(log) {
+      var tr = document.createElement("tr");
+      var details = [];
+      if(log.serverName) details.push("S:" + log.serverName);
+      if(log.tunnelName) details.push("T:" + log.tunnelName);
+      if(log.proxyName) details.push("P:" + log.proxyName);
+      if(log.firewallName) details.push("FW:" + log.firewallName);
+      if(log.userGroup) details.push("G:" + log.userGroup);
+      
+      var urlStr = log.url || log.destination || "-";
+      if(urlStr.length > 50) urlStr = urlStr.substring(0, 47) + "...";
+      
+      tr.innerHTML = ` + "`" + `
+        <td><input type="checkbox" class="log-checkbox" value="${log.id}"></td>
+        <td>${new Date(log.timestamp).toLocaleString()}</td>
+        <td>${log.protocol}</td>
+        <td>${log.method || "-"}</td>
+        <td title="${log.url || log.destination}">${urlStr}</td>
+        <td>${log.statusCode || "-"}</td>
+        <td>${log.durationMs}</td>
+        <td>${fmtBytes(log.requestSize)} / ${fmtBytes(log.responseSize)}</td>
+        <td>${log.clientIP}</td>
+        <td>${log.userName || "-"}</td>
+        <td title="${details.join(', ')}">${details.length > 0 ? "查看" : "-"}</td>
+      ` + "`" + `;
+      tbody.appendChild(tr);
+    });
+    
+    document.getElementById("logs-pagination-info").textContent = "Page " + data.page + " / Total " + Math.ceil(data.total / data.size);
+    if(msg) msg.textContent = "日志已加载 (总数: " + data.total + ")";
+    
+    // Reset select all checkbox
+    var selectAll = document.getElementById("logs-select-all");
+    if(selectAll) selectAll.checked = false;
+    
+  } catch (e) {
+    if (msg) msg.textContent = "加载失败: " + (e.message || e);
+  }
+}
+
+async function deleteSelectedLogs() {
+  var ids = [];
+  document.querySelectorAll(".log-checkbox:checked").forEach(function(cb) {
+    ids.push(parseInt(cb.value));
+  });
+  
+  if (ids.length === 0) {
+    alert("请先选择要删除的日志");
+    return;
+  }
+  
+  if (!confirm("确定要删除选中的 " + ids.length + " 条日志吗?")) return;
+  
+  try {
+    var res = await authFetch(logsUrl, { 
+      method: "DELETE", 
+      headers: buildAuthHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ ids: ids })
+    });
+    if (!res.ok) throw new Error(await res.text());
+    
+    showNotification('success', '删除成功', ids.length + ' 条日志已删除');
+    loadLogs();
+  } catch (e) {
+    showNotification('error', '删除失败', e.message || e);
+  }
+}
+
+window.loadLogs = loadLogs;
+window.deleteSelectedLogs = deleteSelectedLogs;
+
 // 设置高级面板切换逻辑
 function setupAdvancedPanelToggles() {
   // Add modal toggles
@@ -1751,6 +2040,21 @@ function setupAdvancedPanelToggles() {
 
   on("btn-firewalls-load", "click", loadFirewalls);
   on("btn-firewalls-add", "click", openAddFirewallModal);
+  on("confirm-add-firewall", "click", confirmAddFirewall);
+  on("confirm-edit-firewall", "click", confirmEditFirewall);
+
+  // Logs events
+  on("btn-logs-search", "click", function() { currentLogPage = 1; loadLogs(); });
+  on("btn-logs-prev", "click", function() { if(currentLogPage > 1) { currentLogPage--; loadLogs(); } });
+  on("btn-logs-next", "click", function() { currentLogPage++; loadLogs(); });
+  on("btn-logs-delete", "click", deleteSelectedLogs);
+  var logSelectAll = document.getElementById("logs-select-all");
+  if(logSelectAll) {
+    logSelectAll.addEventListener("change", function() {
+      var checked = this.checked;
+      document.querySelectorAll(".log-checkbox").forEach(function(cb) { cb.checked = checked; });
+    });
+  }
   
   // 初始加载一次
     refreshStats();
@@ -1877,8 +2181,8 @@ function setupAdvancedPanelToggles() {
       }]);
       
       renderAreaChart('chart-traffic', [
-        { group: '接收', data: snapshots.map(s => ({ date: new Date(s.timestamp * 1000), value: (s.bytesRecv / (1024 * 1024)).toFixed(2) })) },
-        { group: '发送', data: snapshots.map(s => ({ date: new Date(s.timestamp * 1000), value: (s.bytesSent / (1024 * 1024)).toFixed(2) })) }
+        { group: '接收流量', data: snapshots.map(s => ({ date: new Date(s.timestamp * 1000), value: (s.bytesRecv / (1024 * 1024)).toFixed(2) })) },
+        { group: '发送流量', data: snapshots.map(s => ({ date: new Date(s.timestamp * 1000), value: (s.bytesSent / (1024 * 1024)).toFixed(2) })) }
       ]);
       
       renderLineChart('chart-connections', [{

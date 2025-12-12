@@ -24,13 +24,13 @@ import (
 
 // ServerManager manages the lifecycle of multiple HTTP servers.
 type ServerManager struct {
-	servers       map[string]*http.Server
-	tcpServers    map[string]*RawTCPServer  // Raw TCP servers
-	muxes         map[string]*ConnectionMux // Connection multiplexers
-	mu            sync.Mutex
-	wg            sync.WaitGroup
-	config        *Config
-	configFile    string
+	servers    map[string]*http.Server
+	tcpServers map[string]*RawTCPServer  // Raw TCP servers
+	muxes      map[string]*ConnectionMux // Connection multiplexers
+	mu         sync.Mutex
+	wg         sync.WaitGroup
+	config     *Config
+	configFile string
 	// dataStore     *DataStore // Removed, replaced by statsDB for persistence
 	harManager    *HarLoggerManager
 	tunnelManager TunnelManagerInterface
@@ -40,9 +40,10 @@ type ServerManager struct {
 	staticCache   *StaticCacheManager
 	replayManager *ReplayManager
 	statsDB       *StatsDB
+	loggingDB     *LoggingDB
 }
 
-func NewServerManager(config *Config, configFile string, harManager *HarLoggerManager, tunnelManager TunnelManagerInterface, scriptRunner *ScriptRunner, trafficShaper *TrafficShaper, stats *StatsCollector, staticCache *StaticCacheManager, replayManager *ReplayManager, statsDB *StatsDB) *ServerManager {
+func NewServerManager(config *Config, configFile string, harManager *HarLoggerManager, tunnelManager TunnelManagerInterface, scriptRunner *ScriptRunner, trafficShaper *TrafficShaper, stats *StatsCollector, staticCache *StaticCacheManager, replayManager *ReplayManager, statsDB *StatsDB, loggingDB *LoggingDB) *ServerManager {
 	return &ServerManager{
 		servers:       make(map[string]*http.Server),
 		tcpServers:    make(map[string]*RawTCPServer),
@@ -57,6 +58,7 @@ func NewServerManager(config *Config, configFile string, harManager *HarLoggerMa
 		staticCache:   staticCache,
 		replayManager: replayManager,
 		statsDB:       statsDB,
+		loggingDB:     loggingDB,
 	}
 }
 
@@ -105,7 +107,7 @@ func (sm *ServerManager) Start(name string, serverConfig *ListenConfig, isACMEEn
 	// Check if this is a rawTCP server
 	if serverConfig.RawTCP {
 		tcpServer := NewRawTCPServer(name, serverConfig, sm.config, serverMappings[name],
-			sm.tunnelManager, sm.trafficShaper, sm.stats)
+			sm.tunnelManager, sm.trafficShaper, sm.stats, sm.loggingDB)
 		if err := tcpServer.Start(); err != nil {
 			log.Printf("Failed to start TCP server '%s': %v", name, err)
 			return
@@ -116,7 +118,7 @@ func (sm *ServerManager) Start(name string, serverConfig *ListenConfig, isACMEEn
 	}
 
 	// HTTP server
-	handler := createServerHandler(name, serverMappings[name], serverConfig, sm.config, sm.configFile, sm.harManager, sm.tunnelManager, sm.scriptRunner, sm.trafficShaper, sm.stats, sm.staticCache, sm.replayManager, isACMEEnabled, sm.statsDB)
+	handler := createServerHandler(name, serverMappings[name], serverConfig, sm.config, sm.configFile, sm.harManager, sm.tunnelManager, sm.scriptRunner, sm.trafficShaper, sm.stats, sm.staticCache, sm.replayManager, isACMEEnabled, sm.statsDB, sm.loggingDB)
 	server, mux := startServer(name, serverConfig, handler, sm.tunnelManager)
 	if server != nil {
 		sm.servers[name] = server
@@ -275,6 +277,13 @@ func main() {
 	}
 	defer statsDB.Close()
 
+	// Initialize LoggingDB
+	loggingDB, err := NewLoggingDB("logging.db")
+	if err != nil {
+		log.Fatalf("Failed to initialize logging db: %v", err)
+	}
+	defer loggingDB.Close()
+
 	// Load initial quota usage from DB
 	initialQuotaUsage, err := statsDB.LoadAllQuotaUsage()
 	if err != nil {
@@ -298,7 +307,7 @@ func main() {
 	tunnelManager.SetStatsCollector(statsCollector)
 	replayManager := NewReplayManager(config)
 
-	serverManager := NewServerManager(config, *configFile, harManager, tunnelManager, scriptRunner, trafficShaper, statsCollector, staticCache, replayManager, statsDB)
+	serverManager := NewServerManager(config, *configFile, harManager, tunnelManager, scriptRunner, trafficShaper, statsCollector, staticCache, replayManager, statsDB, loggingDB)
 
 	watcher, err := NewConfigWatcher(*configFile, config, serverManager)
 	if err != nil {
@@ -312,6 +321,7 @@ func main() {
 	// Start quota persistence (now saving to DB)
 	startQuotaPersistence(trafficShaper, statsDB)
 	startStatsCollection(statsCollector, statsDB)
+	startLogCleanup(config, loggingDB)
 
 	log.Println("===========================================")
 	log.Printf("Loaded %d mapping rules:", len(config.Mappings))
@@ -384,9 +394,9 @@ func (sm *ServerManager) StartAll() {
 	}
 }
 
-func createServerHandler(serverName string, mappings []*Mapping, serverConfig *ListenConfig, config *Config, configFile string, harManager *HarLoggerManager, tunnelManager TunnelManagerInterface, scriptRunner *ScriptRunner, trafficShaper *TrafficShaper, stats *StatsCollector, staticCache *StaticCacheManager, replayManager *ReplayManager, isACMEEnabled bool, statsDB *StatsDB) http.Handler {
+func createServerHandler(serverName string, mappings []*Mapping, serverConfig *ListenConfig, config *Config, configFile string, harManager *HarLoggerManager, tunnelManager TunnelManagerInterface, scriptRunner *ScriptRunner, trafficShaper *TrafficShaper, stats *StatsCollector, staticCache *StaticCacheManager, replayManager *ReplayManager, isACMEEnabled bool, statsDB *StatsDB, loggingDB *LoggingDB) http.Handler {
 	mux := http.NewServeMux()
-	proxy := NewMapRemoteProxy(config, harManager, tunnelManager, scriptRunner, trafficShaper, stats, staticCache, serverName)
+	proxy := NewMapRemoteProxy(config, harManager, tunnelManager, scriptRunner, trafficShaper, stats, staticCache, loggingDB, serverName)
 
 	// 如果 cert 是 auto，注册证书下载处理器
 	if certStr, ok := serverConfig.Cert.(string); ok && certStr == "auto" {
@@ -403,7 +413,7 @@ func createServerHandler(serverName string, mappings []*Mapping, serverConfig *L
 		mux.HandleFunc("/.api/stats", stats.ServeHTTP)
 
 		// 注册管理面板处理器
-		adminHandlers := NewAdminHandlers(config, configFile, stats, statsDB)
+		adminHandlers := NewAdminHandlers(config, configFile, stats, statsDB, loggingDB)
 		// 设置tunnel管理器引用，用于查询endpoint状态
 		adminHandlers.SetTunnelManager(tunnelManager)
 		adminHandlers.RegisterHandlers(mux)
@@ -640,4 +650,22 @@ func extractDimensionStats(m *Metrics) *DimensionStats {
 		RawTCPBytesSent: atomic.LoadUint64(&m.RawTCPBytesSent),
 		RawTCPBytesRecv: atomic.LoadUint64(&m.RawTCPBytesRecv),
 	}
+}
+
+// startLogCleanup starts a goroutine that periodically cleans up old logs
+func startLogCleanup(config *Config, loggingDB *LoggingDB) {
+	ticker := time.NewTicker(1 * time.Hour)
+	go func() {
+		for range ticker.C {
+			// Get maximum retention hours from all dimensions
+			// This ensures we don't delete logs that should still be retained
+			retentionHours := getMaxRetentionHours(config)
+
+			if err := loggingDB.CleanupOldLogs(retentionHours); err != nil {
+				log.Printf("[LOGGING] Error cleaning up old logs: %v", err)
+			} else {
+				DebugLog("[LOGGING] Cleanup completed, retention=%d hours", retentionHours)
+			}
+		}
+	}()
 }

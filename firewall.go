@@ -10,8 +10,10 @@ import (
 
 // FirewallRule defines a firewall rule with allow and block lists
 type FirewallRule struct {
-	Allow []string `json:"allow,omitempty"` // Whitelist - if set, only these IPs can access
-	Block []string `json:"block,omitempty"` // Blacklist - if set, these IPs are denied
+	Allow             []string `json:"allow,omitempty"`             // Whitelist - if set, only these IPs can access
+	Block             []string `json:"block,omitempty"`             // Blacklist - if set, these IPs are denied
+	LogLevel          *int     `json:"logLevel,omitempty"`          // 日志等级: 0=不记录, 1=基本请求, 2=完整请求
+	LogRetentionHours *int     `json:"logRetentionHours,omitempty"` // 日志保留时长(小时)
 
 	// Parsed internal structures for efficient matching
 	allowRules []*ipRule

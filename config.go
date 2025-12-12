@@ -30,18 +30,20 @@ func init() {
 }
 
 type Config struct {
-	Debug       *bool                    `json:"debug,omitempty"` // Debug模式开关
-	Servers     map[string]*ListenConfig `json:"servers"`
-	Proxies     map[string]*ProxyConfig  `json:"proxies,omitempty"`
-	Tunnels     map[string]*TunnelConfig `json:"tunnels,omitempty"`
-	Auth        *AuthConfig              `json:"auth,omitempty"`
-	P12s        map[string]*P12Config    `json:"p12s,omitempty"`
-	Scripting   *ScriptingConfig         `json:"scripting,omitempty"`
-	StaticCache *StaticCacheConfig       `json:"static_cache,omitempty"` // 静态文件缓存配置
-	Firewalls   map[string]*FirewallRule `json:"firewalls,omitempty"`    // 防火墙规则组配置
-	Mappings    []Mapping                `json:"mappings"`
-	Version     int64                    `json:"version,omitempty"` // 配置版本号，用于并发编辑检测
-	mu          sync.RWMutex
+	Debug             *bool                    `json:"debug,omitempty"`             // Debug模式开关
+	LogLevel          *int                     `json:"logLevel,omitempty"`          // 日志等级: 0=不记录, 1=基本请求, 2=完整请求(含body和header)
+	LogRetentionHours *int                     `json:"logRetentionHours,omitempty"` // 日志保留时长(小时)，默认24小时
+	Servers           map[string]*ListenConfig `json:"servers"`
+	Proxies           map[string]*ProxyConfig  `json:"proxies,omitempty"`
+	Tunnels           map[string]*TunnelConfig `json:"tunnels,omitempty"`
+	Auth              *AuthConfig              `json:"auth,omitempty"`
+	P12s              map[string]*P12Config    `json:"p12s,omitempty"`
+	Scripting         *ScriptingConfig         `json:"scripting,omitempty"`
+	StaticCache       *StaticCacheConfig       `json:"static_cache,omitempty"` // 静态文件缓存配置
+	Firewalls         map[string]*FirewallRule `json:"firewalls,omitempty"`    // 防火墙规则组配置
+	Mappings          []Mapping                `json:"mappings"`
+	Version           int64                    `json:"version,omitempty"` // 配置版本号，用于并发编辑检测
+	mu                sync.RWMutex
 }
 
 // StaticCacheConfig 静态文件缓存配置
@@ -97,7 +99,9 @@ type DimensionStats struct {
 }
 
 type ProxyConfig struct {
-	URLs []string `json:"urls"`
+	URLs              []string `json:"urls"`
+	LogLevel          *int     `json:"logLevel,omitempty"`          // 日志等级: 0=不记录, 1=基本请求, 2=完整请求
+	LogRetentionHours *int     `json:"logRetentionHours,omitempty"` // 日志保留时长(小时)
 	ConnectionPolicies
 	TrafficPolicies
 }
@@ -128,9 +132,11 @@ func (pc *ProxyConfig) UnmarshalJSON(data []byte) error {
 }
 
 type TunnelConfig struct {
-	Servers  []string  `json:"servers"`
-	Password string    `json:"password,omitempty"` // AES key for encryption
-	Auth     *RuleAuth `json:"auth,omitempty"`
+	Servers           []string  `json:"servers"`
+	Password          string    `json:"password,omitempty"` // AES key for encryption
+	Auth              *RuleAuth `json:"auth,omitempty"`
+	LogLevel          *int      `json:"logLevel,omitempty"`          // 日志等级: 0=不记录, 1=基本请求, 2=完整请求
+	LogRetentionHours *int      `json:"logRetentionHours,omitempty"` // 日志保留时长(小时)
 	TrafficPolicies
 }
 
@@ -165,22 +171,26 @@ type TrafficPolicies struct {
 }
 
 type User struct {
-	Password string      `json:"password"`
-	Admin    bool        `json:"admin,omitempty"`
-	Token    string      `json:"token,omitempty"`
-	Groups   []string    `json:"groups,omitempty"`
-	Dump     string      `json:"dump,omitempty"`
-	Endpoint interface{} `json:"endpoint,omitempty"` // string or []string
-	Tunnel   interface{} `json:"tunnel,omitempty"`   // string or []string
+	Password          string      `json:"password"`
+	Admin             bool        `json:"admin,omitempty"`
+	Token             string      `json:"token,omitempty"`
+	Groups            []string    `json:"groups,omitempty"`
+	Dump              string      `json:"dump,omitempty"`
+	LogLevel          *int        `json:"logLevel,omitempty"`          // 日志等级: 0=不记录, 1=基本请求, 2=完整请求
+	LogRetentionHours *int        `json:"logRetentionHours,omitempty"` // 日志保留时长(小时)
+	Endpoint          interface{} `json:"endpoint,omitempty"`          // string or []string
+	Tunnel            interface{} `json:"tunnel,omitempty"`            // string or []string
 	ConnectionPolicies
 	TrafficPolicies
 }
 
 type Group struct {
-	Users    []string    `json:"users,omitempty"`
-	Dump     string      `json:"dump,omitempty"`
-	Endpoint interface{} `json:"endpoint,omitempty"` // string or []string
-	Tunnel   interface{} `json:"tunnel,omitempty"`   // string or []string
+	Users             []string    `json:"users,omitempty"`
+	Dump              string      `json:"dump,omitempty"`
+	LogLevel          *int        `json:"logLevel,omitempty"`          // 日志等级: 0=不记录, 1=基本请求, 2=完整请求
+	LogRetentionHours *int        `json:"logRetentionHours,omitempty"` // 日志保留时长(小时)
+	Endpoint          interface{} `json:"endpoint,omitempty"`          // string or []string
+	Tunnel            interface{} `json:"tunnel,omitempty"`            // string or []string
 	ConnectionPolicies
 	TrafficPolicies
 }
@@ -393,15 +403,17 @@ type ViaConfig struct {
 }
 
 type Mapping struct {
-	From     interface{} `json:"from"` // 可以是字符串或 EndpointConfig 对象
-	To       interface{} `json:"to"`   // 可以是字符串或 EndpointConfig 对象
-	Via      *ViaConfig  `json:"via,omitempty"`
-	Servers  interface{} `json:"servers,omitempty"` // string or []string
-	Cc       []string    `json:"cc,omitempty"`
-	P12      string      `json:"p12,omitempty"` // 引用 p12s 的 key
-	Auth     *RuleAuth   `json:"auth,omitempty"`
-	Dump     string      `json:"dump,omitempty"`
-	Firewall string      `json:"firewall,omitempty"` // 引用 firewalls 的 key
+	From              interface{} `json:"from"` // 可以是字符串或 EndpointConfig 对象
+	To                interface{} `json:"to"`   // 可以是字符串或 EndpointConfig 对象
+	Via               *ViaConfig  `json:"via,omitempty"`
+	Servers           interface{} `json:"servers,omitempty"` // string or []string
+	Cc                []string    `json:"cc,omitempty"`
+	P12               string      `json:"p12,omitempty"` // 引用 p12s 的 key
+	Auth              *RuleAuth   `json:"auth,omitempty"`
+	Dump              string      `json:"dump,omitempty"`
+	LogLevel          *int        `json:"logLevel,omitempty"`          // 日志等级: 0=不记录, 1=基本请求, 2=完整请求
+	LogRetentionHours *int        `json:"logRetentionHours,omitempty"` // 日志保留时长(小时)
+	Firewall          string      `json:"firewall,omitempty"`          // 引用 firewalls 的 key
 	ConnectionPolicies
 	TrafficPolicies
 
@@ -421,17 +433,19 @@ type RuleAuth struct {
 }
 
 type ListenConfig struct {
-	Port      int         `json:"port"`
-	RawTCP    bool        `json:"rawTCP,omitempty"` // true: raw TCP forwarding mode, false: HTTP mode (default)
-	Cert      interface{} `json:"cert,omitempty"`   // string ("auto") or CertFiles
-	Key       string      `json:"key,omitempty"`
-	Auth      *ServerAuth `json:"auth,omitempty"`
-	Dump      string      `json:"dump,omitempty"`
-	Endpoints interface{} `json:"endpoints,omitempty"` // string or []string
-	Tunnels   interface{} `json:"tunnels,omitempty"`   // string or []string
-	Public    *bool       `json:"public,omitempty"`    // true: 0.0.0.0:port, false: 127.0.0.1:port (default true)
-	Panel     *bool       `json:"panel,omitempty"`     // true: register /.api & /.admin, false: do not (default false)
-	Firewall  string      `json:"firewall,omitempty"`  // 引用 firewalls 的 key
+	Port              int         `json:"port"`
+	RawTCP            bool        `json:"rawTCP,omitempty"` // true: raw TCP forwarding mode, false: HTTP mode (default)
+	Cert              interface{} `json:"cert,omitempty"`   // string ("auto") or CertFiles
+	Key               string      `json:"key,omitempty"`
+	Auth              *ServerAuth `json:"auth,omitempty"`
+	Dump              string      `json:"dump,omitempty"`
+	LogLevel          *int        `json:"logLevel,omitempty"`          // 日志等级: 0=不记录, 1=基本请求, 2=完整请求
+	LogRetentionHours *int        `json:"logRetentionHours,omitempty"` // 日志保留时长(小时)
+	Endpoints         interface{} `json:"endpoints,omitempty"`         // string or []string
+	Tunnels           interface{} `json:"tunnels,omitempty"`           // string or []string
+	Public            *bool       `json:"public,omitempty"`            // true: 0.0.0.0:port, false: 127.0.0.1:port (default true)
+	Panel             *bool       `json:"panel,omitempty"`             // true: register /.api & /.admin, false: do not (default false)
+	Firewall          string      `json:"firewall,omitempty"`          // 引用 firewalls 的 key
 	ConnectionPolicies
 	TrafficPolicies
 }

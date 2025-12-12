@@ -37,13 +37,26 @@
       "public": true
     }
   },
+  "proxies": {
+    "test": {
+      "urls": [
+        "http://user:pass@localhost:3322",
+        "socks5://user:pass@localhost:3312",
+        "https://localhost:8080"
+      ]
+    }
+  },
   "tunnels": {
     "dev": {
-      "servers": ["default"],
+      "servers": [
+        "default"
+      ],
       "password": "test"
     },
     "sucdri": {
-      "servers": ["default"],
+      "servers": [
+        "default"
+      ],
       "password": "sucdri"
     }
   },
@@ -59,9 +72,6 @@
     "enabled": true
   },
   "firewalls": {
-    "internal_only": {
-      "allow": ["127.0.0.1", "192.168.0.0/16", "10.0.0.0/8", "172.16.0.0/12"]
-    },
     "block_bad_actors": {
       "block": [
         "111.32.1.0/24",
@@ -70,17 +80,28 @@
         "192.111.231.111-192.111.232.11"
       ]
     },
-    "office_access": {
-      "allow": ["203.0.113.0/24", "198.51.100.50-60"]
+    "internal_only": {
+      "allow": [
+        "127.0.0.1",
+        "192.168.0.0/16",
+        "10.0.0.0/8",
+        "172.16.0.0/12"
+      ]
     }
   },
   "mappings": [
     {
-      "from": ["http://a.l-l.cn/*", "https://a.l-l.cn/*"],
+      "from": [
+        "http://a.l-l.cn/*",
+        "https://a.l-l.cn/*"
+      ],
       "to": "http://ip.sb/*"
     },
     {
-      "from": ["http://shkc.p-q.co/*", "https://shkc.p-q.co/*"],
+      "from": [
+        "http://shkc.p-q.co/*",
+        "https://shkc.p-q.co/*"
+      ],
       "to": "http://127.0.0.1:7788/*"
     },
     {
@@ -91,7 +112,9 @@
       "to": "http://127.0.0.1:8080/*"
     },
     {
-      "from": ["https://bt.jy.sucdri.p-q.co/*"],
+      "from": [
+        "https://bt.jy.sucdri.p-q.co/*"
+      ],
       "to": "http://127.0.0.1:13682/*"
     },
     {
@@ -109,13 +132,6 @@
       }
     },
     {
-      "from": "tcp://0.0.0.0:2222",
-      "to": "tcp://10.6.10.58:22",
-      "via": {
-        "endpoints": "cjy_server"
-      }
-    },
-    {
       "from": "tcp://0.0.0.0:3690",
       "to": "tcp://10.1.105.222:3389",
       "via": {
@@ -123,7 +139,9 @@
       }
     },
     {
-      "from": ["https://vps.sucdri.p-q.co/*"],
+      "from": [
+        "https://vps.sucdri.p-q.co/*"
+      ],
       "to": {
         "insecure": true,
         "url": "https://10.1.105.33/*"
@@ -140,7 +158,9 @@
       }
     },
     {
-      "from": ["https://test.jy.sucdri.p-q.co/*"],
+      "from": [
+        "https://test.jy.sucdri.p-q.co/*"
+      ],
       "to": "https://bt.jy.sucdri.p-q.co/*",
       "via": {
         "endpoints": "my_pc"
@@ -190,5 +210,6 @@
         "endpoints": "sucdri"
       }
     }
-  ]
+  ],
+  "version": 3
 }

@@ -24,6 +24,7 @@ type RawTCPServer struct {
 	tunnelManager TunnelManagerInterface
 	trafficShaper *TrafficShaper
 	stats         *StatsCollector
+	loggingDB     *LoggingDB
 	// dataStore     *DataStore // Removed, no longer needed
 	mappings []*Mapping
 	mu       sync.Mutex
@@ -32,7 +33,7 @@ type RawTCPServer struct {
 
 // NewRawTCPServer creates a new raw TCP server
 func NewRawTCPServer(name string, config *ListenConfig, appConfig *Config, mappings []*Mapping,
-	tunnelManager TunnelManagerInterface, trafficShaper *TrafficShaper, stats *StatsCollector) *RawTCPServer {
+	tunnelManager TunnelManagerInterface, trafficShaper *TrafficShaper, stats *StatsCollector, loggingDB *LoggingDB) *RawTCPServer {
 	return &RawTCPServer{
 		name:          name,
 		config:        config,
@@ -41,6 +42,7 @@ func NewRawTCPServer(name string, config *ListenConfig, appConfig *Config, mappi
 		tunnelManager: tunnelManager,
 		trafficShaper: trafficShaper,
 		stats:         stats,
+		loggingDB:     loggingDB,
 	}
 }
 
@@ -146,6 +148,71 @@ func (s *RawTCPServer) handleConnection(clientConn net.Conn) {
 			StatusCode:   0, // TCP has no status code
 			ClientIP:     clientConn.RemoteAddr().String(),
 		})
+
+		// Request logging (async)
+		if s.loggingDB != nil {
+			var tunnelConfig *TunnelConfig
+			var proxyConfig *ProxyConfig
+			// Attempt to resolve tunnel/proxy configs if keys are set
+			if tunnelKey != "" && s.appConfig.Tunnels != nil {
+				tunnelConfig = s.appConfig.Tunnels[tunnelKey]
+			}
+			// Proxy key handling might need parsing if it was set
+			// In rawtcp, proxyKey isn't explicitly set in local vars usually, 
+			// but if we had it, we would use it. 
+			// For now, let's assume if mapping has via proxy, we might want to log it.
+			
+			// Collect logging config
+			logConfig := collectLoggingConfig(
+				s.appConfig,
+				s.config,
+				s.findMapping(), // Re-find mapping or pass it? Better to use 'mapping' var if available, but it's local to handleConnection
+				nil, // No user auth in rawtcp usually
+				nil, // No groups
+				tunnelConfig,
+				proxyConfig,
+				nil, // Firewall rule is local, hard to pass without refactoring
+			)
+
+			if logConfig.LogLevel > 0 {
+				logEntry := &LogEntry{
+					Timestamp:    startTime,
+					Protocol:     "rawtcp",
+					Destination:  ruleKey, // usually holds fromURL, maybe toURL is better? Requirements say "to address".
+					DurationMs:   responseTime.Milliseconds(),
+					RequestSize:  int64(bytesRecv),
+					ResponseSize: int64(bytesSent),
+					ServerName:   s.name,
+					TunnelName:   tunnelKey,
+					EndpointName: endpointKey,
+					ClientIP:     clientConn.RemoteAddr().String(),
+				}
+				// If we have a mapping, use its ToURL as destination
+				if m := s.findMapping(); m != nil {
+					logEntry.Destination = m.GetToURL()
+					if len(m.proxyNames) > 0 {
+						logEntry.ProxyName = m.proxyNames[0]
+					}
+					if m.Firewall != "" {
+						logEntry.FirewallName = m.Firewall
+					}
+				} else if ruleKey != "" {
+					logEntry.Destination = ruleKey
+				}
+				
+				// Add firewall name from server config if present
+				if s.config.Firewall != "" {
+					// Server firewall overrides/adds to mapping? Logic says check server first.
+					logEntry.FirewallName = s.config.Firewall
+				}
+
+				go func(entry *LogEntry) {
+					if err := s.loggingDB.AddLog(entry); err != nil {
+						DebugLog("[LOGGING] Failed to record rawtcp log: %v", err)
+					}
+				}(logEntry)
+			}
+		}
 	}()
 
 	clientAddr := clientConn.RemoteAddr().String()

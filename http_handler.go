@@ -92,15 +92,19 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Prepare variables for stats recording
 	var (
-		bytesSent   uint64
-		bytesRecv   uint64
-		isError     bool
-		ruleKey     string
-		userKey     string
-		tunnelKey   string
-		endpointKey string // Format: "tunnelName:endpointName"
-		proxyKey    string
-		statusCode  int // HTTP status code
+		bytesSent    uint64
+		bytesRecv    uint64
+		isError      bool
+		ruleKey      string
+		userKey      string
+		tunnelKey    string
+		endpointKey  string // Format: "tunnelName:endpointName"
+		proxyKey     string
+		statusCode   int // HTTP status code
+		serverConfig *ListenConfig
+		mapping      *Mapping
+		user         *User
+		firewallRule *FirewallRule
 	)
 
 	// Defer the consolidated stats recording
@@ -123,6 +127,109 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 			StatusCode:   statusCode,
 			ClientIP:     getClientIP(r),
 		})
+
+		// Request logging (async, non-blocking)
+		if p.loggingDB != nil {
+			// Collect all matched configuration dimensions
+			var matchedGroups []*Group
+			if user != nil && p.config.Auth != nil && p.config.Auth.Groups != nil {
+				for _, groupName := range user.Groups {
+					if group, ok := p.config.Auth.Groups[groupName]; ok {
+						matchedGroups = append(matchedGroups, group)
+					}
+				}
+			}
+
+			// Get tunnel and proxy configs if matched
+			var tunnelConfig *TunnelConfig
+			var proxyConfig *ProxyConfig
+			if tunnelKey != "" && p.config.Tunnels != nil {
+				// tunnelKey might be just the tunnel name or "tunnelName:endpointName"
+				parts := strings.Split(tunnelKey, ":")
+				if len(parts) > 0 {
+					if tc, ok := p.config.Tunnels[parts[0]]; ok {
+						tunnelConfig = tc
+					}
+				}
+			}
+			if proxyKey != "" && p.config.Proxies != nil {
+				if pc, ok := p.config.Proxies[proxyKey]; ok {
+					proxyConfig = pc
+				}
+			}
+
+			// Collect logging configuration
+			logConfig := collectLoggingConfig(
+				p.config,
+				serverConfig,
+				mapping,
+				user,
+				matchedGroups,
+				tunnelConfig,
+				proxyConfig,
+				firewallRule,
+			)
+
+			// Only log if LogLevel > 0
+			if logConfig.LogLevel > 0 {
+				// Capture variables for closure
+				logProto := getScheme(r)
+				logURL := p.buildOriginalURL(r)
+				logMethod := r.Method
+				logStatus := statusCode
+				logDuration := responseTime.Milliseconds()
+				logClientIP := getClientIP(r)
+
+				logHeaders := ""
+				if logConfig.LogLevel >= 2 {
+					logHeaders = HeadersToJSON(r.Header)
+				}
+
+				go func() {
+					entry := &LogEntry{
+						Timestamp:    startTime,
+						Protocol:     logProto,
+						URL:          logURL,
+						Method:       logMethod,
+						StatusCode:   logStatus,
+						DurationMs:   logDuration,
+						RequestSize:  int64(bytesRecv),
+						ResponseSize: int64(bytesSent),
+						ServerName:   p.serverName,
+						TunnelName:   tunnelKey,
+						ProxyName:    proxyKey,
+						EndpointName: endpointKey,
+						UserName:     userKey,
+						ClientIP:     logClientIP,
+					}
+
+					// Populate UserGroup
+					if user != nil && len(user.Groups) > 0 {
+						entry.UserGroup = strings.Join(user.Groups, ",")
+					}
+
+					// Populate FirewallName
+					if firewallRule != nil {
+						// We don't have the name directly in the rule struct usually, but we have the keys from config
+						if serverConfig != nil && serverConfig.Firewall != "" {
+							entry.FirewallName = serverConfig.Firewall
+						} else if mapping != nil && mapping.Firewall != "" {
+							entry.FirewallName = mapping.Firewall
+						}
+					}
+
+					// Add headers if level 2
+					if logHeaders != "" {
+						entry.RequestHeaders = logHeaders
+					}
+
+					// Write to database
+					if err := p.loggingDB.AddLog(entry); err != nil {
+						DebugLog("[LOGGING] Failed to record log entry: %v", err)
+					}
+				}()
+			}
+		}
 	}()
 
 	// Check if it's a gRPC or WebSocket request
@@ -181,7 +288,7 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	originalURL := p.buildOriginalURL(r)
 
 	// 获取server配置
-	serverConfig := p.config.Servers[p.serverName]
+	serverConfig = p.config.Servers[p.serverName]
 
 	// 检查server级别的Endpoints/Tunnels配置
 	var serverEndpointNames, serverTunnelNames []string
@@ -190,6 +297,7 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		serverTunnelNames = parseStringOrArray(serverConfig.Tunnels)
 	}
 
+	var username string
 	authorized, user, username := p.checkAuth(r, mapping)
 	if !authorized {
 		isError = true
@@ -206,7 +314,6 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Check firewall rules (server firewall takes priority over mapping firewall)
-	var firewallRule *FirewallRule
 	if serverConfig != nil && serverConfig.Firewall != "" {
 		firewallRule = GetFirewallRule(p.config, serverConfig.Firewall)
 		if firewallRule != nil {

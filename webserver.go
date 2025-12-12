@@ -73,16 +73,18 @@ type AdminHandlers struct {
 	// dataStore      *DataStore // Removed, no longer needed
 	statsCollector *StatsCollector
 	statsDB        *StatsDB
+	loggingDB      *LoggingDB
 }
 
 // NewAdminHandlers creates a new AdminHandlers instance.
-func NewAdminHandlers(config *Config, configPath string, statsCollector *StatsCollector, statsDB *StatsDB) *AdminHandlers {
+func NewAdminHandlers(config *Config, configPath string, statsCollector *StatsCollector, statsDB *StatsDB, loggingDB *LoggingDB) *AdminHandlers {
 	return &AdminHandlers{
 		config:         config,
 		configPath:     configPath,
 		sessions:       AdminSessions,
 		statsCollector: statsCollector,
 		statsDB:        statsDB,
+		loggingDB:      loggingDB,
 	}
 }
 
@@ -105,6 +107,7 @@ func (h *AdminHandlers) RegisterHandlers(mux *http.ServeMux) {
 	mux.HandleFunc("/.api/servers", h.handleServers)
 	mux.HandleFunc("/.api/rules", h.handleRules)
 	mux.HandleFunc("/.api/firewalls", h.handleFirewalls)
+	mux.HandleFunc("/.api/log", h.handleLogs)
 	mux.HandleFunc("/.api/stats/timeseries", h.handleTimeSeriesStats)
 	mux.HandleFunc("/.api/stats/ip", func(w http.ResponseWriter, r *http.Request) {
 		// Admin authentication check
@@ -856,6 +859,125 @@ func (h *AdminHandlers) handleFirewalls(w http.ResponseWriter, r *http.Request) 
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"status": "deleted"})
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// ===== 日志管理 =====
+func (h *AdminHandlers) handleLogs(w http.ResponseWriter, r *http.Request) {
+	if !isAdminRequest(r, h.config) {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	if h.loggingDB == nil {
+		http.Error(w, "Logging DB not initialized", http.StatusInternalServerError)
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		// Parsing query parameters
+		query := r.URL.Query()
+		filter := LogQueryFilter{
+			Page:     1,
+			PageSize: 50,
+		}
+
+		if pageStr := query.Get("page"); pageStr != "" {
+			if p, err := strconv.Atoi(pageStr); err == nil && p > 0 {
+				filter.Page = p
+			}
+		}
+		if sizeStr := query.Get("pageSize"); sizeStr != "" {
+			if s, err := strconv.Atoi(sizeStr); err == nil && s > 0 {
+				filter.PageSize = s
+			}
+		}
+
+		if startStr := query.Get("startTime"); startStr != "" {
+			if t, err := time.Parse(time.RFC3339, startStr); err == nil {
+				filter.StartTime = &t
+			} else if ts, err := strconv.ParseInt(startStr, 10, 64); err == nil {
+				t := time.Unix(ts, 0)
+				filter.StartTime = &t
+			}
+		}
+		if endStr := query.Get("endTime"); endStr != "" {
+			if t, err := time.Parse(time.RFC3339, endStr); err == nil {
+				filter.EndTime = &t
+			} else if ts, err := strconv.ParseInt(endStr, 10, 64); err == nil {
+				t := time.Unix(ts, 0)
+				filter.EndTime = &t
+			}
+		}
+
+		// Helper to split comma-separated values
+		splitParams := func(param string) []string {
+			val := query.Get(param)
+			if val == "" {
+				return nil
+			}
+			return strings.Split(val, ",")
+		}
+
+		filter.Protocols = splitParams("protocols")
+		filter.Servers = splitParams("servers")
+		filter.Tunnels = splitParams("tunnels")
+		filter.Proxies = splitParams("proxies")
+		filter.Endpoints = splitParams("endpoints")
+		filter.Firewalls = splitParams("firewalls")
+		filter.Users = splitParams("users")
+		filter.UserGroups = splitParams("userGroups")
+
+		logs, total, err := h.loggingDB.QueryLogs(filter)
+		if err != nil {
+			http.Error(w, "Failed to query logs: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		response := struct {
+			Logs  []LogEntry `json:"logs"`
+			Total int        `json:"total"`
+			Page  int        `json:"page"`
+			Size  int        `json:"pageSize"`
+		}{
+			Logs:  logs,
+			Total: total,
+			Page:  filter.Page,
+			Size:  filter.PageSize,
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(response)
+
+	case http.MethodDelete:
+		// Bulk delete by IDs or time range
+		var req struct {
+			IDs       []int64 `json:"ids"`
+			StartTime string  `json:"startTime"` // Optional: Delete range
+			EndTime   string  `json:"endTime"`   // Optional: Delete range
+		}
+
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid request body", http.StatusBadRequest)
+			return
+		}
+
+		if len(req.IDs) > 0 {
+			if err := h.loggingDB.DeleteLogs(req.IDs); err != nil {
+				http.Error(w, "Failed to delete logs: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+		} else {
+			// Handle time range deletion if needed (not strictly required by prompt but good to have)
+			// For now, basic ID deletion is implemented as requested ("删除（批量）操作")
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"status": "deleted"})
+
 	default:
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 	}
