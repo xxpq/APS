@@ -212,35 +212,58 @@ var admin_page_js = `
       }
     });
 
-    document.getElementById("btn-logout").addEventListener("click", async () => {
-      try {
-        const headers = {};
-        const tokenInput = document.getElementById("api-token").value.trim();
-        const token = tokenInput || authToken;
-        if (token) headers["Authorization"] = "Bearer " + token;
+    // Header auth link click handler - login or logout based on state
+    function handleAuthLinkClick(e) {
+      var isLoggedIn = getCookie("aps-logged-in") === "true";
+      if (isLoggedIn) {
+        e.preventDefault();
+        // Perform logout
+        (async function() {
+          try {
+            var headers = {};
+            var tokenInput = document.getElementById("api-token").value.trim();
+            var token = tokenInput || authToken;
+            if (token) headers["Authorization"] = "Bearer " + token;
 
-        const res = await authFetch(logoutUrl, { method: "POST", headers });
-        if (!res.ok) {
-          const text = await res.text();
-          throw new Error("退出失败: " + text);
-        }
-        authToken = "";
-        document.getElementById("api-token").value = "";
-        // 删除登录状态cookie
-        deleteCookie("aps-auth-token");
-        deleteCookie("aps-logged-in");
-        setAuthStatus(false);
-        showNotification('success', '退出成功', '已退出登录');
-      } catch (err) {
-        showNotification('error', '退出失败', err.message || err);
+            var res = await authFetch(logoutUrl, { method: "POST", headers: headers });
+            if (!res.ok) {
+              var text = await res.text();
+              throw new Error("退出失败: " + text);
+            }
+            authToken = "";
+            document.getElementById("api-token").value = "";
+            deleteCookie("aps-auth-token");
+            deleteCookie("aps-logged-in");
+            setAuthStatus(false);
+            showNotification('success', '退出成功', '已退出登录');
+            switchTab('tab-auth');
+          } catch (err) {
+            showNotification('error', '退出失败', err.message || err);
+          }
+        })();
+      } else {
+        e.preventDefault();
+        switchTab('tab-auth');
+        closeSidebar();
       }
+    }
+
+    // Attach to header auth links
+    document.querySelectorAll('.header-auth-link, .mobile-nav-item[data-tab="tab-auth"]').forEach(function(link) {
+      link.addEventListener('click', handleAuthLinkClick);
     });
 
     function setAuthStatus(isAuthed) {
-      const el = document.getElementById("auth-status");
-      el.textContent = isAuthed ? "已登录" : "未登录";
-      el.style.background = isAuthed ? "#a7f0ba" : "#e0e0e0";
-      el.style.color = isAuthed ? "#0e6027" : "#161616";
+      // Update header auth link text and color
+      document.querySelectorAll('.header-auth-link, .mobile-nav-item[data-tab="tab-auth"]').forEach(function(link) {
+        if (isAuthed) {
+          link.textContent = "退出登录";
+          link.style.color = "#da1e28"; // Red color for logout
+        } else {
+          link.textContent = "用户登录";
+          link.style.color = ""; // Reset to default
+        }
+      });
       
       // 控制需要登录才能访问的菜单项显示/隐藏
       document.querySelectorAll(".auth-required").forEach(function(item) {

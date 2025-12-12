@@ -33,11 +33,11 @@ var admin_page_content = `
     <a class="mobile-nav-item auth-required" href="#" data-tab="tab-endpoints">节点</a>
     <a class="mobile-nav-item auth-required" href="#" data-tab="tab-firewalls">安全</a>
     <a class="mobile-nav-item auth-required" href="#" data-tab="tab-auth-providers">认证</a>
-    <a class="mobile-nav-item auth-required" href="#" data-tab="tab-logs">日志</a>
-    <a class="mobile-nav-item auth-required" href="#" data-tab="tab-act">动态</a>
     <a class="mobile-nav-item auth-required" href="#" data-tab="tab-proxies">代理</a>
     <a class="mobile-nav-item auth-required" href="#" data-tab="tab-users">用户</a>
     <a class="mobile-nav-item auth-required" href="#" data-tab="tab-config">配置</a>
+    <a class="mobile-nav-item auth-required" href="#" data-tab="tab-logs">日志</a>
+    <a class="mobile-nav-item auth-required" href="#" data-tab="tab-act">动态</a>
     <a class="mobile-nav-item" href="#" data-tab="tab-auth" style="margin-top: auto; border-top: 2px solid #525252;">登录/退出</a>
   </div>
   
@@ -53,11 +53,11 @@ var admin_page_content = `
         <li class="auth-required"><a class="bx--header__menu-item" href="#" data-tab="tab-endpoints">节点</a></li>
         <li class="auth-required"><a class="bx--header__menu-item" href="#" data-tab="tab-firewalls">安全</a></li>
         <li class="auth-required"><a class="bx--header__menu-item" href="#" data-tab="tab-auth-providers">认证</a></li>
-        <li class="auth-required"><a class="bx--header__menu-item" href="#" data-tab="tab-logs">日志</a></li>
-        <li class="auth-required"><a class="bx--header__menu-item" href="#" data-tab="tab-act">动态</a></li>
         <li class="auth-required"><a class="bx--header__menu-item" href="#" data-tab="tab-proxies">代理</a></li>
         <li class="auth-required"><a class="bx--header__menu-item" href="#" data-tab="tab-users">用户</a></li>
         <li class="auth-required"><a class="bx--header__menu-item" href="#" data-tab="tab-config">配置</a></li>
+        <li class="auth-required"><a class="bx--header__menu-item" href="#" data-tab="tab-logs">日志</a></li>
+        <li class="auth-required"><a class="bx--header__menu-item" href="#" data-tab="tab-act">动态</a></li>
       </ul>
     </nav>
     <a class="header-auth-link" href="#" data-tab="tab-auth">登录/退出</a>
@@ -65,12 +65,6 @@ var admin_page_content = `
 
   <main class="container">
     <div class="header">
-      <h2>APS 管理面板</h2>
-      <div class="status-line">
-        <span id="auth-status" class="pill">未登录</span>
-        <span class="pill">刷新频率: 10s</span>
-        <span class="pill"><a href="/.ssl" target="_blank" style="text-decoration:none;color:inherit;">证书安装</a></span>
-      </div>
     </div>
 
     <!-- 统计面板 -->
@@ -201,7 +195,6 @@ var admin_page_content = `
         </div>
         <div class="flex mt-2">
           <button id="btn-login" class="bx--btn bx--btn--primary">登录</button>
-          <button id="btn-logout" class="bx--btn bx--btn--danger--tertiary">退出登录</button>
         </div>
 
         <div class="mt-2">
