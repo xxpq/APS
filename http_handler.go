@@ -238,9 +238,9 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 静态文件缓存检查
+	// 静态文件缓存检查 (仅限GET请求)
 	fullURL := p.buildOriginalURL(r)
-	if p.staticCache != nil && p.staticCache.IsCacheable(r.URL.Path) {
+	if r.Method == http.MethodGet && p.staticCache != nil && p.staticCache.IsCacheable(r.URL.Path) {
 		if cachedEntry, ok := p.staticCache.Get(fullURL); ok {
 			// 缓存命中，直接返回缓存内容（包含原始响应头）
 			for key, values := range cachedEntry.Headers {
@@ -287,6 +287,47 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	targetURL, matched, mapping, matchedFromURL := p.mapRequest(r)
 	originalURL := p.buildOriginalURL(r)
 
+	// Check third-party authentication if configured
+	authUrl, authLevel := p.resolveAuthConfig(mapping)
+	if matched && mapping != nil && authUrl != "" {
+		if authorized, info := p.checkThirdPartyAuth(r, authUrl); !authorized {
+			isError = true
+			http.Error(w, "Unauthorized (Third-party)", http.StatusUnauthorized)
+			return
+		} else {
+			// Extract token again for header manipulation
+			token := p.extractToken(r)
+
+			// Level 0: Remove token
+			if authLevel == 0 {
+				r.Header.Del("Authorization")
+			}
+
+			// Level 1: Pass token (already in request if Authorization header was used)
+			if authLevel == 1 {
+				if r.Header.Get("Authorization") == "" && token != "" {
+					r.Header.Set("Authorization", "Bearer "+token)
+				}
+			}
+
+			// Level 2: Pass user info
+			if authLevel == 2 {
+				r.Header.Set("APS-AUTH-INFO", info)
+				if r.Header.Get("Authorization") != "" {
+					r.Header.Del("Authorization")
+				}
+			}
+
+			// Level 3: Pass both
+			if authLevel == 3 {
+				if r.Header.Get("Authorization") == "" && token != "" {
+					r.Header.Set("Authorization", "Bearer "+token)
+				}
+				r.Header.Set("APS-AUTH-INFO", info)
+			}
+		}
+	}
+
 	// 获取server配置
 	serverConfig = p.config.Servers[p.serverName]
 
@@ -298,19 +339,23 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var username string
-	authorized, user, username := p.checkAuth(r, mapping)
-	if !authorized {
-		isError = true
-		if r.Method == http.MethodConnect || r.Header.Get("Proxy-Authorization") == "" {
-			w.Header().Set("Proxy-Authenticate", `Basic realm="Restricted"`)
-			http.Error(w, "Proxy authentication required", http.StatusProxyAuthRequired)
-		} else {
-			http.Error(w, "Forbidden by rule", http.StatusForbidden)
+	// Skip internal auth if third-party auth is configured
+	if authUrl == "" {
+		var authorized bool
+		authorized, user, username = p.checkAuth(r, mapping)
+		if !authorized {
+			isError = true
+			if r.Method == http.MethodConnect || r.Header.Get("Proxy-Authorization") == "" {
+				w.Header().Set("Proxy-Authenticate", `Basic realm="Restricted"`)
+				http.Error(w, "Proxy authentication required", http.StatusProxyAuthRequired)
+			} else {
+				http.Error(w, "Forbidden by rule", http.StatusForbidden)
+			}
+			return
 		}
-		return
-	}
-	if user != nil {
-		userKey = username
+		if user != nil {
+			userKey = username
+		}
 	}
 
 	// Check firewall rules (server firewall takes priority over mapping firewall)
@@ -500,7 +545,7 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 			log.Printf("Error modifying request body: %v", err)
 			return
 		}
-		requestBody = bytes.NewBuffer(modifiedBody)
+		requestBody = bytes.NewReader(modifiedBody)
 	}
 
 	// 处理IPS参数：如果mapping配置了ips，则随机选择一个IP并替换目标地址
@@ -924,8 +969,8 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	bytesSent = counterWriter.BytesWritten
 
-	// 静态文件缓存保存 - 仅缓存成功的200响应
-	if p.staticCache != nil && p.staticCache.IsCacheable(r.URL.Path) && resp.StatusCode == http.StatusOK {
+	// 静态文件缓存保存 - 仅缓存成功的200响应且为GET请求
+	if r.Method == http.MethodGet && p.staticCache != nil && p.staticCache.IsCacheable(r.URL.Path) && resp.StatusCode == http.StatusOK {
 		cacheURL := p.buildOriginalURL(r)
 		// 确保缓存的是解压后的明文内容
 		cacheBody := body
@@ -936,8 +981,11 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 				log.Printf("[CACHE] Decoded %s content before caching: %d -> %d bytes", encoding, len(body), len(cacheBody))
 			}
 		}
-		if err := p.staticCache.Set(cacheURL, resp.Header, resp.StatusCode, cacheBody); err != nil {
-			log.Printf("[CACHE] Error saving cache for %s: %v", cacheURL, err)
+		
+		if len(cacheBody) > 0 {
+			if err := p.staticCache.Set(cacheURL, resp.Header, resp.StatusCode, cacheBody); err != nil {
+				log.Printf("[CACHE] Error saving cache for %s: %v", cacheURL, err)
+			}
 		}
 	}
 
@@ -1174,3 +1222,125 @@ func (p *MapRemoteProxy) createClientWithP12(p12Path, password string, policies 
 		},
 	}, nil
 }
+
+// resolveAuthConfig resolves the auth URL and level from mapping or referenced provider
+func (p *MapRemoteProxy) resolveAuthConfig(mapping *Mapping) (string, int) {
+	if mapping == nil || mapping.Auth == nil {
+		return "", 0
+	}
+
+	var authUrl string
+	var authLevel int
+
+	// 1. Check referenced AuthProvider
+	if mapping.Auth.AuthProvider != "" && p.config.AuthProviders != nil {
+		if provider, ok := p.config.AuthProviders[mapping.Auth.AuthProvider]; ok {
+			authUrl = provider.URL
+			authLevel = provider.Level
+		}
+	}
+
+	// 2. Check inline AuthUrl (overrides or standalone)
+	// If AuthUrl is set, it takes precedence or acts as standalone if no provider
+	if mapping.Auth.AuthUrl != "" {
+		authUrl = mapping.Auth.AuthUrl
+		if mapping.Auth.AuthLevel != nil {
+			authLevel = *mapping.Auth.AuthLevel
+		}
+	}
+
+	return authUrl, authLevel
+}
+
+// extractToken extracts the token from Authorization header, Cookie, or Query String
+func (p *MapRemoteProxy) extractToken(r *http.Request) string {
+	// 1. Authorization Header
+	authHeader := r.Header.Get("Authorization")
+	if authHeader != "" {
+		parts := strings.SplitN(authHeader, " ", 2)
+		if len(parts) == 2 && strings.EqualFold(parts[0], "Bearer") {
+			return parts[1]
+		}
+		return authHeader
+	}
+
+	// 2. Cookie
+	if cookie, err := r.Cookie("token"); err == nil {
+		return cookie.Value
+	}
+
+	// 3. Query String
+	if token := r.URL.Query().Get("token"); token != "" {
+		return token
+	}
+
+	return ""
+}
+
+// checkThirdPartyAuth performs third-party authentication
+// Returns (authorized, info)
+func (p *MapRemoteProxy) checkThirdPartyAuth(r *http.Request, authUrl string) (bool, string) {
+	token := p.extractToken(r)
+	if token == "" {
+		log.Printf("[AUTH] No token found in request")
+		return false, ""
+	}
+
+	authCache := GetAuthCache()
+	cacheKey := authCache.GenerateCacheKey(token, r.Method, r.Host, r.URL.Path)
+
+	// Check cache
+	if body, found := authCache.Get(cacheKey); found {
+		log.Printf("[AUTH] Cache HIT for token %s", maskToken(token))
+		return true, body
+	}
+
+	// Build Auth Request URL
+	// Assume AuthUrl is a base URL.
+	authBase := authUrl
+	if strings.HasSuffix(authBase, "*") {
+		authBase = strings.TrimSuffix(authBase, "*")
+	}
+	if strings.HasSuffix(authBase, "/") {
+		authBase = strings.TrimSuffix(authBase, "/")
+	}
+	
+	targetAuthURL := authBase + r.URL.Path
+	if r.URL.RawQuery != "" {
+		targetAuthURL += "?" + r.URL.RawQuery
+	}
+
+	authReq, err := http.NewRequest("GET", targetAuthURL, nil)
+	if err != nil {
+		log.Printf("[AUTH] Failed to create auth request: %v", err)
+		return false, ""
+	}
+
+	// Forward token
+	authReq.Header.Set("Authorization", "Bearer "+token)
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(authReq)
+	if err != nil {
+		log.Printf("[AUTH] Auth request failed: %v", err)
+		return false, ""
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusOK {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		bodyStr := string(bodyBytes)
+		if bodyStr == "" {
+			bodyStr = "1"
+		}
+		
+		// Cache result asynchronously
+		go authCache.Set(cacheKey, bodyStr, 1*time.Hour)
+		
+		return true, bodyStr
+	}
+
+	log.Printf("[AUTH] Auth failed with status %d", resp.StatusCode)
+	return false, ""
+}
+

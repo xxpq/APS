@@ -26,8 +26,17 @@ func (p *MapRemoteProxy) handleConnectWithIntercept(w http.ResponseWriter, r *ht
 		log.Printf("[CONNECT] Intercepting HTTPS for mapping: %s", r.Host)
 		p.handleConnectWithMITM(w, r)
 	} else {
+		// For non-intercepted CONNECT, we must enforce server-level auth here
+		// because we won't see the inner requests.
+		authorized, user, username := p.checkAuth(r, nil)
+		if !authorized {
+			w.Header().Set("Proxy-Authenticate", `Basic realm="Restricted"`)
+			http.Error(w, "Proxy authentication required", http.StatusProxyAuthRequired)
+			return
+		}
+
 		log.Printf("[CONNECT] Tunneling without intercept: %s", r.Host)
-		p.handleConnectTunnel(w, r, host)
+		p.handleConnectTunnel(w, r, host, user, username)
 	}
 }
 
@@ -100,20 +109,14 @@ func (p *MapRemoteProxy) handleConnectWithMITM(w http.ResponseWriter, r *http.Re
 	}
 }
 
-func (p *MapRemoteProxy) handleConnectTunnel(w http.ResponseWriter, r *http.Request, destHost string) {
+func (p *MapRemoteProxy) handleConnectTunnel(w http.ResponseWriter, r *http.Request, destHost string, user *User, username string) {
 	startTime := time.Now()
 	p.stats.IncTotalRequests()
 	p.stats.IncActiveConnections()
 	defer p.stats.DecActiveConnections()
 
 	var isError bool
-	var userKey string
-
-	// Auth and policy resolution for CONNECT should happen before tunneling
-	_, user, username := p.checkAuth(r, nil) // No specific mapping for pure CONNECT
-	if user != nil {
-		userKey = username
-	}
+	var userKey = username
 
 	serverConfig := p.config.Servers[p.serverName]
 	// For a simple tunnel, we don't have a mapping or tunnel context

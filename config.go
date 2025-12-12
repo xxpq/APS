@@ -36,14 +36,21 @@ type Config struct {
 	Servers           map[string]*ListenConfig `json:"servers"`
 	Proxies           map[string]*ProxyConfig  `json:"proxies,omitempty"`
 	Tunnels           map[string]*TunnelConfig `json:"tunnels,omitempty"`
-	Auth              *AuthConfig              `json:"auth,omitempty"`
-	P12s              map[string]*P12Config    `json:"p12s,omitempty"`
-	Scripting         *ScriptingConfig         `json:"scripting,omitempty"`
-	StaticCache       *StaticCacheConfig       `json:"static_cache,omitempty"` // 静态文件缓存配置
-	Firewalls         map[string]*FirewallRule `json:"firewalls,omitempty"`    // 防火墙规则组配置
-	Mappings          []Mapping                `json:"mappings"`
-	Version           int64                    `json:"version,omitempty"` // 配置版本号，用于并发编辑检测
+	Auth              *AuthConfig                         `json:"auth,omitempty"`
+	AuthProviders     map[string]*AuthProviderConfig      `json:"authProviders,omitempty"` // 第三方认证提供商配置
+	P12s              map[string]*P12Config               `json:"p12s,omitempty"`
+	Scripting         *ScriptingConfig                    `json:"scripting,omitempty"`
+	StaticCache       *StaticCacheConfig                  `json:"static_cache,omitempty"` // 静态文件缓存配置
+	Firewalls         map[string]*FirewallRule            `json:"firewalls,omitempty"`    // 防火墙规则组配置
+	Mappings          []Mapping                           `json:"mappings"`
+	Version           int64                               `json:"version,omitempty"` // 配置版本号，用于并发编辑检测
 	mu                sync.RWMutex
+}
+
+// AuthProviderConfig 第三方认证配置
+type AuthProviderConfig struct {
+	URL   string `json:"url"`
+	Level int    `json:"level"`
 }
 
 // StaticCacheConfig 静态文件缓存配置
@@ -428,8 +435,11 @@ type Mapping struct {
 }
 
 type RuleAuth struct {
-	Users  []string `json:"users,omitempty"`
-	Groups []string `json:"groups,omitempty"`
+	Users        []string `json:"users,omitempty"`
+	Groups       []string `json:"groups,omitempty"`
+	AuthProvider string   `json:"authProvider,omitempty"` // 引用 authProviders 的 key
+	AuthUrl      string   `json:"authUrl,omitempty"`      // 第三方认证URL (内联)
+	AuthLevel    *int     `json:"authLevel,omitempty"`    // 认证等级: 0=不传, 1=只传token, 2=只传info, 3=token+info
 }
 
 type ListenConfig struct {

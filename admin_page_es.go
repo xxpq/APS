@@ -99,8 +99,10 @@ var admin_page_js = `
         else if (tabId === "tab-rules" && typeof loadRules === "function") {
           loadRules();
           if (typeof populateFirewallSelectors === "function") populateFirewallSelectors();
+          if (typeof populateAuthProviderSelectors === "function") populateAuthProviderSelectors();
         }
         else if (tabId === "tab-firewalls" && typeof loadFirewalls === "function") loadFirewalls();
+        else if (tabId === "tab-auth-providers" && typeof loadAuthProviders === "function") loadAuthProviders();
         else if (tabId === "tab-logs" && typeof loadLogs === "function") loadLogs();
         else if (tabId === "tab-config" && typeof loadConfig === "function") loadConfig();
       }, 100);
@@ -422,6 +424,7 @@ var tunnelsUrl = "/.api/tunnels";
 var serversUrl = "/.api/servers";
 var rulesUrl = "/.api/rules";
 var firewallsUrl = "/.api/firewalls";
+var authProvidersUrl = "/.api/auth_providers";
 var logsUrl = "/.api/log";
 
 
@@ -1341,6 +1344,7 @@ function openAddRuleModal() {
   if (addTo) addTo.value = "";
   if (addServers) addServers.value = "";
   if (addVia) addVia.value = "";
+  document.getElementById("add-rule-auth-provider").value = "";
   document.getElementById("add-rule-log-level").value = "";
   document.getElementById("add-rule-log-retention").value = "";
   
@@ -1372,6 +1376,13 @@ function openEditRuleModal(index) {
       } else {
         document.getElementById("edit-rule-via-endpoints").value = "";
       }
+      
+      // 填充authProvider
+      var authProvider = "";
+      if (rule.auth && rule.auth.authProvider) {
+        authProvider = rule.auth.authProvider;
+      }
+      document.getElementById("edit-rule-auth-provider").value = authProvider;
       
       // 填充servers
       var servers = '';
@@ -1478,6 +1489,12 @@ async function confirmAddRule() {
     rule.via = { endpoints: viaEndpoints };
   }
   
+  var authProvider = document.getElementById("add-rule-auth-provider").value;
+  if (authProvider) {
+    if (!rule.auth) rule.auth = {};
+    rule.auth.authProvider = authProvider;
+  }
+  
   // Servers
   var serversStr = document.getElementById('add-rule-servers').value.trim();
   if (serversStr) {
@@ -1532,6 +1549,12 @@ async function confirmEditRule() {
   var viaEndpoints = document.getElementById('edit-rule-via-endpoints').value.trim();
   if (viaEndpoints) {
     rule.via = { endpoints: viaEndpoints };
+  }
+  
+  var authProvider = document.getElementById("edit-rule-auth-provider").value;
+  if (authProvider) {
+    if (!rule.auth) rule.auth = {};
+    rule.auth.authProvider = authProvider;
   }
   
   // Servers
@@ -1771,7 +1794,144 @@ async function confirmEditFirewall() {
   }
 }
 
+// ===== 认证提供商 =====
+function initAuthProviderModals() {
+  var addModal = document.querySelector('#auth-provider-add-modal');
+  var editModal = document.querySelector('#auth-provider-edit-modal');
+  if (addModal) {
+    addModal.querySelectorAll('[data-modal-close]').forEach(function(btn) {
+      btn.addEventListener('click', function() { addModal.classList.remove('is-visible'); });
+    });
+  }
+  if (editModal) {
+    editModal.querySelectorAll('[data-modal-close]').forEach(function(btn) {
+      btn.addEventListener('click', function() { editModal.classList.remove('is-visible'); });
+    });
+  }
+}
 
+async function loadAuthProviders() {
+  var msg = document.getElementById("auth-providers-msg");
+  if (msg) msg.textContent = "";
+  try {
+    var res = await authFetch(authProvidersUrl, { headers: buildAuthHeaders({}) });
+    if (!res.ok) throw new Error(await res.text());
+    var data = await res.json();
+    
+    var tbody = document.getElementById("auth-providers-tbody");
+    if (tbody) tbody.innerHTML = "";
+    
+    Object.keys(data || {}).forEach(function(name) {
+      var ap = data[name] || {};
+      var tr = document.createElement("tr");
+      tr.innerHTML = "<td>" + name + "</td>" +
+        "<td>" + (ap.url || "-") + "</td>" +
+        "<td>" + ap.level + "</td>" +
+        "<td><button class='bx--btn bx--btn--sm bx--btn--ghost' onclick='openEditAuthProviderModal(\"" + name.replace(/"/g, '&quot;') + "\")'>编辑</button> " +
+        "<button class='bx--btn bx--btn--sm bx--btn--danger--ghost' onclick='deleteAuthProvider(\"" + name.replace(/"/g, '&quot;') + "\")'>删除</button></td>";
+      if (tbody) tbody.appendChild(tr);
+    });
+    
+    if (msg) msg.textContent = "认证配置已加载";
+  } catch (e) {
+    if (msg) msg.textContent = "加载失败: " + (e.message || e);
+  }
+}
+
+function openAddAuthProviderModal() {
+  document.getElementById("add-auth-provider-name").value = "";
+  document.getElementById("add-auth-provider-url").value = "";
+  document.getElementById("add-auth-provider-level").value = "0";
+  
+  var modal = document.querySelector('#auth-provider-add-modal');
+  if (modal) modal.classList.add('is-visible');
+}
+
+function openEditAuthProviderModal(name) {
+  authFetch(authProvidersUrl, { headers: buildAuthHeaders({}) })
+    .then(function(res) { return res.json(); })
+    .then(function(data) {
+      var ap = data[name];
+      if (!ap) return;
+      
+      document.getElementById("edit-auth-provider-original-name").value = name;
+      document.getElementById("edit-auth-provider-name").value = name;
+      document.getElementById("edit-auth-provider-url").value = ap.url || "";
+      document.getElementById("edit-auth-provider-level").value = ap.level || 0;
+      
+      var modal = document.querySelector('#auth-provider-edit-modal');
+      if (modal) modal.classList.add('is-visible');
+    });
+}
+
+async function confirmAddAuthProvider() {
+  var msg = document.getElementById("auth-providers-msg");
+  if (msg) msg.textContent = "";
+  var name = document.getElementById("add-auth-provider-name").value.trim();
+  var url = document.getElementById("add-auth-provider-url").value.trim();
+  var level = parseInt(document.getElementById("add-auth-provider-level").value, 10);
+  
+  if (!name) { if (msg) msg.textContent = "名称必填"; return; }
+  if (!url) { if (msg) msg.textContent = "URL必填"; return; }
+  
+  try {
+    var res = await authFetch(authProvidersUrl, {
+      method: "POST",
+      headers: buildAuthHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ name: name, authProvider: { url: url, level: level } })
+    });
+    if (!res.ok) throw new Error(await res.text());
+    
+    if (msg) msg.textContent = "新增成功";
+    var modal = document.querySelector('#auth-provider-add-modal');
+    if (modal) modal.classList.remove('is-visible');
+    loadAuthProviders();
+  } catch (e) {
+    if (msg) msg.textContent = "新增失败: " + (e.message || e);
+  }
+}
+
+async function confirmEditAuthProvider() {
+  var msg = document.getElementById("auth-providers-msg");
+  if (msg) msg.textContent = "";
+  var name = document.getElementById("edit-auth-provider-name").value.trim();
+  var url = document.getElementById("edit-auth-provider-url").value.trim();
+  var level = parseInt(document.getElementById("edit-auth-provider-level").value, 10);
+  
+  if (!name) { if (msg) msg.textContent = "名称必填"; return; }
+  if (!url) { if (msg) msg.textContent = "URL必填"; return; }
+  
+  try {
+    var res = await authFetch(authProvidersUrl, {
+      method: "POST",
+      headers: buildAuthHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ name: name, authProvider: { url: url, level: level } })
+    });
+    if (!res.ok) throw new Error(await res.text());
+    
+    if (msg) msg.textContent = "更新成功";
+    var modal = document.querySelector('#auth-provider-edit-modal');
+    if (modal) modal.classList.remove('is-visible');
+    loadAuthProviders();
+  } catch (e) {
+    if (msg) msg.textContent = "更新失败: " + (e.message || e);
+  }
+}
+
+async function deleteAuthProvider(name) {
+  if (!confirm('确认删除认证配置 "' + name + '" ?')) return;
+  var msg = document.getElementById("auth-providers-msg");
+  if (msg) msg.textContent = "";
+  
+  try {
+    var res = await authFetch(authProvidersUrl + "?name=" + encodeURIComponent(name), { method: "DELETE", headers: buildAuthHeaders({}) });
+    if (!res.ok) throw new Error(await res.text());
+    if (msg) msg.textContent = "删除成功";
+    loadAuthProviders();
+  } catch (e) {
+    if (msg) msg.textContent = "删除失败: " + (e.message || e);
+  }
+}
 
 // 填充防火墙下拉框
 async function populateFirewallSelectors() {
@@ -1821,6 +1981,40 @@ async function populateFirewallSelectors() {
   }
 }
 
+// 填充认证提供商下拉框
+async function populateAuthProviderSelectors() {
+  try {
+    var res = await authFetch(authProvidersUrl, { headers: buildAuthHeaders({}) });
+    if (!res.ok) return;
+    var data = await res.json();
+    var names = Object.keys(data || {});
+    
+    // Rule Add
+    var addEl = document.getElementById("add-rule-auth-provider");
+    if (addEl) {
+      addEl.innerHTML = '<option value="">无</option>';
+      names.forEach(function(name) {
+        var opt = document.createElement("option");
+        opt.value = name;
+        opt.textContent = name;
+        addEl.appendChild(opt);
+      });
+    }
+    
+    // Rule Edit
+    var editEl = document.getElementById("edit-rule-auth-provider");
+    if (editEl) {
+      editEl.innerHTML = '<option value="">无</option>';
+      names.forEach(function(name) {
+        var opt = document.createElement("option");
+        opt.value = name;
+        opt.textContent = name;
+        editEl.appendChild(opt);
+      });
+    }
+  } catch (e) {}
+}
+
 // Expose Modal functions to global scope for onclick handlers
 window.openAddUserModal = openAddUserModal;
 window.openEditUserModal = openEditUserModal;
@@ -1838,6 +2032,8 @@ window.deleteRule = deleteRule;
 window.openEditFirewallModal = openEditFirewallModal;
 window.openEditFirewallModal = openEditFirewallModal;
 window.deleteFirewall = deleteFirewall;
+window.openEditAuthProviderModal = openEditAuthProviderModal;
+window.deleteAuthProvider = deleteAuthProvider;
 
 // Also expose load functions
 window.loadUsers = loadUsers;
@@ -2043,6 +2239,11 @@ function setupAdvancedPanelToggles() {
   on("confirm-add-firewall", "click", confirmAddFirewall);
   on("confirm-edit-firewall", "click", confirmEditFirewall);
 
+  on("btn-auth-providers-load", "click", loadAuthProviders);
+  on("btn-auth-providers-add", "click", openAddAuthProviderModal);
+  on("confirm-add-auth-provider", "click", confirmAddAuthProvider);
+  on("confirm-edit-auth-provider", "click", confirmEditAuthProvider);
+
   // Logs events
   on("btn-logs-search", "click", function() { currentLogPage = 1; loadLogs(); });
   on("btn-logs-prev", "click", function() { if(currentLogPage > 1) { currentLogPage--; loadLogs(); } });
@@ -2072,6 +2273,7 @@ function setupAdvancedPanelToggles() {
         initServerModals();
         initRuleModals();
         initFirewallModals();
+        initAuthProviderModals();
       }
     }, 100);
   })();

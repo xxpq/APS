@@ -200,6 +200,11 @@ func (m *StaticCacheManager) Set(fullURL string, headers http.Header, statusCode
 		return nil
 	}
 
+	// Don't cache empty bodies to prevent "0 bytes" issues
+	if len(body) == 0 {
+		return nil
+	}
+
 	// 生成 ETag (基于内容的MD5哈希)
 	hash := md5.Sum(body)
 	etag := fmt.Sprintf(`"%s"`, hex.EncodeToString(hash[:]))
@@ -231,8 +236,8 @@ func (m *StaticCacheManager) Set(fullURL string, headers http.Header, statusCode
 			compressedBody = body // 压缩失败使用原始数据
 		}
 
-		// 判断压缩是否有效（压缩后至少节省10%空间）
-		useCompression := err == nil && len(compressedBody) < originalSize*9/10
+		// 判断压缩是否有效（压缩后至少节省10%空间，且不为空）
+		useCompression := err == nil && len(compressedBody) > 0 && len(compressedBody) < originalSize*9/10
 
 		// 创建最终缓存条目
 		entry := &CacheEntry{

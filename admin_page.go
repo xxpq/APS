@@ -32,6 +32,7 @@ var admin_page_content = `
     <a class="mobile-nav-item auth-required" href="#" data-tab="tab-servers">服务</a>
     <a class="mobile-nav-item auth-required" href="#" data-tab="tab-tunnels">隧道</a>
     <a class="mobile-nav-item auth-required" href="#" data-tab="tab-firewalls">安全</a>
+    <a class="mobile-nav-item auth-required" href="#" data-tab="tab-auth-providers">认证</a>
     <a class="mobile-nav-item auth-required" href="#" data-tab="tab-logs">日志</a>
     <a class="mobile-nav-item auth-required" href="#" data-tab="tab-proxies">代理</a>
     <a class="mobile-nav-item auth-required" href="#" data-tab="tab-users">用户</a>
@@ -49,6 +50,7 @@ var admin_page_content = `
         <li class="auth-required"><a class="bx--header__menu-item" href ="#" data-tab="tab-servers">服务</a></li>
         <li class="auth-required"><a class="bx--header__menu-item" href="#" data-tab="tab-tunnels">隧道</a></li>
         <li class="auth-required"><a class="bx--header__menu-item" href="#" data-tab="tab-firewalls">安全</a></li>
+        <li class="auth-required"><a class="bx--header__menu-item" href="#" data-tab="tab-auth-providers">认证</a></li>
         <li class="auth-required"><a class="bx--header__menu-item" href="#" data-tab="tab-logs">日志</a></li>
         <li class="auth-required"><a class="bx--header__menu-item" href="#" data-tab="tab-proxies">代理</a></li>
         <li class="auth-required"><a class="bx--header__menu-item" href="#" data-tab="tab-users">用户</a></li>
@@ -484,6 +486,80 @@ var admin_page_content = `
       </div>
     </section>
 
+    <!-- 认证提供商管理 -->
+    <section id="tab-auth-providers" class="bx--tab-content hidden" role="tabpanel" aria-labelledby="认证">
+      <div class="bx--tile">
+        <div class="flex mb-2">
+          <button id="btn-auth-providers-load" class="bx--btn bx--btn--secondary">加载配置</button>
+          <button id="btn-auth-providers-add" class="bx--btn bx--btn--primary">新增认证</button>
+        </div>
+        <div class="table-wrap">
+          <table class="bx--data-table carbon-table">
+            <thead><tr><th>名称</th><th>认证URL</th><th>认证等级</th><th>操作</th></tr></thead>
+            <tbody id="auth-providers-tbody"></tbody>
+          </table>
+        </div>
+        <div id="auth-providers-msg" class="mt-2"></div>
+      </div>
+    </section>
+
+    <!-- 新增认证对话框 -->
+    <div data-modal id="auth-provider-add-modal" class="bx--modal" role="dialog">
+      <div class="bx--modal-container">
+        <div class="bx--modal-header">
+          <p class="bx--modal-header__heading">新增认证配置</p>
+          <button class="bx--modal-close" type="button" data-modal-close aria-label="关闭">
+            <svg class="bx--modal-close__icon" width="16" height="16" viewBox="0 0 16 16"><path d="M12 4.7L11.3 4 8 7.3 4.7 4 4 4.7 7.3 8 4 11.3 4.7 12 8 8.7 11.3 12 12 11.3 8.7 8z"/></svg>
+          </button>
+        </div>
+        <div class="bx--modal-content">
+          <div class="bx--form-item"><label class="bx--label">配置名称 *</label><input id="add-auth-provider-name" type="text" class="bx--text-input"></div>
+          <div class="bx--form-item mt-1"><label class="bx--label">认证URL *</label><input id="add-auth-provider-url" type="text" class="bx--text-input" placeholder="http://localhost:3311/auth/*"></div>
+          <div class="bx--form-item mt-1"><label class="bx--label">认证等级</label>
+            <select id="add-auth-provider-level" class="bx--select">
+              <option value="0">0 - 不传递Token</option>
+              <option value="1">1 - 仅传递Token</option>
+              <option value="2">2 - 仅传递用户信息</option>
+              <option value="3">3 - 传递Token+用户信息</option>
+            </select>
+          </div>
+        </div>
+        <div class="bx--modal-footer">
+          <button class="bx--btn bx--btn--secondary" type="button" data-modal-close>取消</button>
+          <button class="bx--btn bx--btn--primary" type="button" id="confirm-add-auth-provider">确认新增</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 编辑认证对话框 -->
+    <div data-modal id="auth-provider-edit-modal" class="bx--modal" role="dialog">
+      <div class="bx--modal-container">
+        <div class="bx--modal-header">
+          <p class="bx--modal-header__heading">编辑认证配置</p>
+          <button class="bx--modal-close" type="button" data-modal-close aria-label="关闭">
+            <svg class="bx--modal-close__icon" width="16" height="16" viewBox="0 0 16 16"><path d="M12 4.7L11.3 4 8 7.3 4.7 4 4 4.7 7.3 8 4 11.3 4.7 12 8 8.7 11.3 12 12 11.3 8.7 8z"/></svg>
+          </button>
+        </div>
+        <div class="bx--modal-content">
+          <input type="hidden" id="edit-auth-provider-original-name">
+          <div class="bx--form-item"><label class="bx--label">配置名称 *</label><input id="edit-auth-provider-name" type="text" class="bx--text-input"></div>
+          <div class="bx--form-item mt-1"><label class="bx--label">认证URL *</label><input id="edit-auth-provider-url" type="text" class="bx--text-input"></div>
+          <div class="bx--form-item mt-1"><label class="bx--label">认证等级</label>
+            <select id="edit-auth-provider-level" class="bx--select">
+              <option value="0">0 - 不传递Token</option>
+              <option value="1">1 - 仅传递Token</option>
+              <option value="2">2 - 仅传递用户信息</option>
+              <option value="3">3 - 传递Token+用户信息</option>
+            </select>
+          </div>
+        </div>
+        <div class="bx--modal-footer">
+          <button class="bx--btn bx--btn--secondary" type="button" data-modal-close>取消</button>
+          <button class="bx--btn bx--btn--primary" type="button" id="confirm-edit-auth-provider">确认保存</button>
+        </div>
+      </div>
+    </div>
+
     <!-- 日志管理 -->
     <section id="tab-logs" class="bx--tab-content hidden" role="tabpanel" aria-labelledby="日志">
       <div class="bx--tile">
@@ -556,8 +632,8 @@ var admin_page_content = `
 
 
     <!-- Rule Add/Edit Modals -->
-    <div data-modal id="rule-add-modal" class="bx--modal"><div class="bx--modal-container" style="max-width: 600px;"><div class="bx--modal-header"><p class="bx--modal-header__heading">新增路由规则</p><button class="bx--modal-close" type="button" data-modal-close aria-label="关闭"><svg class="bx--modal-close__icon" width="16" height="16" viewBox="0 0 16 16"><path d="M12 4.7L11.3 4 8 7.3 4.7 4 4 4.7 7.3 8 4 11.3 4.7 12 8 8.7 11.3 12 12 11.3 8.7 8z"/></svg></button></div><div class="bx--modal-content"><div class="bx--form-item"><label class="bx--label">源路径 (From) *</label><textarea id="add-rule-from" class="bx--text-input" rows="2" placeholder="/api/*&#10;或多行URL"></textarea><div class="bx--form__helper-text">支持单个URL或多个URL（每行一个）</div></div><div class="bx--form-item mt-1"><label class="bx--label">目标路径 (To) *</label><input id="add-rule-to" type="text" class="bx--text-input" placeholder="http://backend/*"></div><div class="bx--form-item mt-1"><label class="bx--label">Via Endpoints (可选)</label><input id="add-rule-via-endpoints" type="text" class="bx--text-input" placeholder="endpoint_name"><div class="bx--form__helper-text">通过指定的端点转发</div></div><div class="bx--form-item mt-1"><label class="bx--label">服务器列表 (可选)</label><input id="add-rule-servers" type="text" class="bx--text-input" placeholder="server1, server2"><div class="bx--form__helper-text">多个服务器用逗号分隔</div></div><div class="bx--form-item mt-1"><label class="bx--label">日志等级</label><select id="add-rule-log-level" class="bx--select"><option value="">继承默认</option><option value="0">0 - 不记录</option><option value="1">1 - 基础信息</option><option value="2">2 - 完整请求</option></select></div><div class="bx--form-item mt-1"><label class="bx--label">日志保留 (小时)</label><input id="add-rule-log-retention" type="number" class="bx--text-input" placeholder="继承默认"></div></div><div class="bx--modal-footer"><button class="bx--btn bx--btn--secondary" type="button" data-modal-close>取消</button><button class="bx--btn bx--btn--primary" type="button" id="confirm-add-rule">确认新增</button></div></div></div>
-    <div data-modal id="rule-edit-modal" class="bx--modal"><div class="bx--modal-container" style="max-width: 600px;"><div class="bx--modal-header"><p class="bx--modal-header__heading">编辑路由规则</p><button class="bx--modal-close" type="button" data-modal-close aria-label="关闭"><svg class="bx--modal-close__icon" width="16" height="16" viewBox="0 0 16 16"><path d="M12 4.7L11.3 4 8 7.3 4.7 4 4 4.7 7.3 8 4 11.3 4.7 12 8 8.7 11.3 12 12 11.3 8.7 8z"/></svg></button></div><div class="bx--modal-content"><input type="hidden" id="edit-rule-index"><div class="bx--form-item"><label class="bx--label">源路径 (From) *</label><textarea id="edit-rule-from" class="bx--text-input" rows="2"></textarea><div class="bx--form__helper-text">支持单个URL或多个URL（每行一个）</div></div><div class="bx--form-item mt-1"><label class="bx--label">目标路径 (To) *</label><input id="edit-rule-to" type="text" class="bx--text-input"></div><div class="bx--form-item mt-1"><label class="bx--label">Via Endpoints (可选)</label><input id="edit-rule-via-endpoints" type="text" class="bx--text-input"></div><div class="bx--form-item mt-1"><label class="bx--label">服务器列表 (可选)</label><input id="edit-rule-servers" type="text" class="bx--text-input"><div class="bx--form__helper-text">多个服务器用逗号分隔</div></div><div class="bx--form-item mt-1"><label class="bx--label">日志等级</label><select id="edit-rule-log-level" class="bx--select"><option value="">继承默认</option><option value="0">0 - 不记录</option><option value="1">1 - 基础信息</option><option value="2">2 - 完整请求</option></select></div><div class="bx--form-item mt-1"><label class="bx--label">日志保留 (小时)</label><input id="edit-rule-log-retention" type="number" class="bx--text-input" placeholder="继承默认"></div></div><div class="bx--modal-footer"><button class="bx--btn bx--btn--secondary" type="button" data-modal-close>取消</button><button class="bx--btn bx--btn--primary" type="button" id="confirm-edit-rule">确认保存</button></div></div></div>
+    <div data-modal id="rule-add-modal" class="bx--modal"><div class="bx--modal-container" style="max-width: 600px;"><div class="bx--modal-header"><p class="bx--modal-header__heading">新增路由规则</p><button class="bx--modal-close" type="button" data-modal-close aria-label="关闭"><svg class="bx--modal-close__icon" width="16" height="16" viewBox="0 0 16 16"><path d="M12 4.7L11.3 4 8 7.3 4.7 4 4 4.7 7.3 8 4 11.3 4.7 12 8 8.7 11.3 12 12 11.3 8.7 8z"/></svg></button></div><div class="bx--modal-content"><div class="bx--form-item"><label class="bx--label">源路径 (From) *</label><textarea id="add-rule-from" class="bx--text-input" rows="2" placeholder="/api/*&#10;或多行URL"></textarea><div class="bx--form__helper-text">支持单个URL或多个URL（每行一个）</div></div><div class="bx--form-item mt-1"><label class="bx--label">目标路径 (To) *</label><input id="add-rule-to" type="text" class="bx--text-input" placeholder="http://backend/*"></div><div class="bx--form-item mt-1"><label class="bx--label">Via Endpoints (可选)</label><input id="add-rule-via-endpoints" type="text" class="bx--text-input" placeholder="endpoint_name"><div class="bx--form__helper-text">通过指定的端点转发</div></div><div class="bx--form-item mt-1"><label class="bx--label">认证绑定 (可选)</label><select id="add-rule-auth-provider" class="bx--select"><option value="">无</option></select></div><div class="bx--form-item mt-1"><label class="bx--label">服务器列表 (可选)</label><input id="add-rule-servers" type="text" class="bx--text-input" placeholder="server1, server2"><div class="bx--form__helper-text">多个服务器用逗号分隔</div></div><div class="bx--form-item mt-1"><label class="bx--label">日志等级</label><select id="add-rule-log-level" class="bx--select"><option value="">继承默认</option><option value="0">0 - 不记录</option><option value="1">1 - 基础信息</option><option value="2">2 - 完整请求</option></select></div><div class="bx--form-item mt-1"><label class="bx--label">日志保留 (小时)</label><input id="add-rule-log-retention" type="number" class="bx--text-input" placeholder="继承默认"></div></div><div class="bx--modal-footer"><button class="bx--btn bx--btn--secondary" type="button" data-modal-close>取消</button><button class="bx--btn bx--btn--primary" type="button" id="confirm-add-rule">确认新增</button></div></div></div>
+    <div data-modal id="rule-edit-modal" class="bx--modal"><div class="bx--modal-container" style="max-width: 600px;"><div class="bx--modal-header"><p class="bx--modal-header__heading">编辑路由规则</p><button class="bx--modal-close" type="button" data-modal-close aria-label="关闭"><svg class="bx--modal-close__icon" width="16" height="16" viewBox="0 0 16 16"><path d="M12 4.7L11.3 4 8 7.3 4.7 4 4 4.7 7.3 8 4 11.3 4.7 12 8 8.7 11.3 12 12 11.3 8.7 8z"/></svg></button></div><div class="bx--modal-content"><input type="hidden" id="edit-rule-index"><div class="bx--form-item"><label class="bx--label">源路径 (From) *</label><textarea id="edit-rule-from" class="bx--text-input" rows="2"></textarea><div class="bx--form__helper-text">支持单个URL或多个URL（每行一个）</div></div><div class="bx--form-item mt-1"><label class="bx--label">目标路径 (To) *</label><input id="edit-rule-to" type="text" class="bx--text-input"></div><div class="bx--form-item mt-1"><label class="bx--label">Via Endpoints (可选)</label><input id="edit-rule-via-endpoints" type="text" class="bx--text-input"></div><div class="bx--form-item mt-1"><label class="bx--label">认证绑定 (可选)</label><select id="edit-rule-auth-provider" class="bx--select"><option value="">无</option></select></div><div class="bx--form-item mt-1"><label class="bx--label">服务器列表 (可选)</label><input id="edit-rule-servers" type="text" class="bx--text-input"><div class="bx--form__helper-text">多个服务器用逗号分隔</div></div><div class="bx--form-item mt-1"><label class="bx--label">日志等级</label><select id="edit-rule-log-level" class="bx--select"><option value="">继承默认</option><option value="0">0 - 不记录</option><option value="1">1 - 基础信息</option><option value="2">2 - 完整请求</option></select></div><div class="bx--form-item mt-1"><label class="bx--label">日志保留 (小时)</label><input id="edit-rule-log-retention" type="number" class="bx--text-input" placeholder="继承默认"></div></div><div class="bx--modal-footer"><button class="bx--btn bx--btn--secondary" type="button" data-modal-close>取消</button><button class="bx--btn bx--btn--primary" type="button" id="confirm-edit-rule">确认保存</button></div></div></div>
 
 
 

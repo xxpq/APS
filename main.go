@@ -404,6 +404,10 @@ func createServerHandler(serverName string, mappings []*Mapping, serverConfig *L
 		certHandlers.RegisterHandlers(mux)
 	}
 
+	// 注册 Auth 管理接口
+	authHandlers := &AuthHandlers{}
+	authHandlers.RegisterHandlers(mux)
+
 	// 添加重放端点（始终可用）
 	mux.HandleFunc("/.replay", replayManager.ServeHTTP)
 

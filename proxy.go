@@ -140,14 +140,6 @@ func (p *MapRemoteProxy) createProxyClient(proxyURL string) (*http.Client, error
 }
 
 func (p *MapRemoteProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	// 认证检查
-	authorized, _, _ := p.checkAuth(r, nil)
-	if !authorized {
-		w.Header().Set("Proxy-Authenticate", `Basic realm="Restricted"`)
-		http.Error(w, "Proxy authentication required", http.StatusProxyAuthRequired)
-		return
-	}
-
 	if r.Method == http.MethodOptions {
 		setCorsHeaders(w.Header())
 		w.WriteHeader(http.StatusOK)

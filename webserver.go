@@ -25,6 +25,42 @@ func (h *CertHandlers) RegisterHandlers(mux *http.ServeMux) {
 	log.Println("Certificate download page available at '/.ssl'")
 }
 
+// AuthHandlers contains the HTTP handlers for authentication management
+type AuthHandlers struct{}
+
+// RegisterHandlers registers the auth handlers to the given ServeMux
+func (h *AuthHandlers) RegisterHandlers(mux *http.ServeMux) {
+	mux.HandleFunc("/.auth/token/revoke", h.handleRevoke)
+	mux.HandleFunc("/.auth/token/info", h.handleInfo)
+}
+
+func (h *AuthHandlers) handleRevoke(w http.ResponseWriter, r *http.Request) {
+	token := r.URL.Query().Get("token")
+	if token == "" {
+		http.Error(w, "token is required", http.StatusBadRequest)
+		return
+	}
+
+	count := GetAuthCache().RevokeByToken(token)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status": "success",
+		"revoked": count,
+	})
+}
+
+func (h *AuthHandlers) handleInfo(w http.ResponseWriter, r *http.Request) {
+	token := r.URL.Query().Get("token")
+	if token == "" {
+		http.Error(w, "token is required", http.StatusBadRequest)
+		return
+	}
+
+	info := GetAuthCache().GetInfoByToken(token)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(info)
+}
+
 // Session management
 type Session struct {
 	Username string
@@ -107,6 +143,7 @@ func (h *AdminHandlers) RegisterHandlers(mux *http.ServeMux) {
 	mux.HandleFunc("/.api/servers", h.handleServers)
 	mux.HandleFunc("/.api/rules", h.handleRules)
 	mux.HandleFunc("/.api/firewalls", h.handleFirewalls)
+	mux.HandleFunc("/.api/auth_providers", h.handleAuthProviders)
 	mux.HandleFunc("/.api/log", h.handleLogs)
 	mux.HandleFunc("/.api/stats/timeseries", h.handleTimeSeriesStats)
 	mux.HandleFunc("/.api/stats/ip", func(w http.ResponseWriter, r *http.Request) {
@@ -399,8 +436,10 @@ func (h *AdminHandlers) getConfig(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(h.config.Auth)
 	case "p12s":
 		json.NewEncoder(w).Encode(h.config.P12s)
+	case "auth_providers":
+		json.NewEncoder(w).Encode(h.config.AuthProviders)
 	default:
-		http.Error(w, "Invalid section. Valid values: all, servers, mappings, tunnels, firewalls, proxies, auth, p12s", http.StatusBadRequest)
+		http.Error(w, "Invalid section. Valid values: all, servers, mappings, tunnels, firewalls, proxies, auth, p12s, auth_providers", http.StatusBadRequest)
 	}
 }
 
@@ -852,6 +891,68 @@ func (h *AdminHandlers) handleFirewalls(w http.ResponseWriter, r *http.Request) 
 		defer h.configMux.Unlock()
 		if h.config.Firewalls != nil {
 			delete(h.config.Firewalls, name)
+		}
+		if err := h.saveConfigLocked(); err != nil {
+			http.Error(w, "Failed to persist config", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"status": "deleted"})
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// ===== 认证提供商管理 =====
+func (h *AdminHandlers) handleAuthProviders(w http.ResponseWriter, r *http.Request) {
+	if !isAdminRequest(r, h.config) {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		h.configMux.RLock()
+		defer h.configMux.RUnlock()
+		resp := make(map[string]*AuthProviderConfig)
+		if h.config.AuthProviders != nil {
+			for name, ap := range h.config.AuthProviders {
+				resp[name] = ap
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	case http.MethodPost:
+		var req struct {
+			Name         string             `json:"name"`
+			AuthProvider AuthProviderConfig `json:"authProvider"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" {
+			http.Error(w, "Invalid payload", http.StatusBadRequest)
+			return
+		}
+		h.configMux.Lock()
+		defer h.configMux.Unlock()
+		if h.config.AuthProviders == nil {
+			h.config.AuthProviders = make(map[string]*AuthProviderConfig)
+		}
+		ap := req.AuthProvider
+		h.config.AuthProviders[req.Name] = &ap
+		if err := h.saveConfigLocked(); err != nil {
+			http.Error(w, "Failed to persist config", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"status": "upserted"})
+	case http.MethodDelete:
+		name := r.URL.Query().Get("name")
+		if name == "" {
+			http.Error(w, "name is required", http.StatusBadRequest)
+			return
+		}
+		h.configMux.Lock()
+		defer h.configMux.Unlock()
+		if h.config.AuthProviders != nil {
+			delete(h.config.AuthProviders, name)
 		}
 		if err := h.saveConfigLocked(); err != nil {
 			http.Error(w, "Failed to persist config", http.StatusInternalServerError)

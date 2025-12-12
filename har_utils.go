@@ -138,7 +138,15 @@ func (p *MapRemoteProxy) createHarRequest(req *http.Request) (*HarRequest, error
 func (p *MapRemoteProxy) createHarResponse(resp *http.Response) (HarResponse, error) {
 	var bodyBytes []byte
 	if resp.Body != nil {
-		bodyBytes, _ = io.ReadAll(resp.Body)
+		var err error
+		bodyBytes, err = io.ReadAll(resp.Body)
+		if err != nil {
+			log.Printf("[HAR] Error reading response body: %v", err)
+			// We must still restore the body (what we read so far) to allow downstream to see at least that (or the error)
+			// But since we consumed it, the original error is lost to the downstream unless we propagate it?
+			// Actually, if we return what we got, downstream sees partial data and no error from Read().
+			// This might explain "0 bytes" if it failed immediately.
+		}
 		resp.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
 	}
 
