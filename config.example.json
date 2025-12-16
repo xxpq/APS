@@ -90,9 +90,16 @@
     }
   },
   "authProviders": {
-    "test": {
-      "url": "http://auth.sucdri.p-q.co/*",
-      "level": 3
+    "sucdri-cim": {
+      "url": "http://api.sucdri.p-q.co/user/check/*",
+      "loginUrl": "https://api.sucdri.p-q.co/#/login",
+      "level": 0,
+      "tokenSource": {
+        "header": "X-Token"
+      },
+      "tokenDest": {
+        "header": "X-Token"
+      }
     }
   },
   "static_cache": {
@@ -109,6 +116,7 @@
         "125.67.61.66/8",
         "18.245.86.82/8",
         "13.226.244.90/8",
+        "61.245.11.87/8",
         "206.168.34.124/8",
         "20.80.83.86/8",
         "167.94.138.177/8",
@@ -154,18 +162,14 @@
         "headers": {
           "x-token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJVc2VySWQiOjEsIlRlbmFudElkIjoxLCJPcmdhbml6YXRpb25JZCI6MCwiVXNlck5hbWUiOiJwYW5kYSIsIlJvbGVJZCI6MSwiUm9sZUtleSI6ImFkbWluIiwiRGVwdElkIjoxMCwiUG9zdElkIjoxLCJpc3MiOiJQYW5kYVgiLCJleHAiOjI2Mjk4NjgzMTAsIm5iZiI6MTc2NTg2ODMxMH0.qDqUEf7XOhgSI9wb_i9hQfs_5-1VDb3M3GmcqLnhwO0"
         },
-        "url": "https://api.sucdri.p-q.co/shlq/*"
-      },
-      "to": "http://8.159.146.34:7788/*"
-    },
-    {
-      "from": {
-        "headers": {
-          "x-token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJVc2VySWQiOjEsIlRlbmFudElkIjoxLCJPcmdhbml6YXRpb25JZCI6MCwiVXNlck5hbWUiOiJwYW5kYSIsIlJvbGVJZCI6MSwiUm9sZUtleSI6ImFkbWluIiwiRGVwdElkIjoxMCwiUG9zdElkIjoxLCJpc3MiOiJQYW5kYVgiLCJleHAiOjI2Mjk4NjgzMTAsIm5iZiI6MTc2NTg2ODMxMH0.qDqUEf7XOhgSI9wb_i9hQfs_5-1VDb3M3GmcqLnhwO0"
-        },
         "url": "https://api.sucdri.p-q.co/iot/*"
       },
-      "to": "http://175.27.166.25:7788/*"
+      "to": {
+        "url": "http://175.27.166.25:7788/*"
+      },
+      "auth": {
+        "authProvider": "sucdri-cim"
+      }
     },
     {
       "from": ["http://shkc.p-q.co/*", "https://shkc.p-q.co/*"],
@@ -315,5 +319,5 @@
       }
     }
   ],
-  "version": 8
+  "version": 14
 }

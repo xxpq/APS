@@ -1980,6 +1980,16 @@ function openEditAuthProviderModal(name) {
       document.getElementById("edit-auth-provider-login-url").value = ap.loginUrl || "";
       document.getElementById("edit-auth-provider-level").value = ap.level || 0;
       
+      // Populate token source fields
+      document.getElementById("edit-auth-provider-token-source-header").value = (ap.tokenSource && ap.tokenSource.header) || "";
+      document.getElementById("edit-auth-provider-token-source-cookie").value = (ap.tokenSource && ap.tokenSource.cookie) || "";
+      document.getElementById("edit-auth-provider-token-source-qs").value = (ap.tokenSource && ap.tokenSource.querystring) || "";
+      
+      // Populate token dest fields
+      document.getElementById("edit-auth-provider-token-dest-header").value = (ap.tokenDest && ap.tokenDest.header) || "";
+      document.getElementById("edit-auth-provider-token-dest-cookie").value = (ap.tokenDest && ap.tokenDest.cookie) || "";
+      document.getElementById("edit-auth-provider-token-dest-qs").value = (ap.tokenDest && ap.tokenDest.querystring) || "";
+      
       var modal = document.querySelector('#auth-provider-edit-modal');
       if (modal) modal.classList.add('is-visible');
     });
@@ -1996,11 +2006,33 @@ async function confirmAddAuthProvider() {
   if (!name) { if (msg) msg.textContent = "名称必填"; return; }
   if (!url) { if (msg) msg.textContent = "URL必填"; return; }
   
+  // Build tokenSource
+  var tokenSource = {};
+  var srcHeader = document.getElementById("add-auth-provider-token-source-header").value.trim();
+  var srcCookie = document.getElementById("add-auth-provider-token-source-cookie").value.trim();
+  var srcQs = document.getElementById("add-auth-provider-token-source-qs").value.trim();
+  if (srcHeader) tokenSource.header = srcHeader;
+  if (srcCookie) tokenSource.cookie = srcCookie;
+  if (srcQs) tokenSource.querystring = srcQs;
+  
+  // Build tokenDest
+  var tokenDest = {};
+  var destHeader = document.getElementById("add-auth-provider-token-dest-header").value.trim();
+  var destCookie = document.getElementById("add-auth-provider-token-dest-cookie").value.trim();
+  var destQs = document.getElementById("add-auth-provider-token-dest-qs").value.trim();
+  if (destHeader) tokenDest.header = destHeader;
+  if (destCookie) tokenDest.cookie = destCookie;
+  if (destQs) tokenDest.querystring = destQs;
+  
+  var authProvider = { url: url, loginUrl: loginUrl, level: level };
+  if (Object.keys(tokenSource).length > 0) authProvider.tokenSource = tokenSource;
+  if (Object.keys(tokenDest).length > 0) authProvider.tokenDest = tokenDest;
+  
   try {
     var res = await authFetch(authProvidersUrl, {
       method: "POST",
       headers: buildAuthHeaders({ "Content-Type": "application/json" }),
-      body: JSON.stringify({ name: name, authProvider: { url: url, loginUrl: loginUrl, level: level } })
+      body: JSON.stringify({ name: name, authProvider: authProvider })
     });
     if (!res.ok) throw new Error(await res.text());
     
@@ -2024,11 +2056,33 @@ async function confirmEditAuthProvider() {
   if (!name) { if (msg) msg.textContent = "名称必填"; return; }
   if (!url) { if (msg) msg.textContent = "URL必填"; return; }
   
+  // Build tokenSource
+  var tokenSource = {};
+  var srcHeader = document.getElementById("edit-auth-provider-token-source-header").value.trim();
+  var srcCookie = document.getElementById("edit-auth-provider-token-source-cookie").value.trim();
+  var srcQs = document.getElementById("edit-auth-provider-token-source-qs").value.trim();
+  if (srcHeader) tokenSource.header = srcHeader;
+  if (srcCookie) tokenSource.cookie = srcCookie;
+  if (srcQs) tokenSource.querystring = srcQs;
+  
+  // Build tokenDest
+  var tokenDest = {};
+  var destHeader = document.getElementById("edit-auth-provider-token-dest-header").value.trim();
+  var destCookie = document.getElementById("edit-auth-provider-token-dest-cookie").value.trim();
+  var destQs = document.getElementById("edit-auth-provider-token-dest-qs").value.trim();
+  if (destHeader) tokenDest.header = destHeader;
+  if (destCookie) tokenDest.cookie = destCookie;
+  if (destQs) tokenDest.querystring = destQs;
+  
+  var authProvider = { url: url, loginUrl: loginUrl, level: level };
+  if (Object.keys(tokenSource).length > 0) authProvider.tokenSource = tokenSource;
+  if (Object.keys(tokenDest).length > 0) authProvider.tokenDest = tokenDest;
+  
   try {
     var res = await authFetch(authProvidersUrl, {
       method: "POST",
       headers: buildAuthHeaders({ "Content-Type": "application/json" }),
-      body: JSON.stringify({ name: name, authProvider: { url: url, loginUrl: loginUrl, level: level } })
+      body: JSON.stringify({ name: name, authProvider: authProvider })
     });
     if (!res.ok) throw new Error(await res.text());
     

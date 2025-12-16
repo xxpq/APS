@@ -73,11 +73,20 @@ type EndpointP2PSettings struct {
 	MaxRelayHops       int      `json:"maxRelayHops,omitempty"` // Default 3
 }
 
+// TokenLocation 指定 token 的位置（header、cookie 或 querystring）
+type TokenLocation struct {
+	Header      string `json:"header,omitempty"`      // e.g. "X-Token"
+	Cookie      string `json:"cookie,omitempty"`      // e.g. "token"
+	QueryString string `json:"querystring,omitempty"` // e.g. "token"
+}
+
 // AuthProviderConfig 第三方认证配置
 type AuthProviderConfig struct {
-	URL      string `json:"url"`
-	LoginUrl string `json:"loginUrl,omitempty"`
-	Level    int    `json:"level"` // 0=None, 1=Hash, 2=Info, 3=Hash+Info, 4=Token, 5=Token+Hash, 6=Token+Hash+Info
+	URL         string         `json:"url"`
+	LoginUrl    string         `json:"loginUrl,omitempty"`
+	Level       int            `json:"level"`                 // 0=None, 1=Hash, 2=Info, 3=Hash+Info, 4=Token, 5=Token+Hash, 6=Token+Hash+Info
+	TokenSource *TokenLocation `json:"tokenSource,omitempty"` // 从请求中提取 token 的位置
+	TokenDest   *TokenLocation `json:"tokenDest,omitempty"`   // 发送 token 到认证服务的位置
 }
 
 // StaticCacheConfig 静态文件缓存配置

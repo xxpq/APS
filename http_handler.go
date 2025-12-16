@@ -294,9 +294,9 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	originalURL := p.buildOriginalURL(r)
 
 	// Check third-party authentication if configured
-	authUrl, loginUrl, authLevel := p.resolveAuthConfig(mapping)
+	authUrl, loginUrl, authLevel, authProvider := p.resolveAuthConfig(mapping)
 	if matched && mapping != nil && authUrl != "" {
-		if authorized, info, hash := p.checkThirdPartyAuth(r, authUrl); !authorized {
+		if authorized, info, hash := p.checkThirdPartyAuth(r, authUrl, authProvider); !authorized {
 			// Redirect logic
 			redirectUrl := loginUrl
 			if redirectUrl == "" {
@@ -317,7 +317,7 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		} else {
 			// Extract token again for header manipulation
-			token := p.extractToken(r)
+			token := p.extractTokenFromProvider(r, authProvider)
 
 			// Auth Level Logic
 			// 0: No Token (Default)
@@ -1273,21 +1273,24 @@ func (p *MapRemoteProxy) createClientWithP12(p12Path, password string, policies 
 }
 
 // resolveAuthConfig resolves the auth URL and level from mapping or referenced provider
-func (p *MapRemoteProxy) resolveAuthConfig(mapping *Mapping) (string, string, int) {
+// Returns (authUrl, loginUrl, authLevel, provider)
+func (p *MapRemoteProxy) resolveAuthConfig(mapping *Mapping) (string, string, int, *AuthProviderConfig) {
 	if mapping == nil || mapping.Auth == nil {
-		return "", "", 0
+		return "", "", 0, nil
 	}
 
 	var authUrl string
 	var loginUrl string
 	var authLevel int
+	var provider *AuthProviderConfig
 
 	// 1. Check referenced AuthProvider
 	if mapping.Auth.AuthProvider != "" && p.config.AuthProviders != nil {
-		if provider, ok := p.config.AuthProviders[mapping.Auth.AuthProvider]; ok {
-			authUrl = provider.URL
-			loginUrl = provider.LoginUrl
-			authLevel = provider.Level
+		if prov, ok := p.config.AuthProviders[mapping.Auth.AuthProvider]; ok {
+			authUrl = prov.URL
+			loginUrl = prov.LoginUrl
+			authLevel = prov.Level
+			provider = prov
 		}
 	}
 
@@ -1305,7 +1308,7 @@ func (p *MapRemoteProxy) resolveAuthConfig(mapping *Mapping) (string, string, in
 		loginUrl = mapping.Auth.LoginUrl
 	}
 
-	return authUrl, loginUrl, authLevel
+	return authUrl, loginUrl, authLevel, provider
 }
 
 // extractToken extracts the token from Authorization header, Cookie, or Query String
@@ -1317,6 +1320,16 @@ func (p *MapRemoteProxy) extractToken(r *http.Request) string {
 		if len(parts) == 2 && strings.EqualFold(parts[0], "Bearer") {
 			return parts[1]
 		}
+		return authHeader
+	}
+
+	authHeader = r.Header.Get("Token")
+	if authHeader != "" {
+		return authHeader
+	}
+
+	authHeader = r.Header.Get("X-Token")
+	if authHeader != "" {
 		return authHeader
 	}
 
@@ -1333,14 +1346,48 @@ func (p *MapRemoteProxy) extractToken(r *http.Request) string {
 	return ""
 }
 
+// extractTokenFromProvider extracts token from request based on provider configuration
+// If provider has custom tokenSource configuration, use it; otherwise fall back to default extractToken
+func (p *MapRemoteProxy) extractTokenFromProvider(r *http.Request, provider *AuthProviderConfig) string {
+	if provider == nil || provider.TokenSource == nil {
+		// Default: try Authorization Bearer, then common headers, then cookie, then querystring
+		return p.extractToken(r)
+	}
+
+	// Custom source configuration
+	source := provider.TokenSource
+
+	// Priority: header > cookie > querystring (try all specified)
+	if source.Header != "" {
+		if token := r.Header.Get(source.Header); token != "" {
+			return token
+		}
+	}
+
+	if source.Cookie != "" {
+		if cookie, err := r.Cookie(source.Cookie); err == nil {
+			return cookie.Value
+		}
+	}
+
+	if source.QueryString != "" {
+		if token := r.URL.Query().Get(source.QueryString); token != "" {
+			return token
+		}
+	}
+
+	return ""
+}
+
 // checkThirdPartyAuth performs third-party authentication
 // Returns (authorized, info, hash)
-func (p *MapRemoteProxy) checkThirdPartyAuth(r *http.Request, authUrl string) (bool, string, string) {
-	token := p.extractToken(r)
+func (p *MapRemoteProxy) checkThirdPartyAuth(r *http.Request, authUrl string, provider *AuthProviderConfig) (bool, string, string) {
+	token := p.extractTokenFromProvider(r, provider)
 	if token == "" {
 		log.Printf("[AUTH] No token found in request")
 		return false, "", ""
 	}
+	DebugLog("[AUTH] Token found in request: %s", maskToken(token))
 
 	authCache := GetAuthCache()
 	cacheKey := authCache.GenerateCacheKey(token, r.Method, r.Host, r.URL.Path)
@@ -1372,14 +1419,37 @@ func (p *MapRemoteProxy) checkThirdPartyAuth(r *http.Request, authUrl string) (b
 		targetAuthURL += "?" + r.URL.RawQuery
 	}
 
-	authReq, err := http.NewRequest("GET", targetAuthURL, nil)
+	log.Printf("[AUTH] Sending auth request to %s", targetAuthURL)
+
+	authReq, err := http.NewRequest(r.Method, targetAuthURL, nil)
 	if err != nil {
 		log.Printf("[AUTH] Failed to create auth request: %v", err)
 		return false, "", ""
 	}
 
-	// Forward token
-	authReq.Header.Set("Authorization", "Bearer "+token)
+	// Forward token based on provider configuration
+	if provider != nil && provider.TokenDest != nil {
+		dest := provider.TokenDest
+
+		if dest.Header != "" {
+			authReq.Header.Set(dest.Header, token)
+			DebugLog("[AUTH] Forwarding token to header %s", dest.Header)
+		}
+		if dest.Cookie != "" {
+			authReq.AddCookie(&http.Cookie{Name: dest.Cookie, Value: token})
+			DebugLog("[AUTH] Forwarding token to cookie %s", dest.Cookie)
+		}
+		if dest.QueryString != "" {
+			q := authReq.URL.Query()
+			q.Set(dest.QueryString, token)
+			authReq.URL.RawQuery = q.Encode()
+			DebugLog("[AUTH] Forwarding token to querystring %s", dest.QueryString)
+		}
+	} else {
+		// Default: Authorization Bearer
+		authReq.Header.Set("Authorization", "Bearer "+token)
+		DebugLog("[AUTH] Forwarding token to Authorization Bearer header")
+	}
 
 	// Optimization: Send Hash if available
 	if hasStale && staleHash != "" {

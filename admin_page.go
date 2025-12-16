@@ -608,6 +608,18 @@ var admin_page_content = `
               <option value="6">6 - 传递Token+Hash+用户信息</option>
             </select>
           </div>
+          <div class="bx--form-item mt-1"><label class="bx--label">Token来源配置 (可选)</label>
+            <input id="add-auth-provider-token-source-header" type="text" class="bx--text-input" placeholder="Header名称，如 X-Token">
+            <input id="add-auth-provider-token-source-cookie" type="text" class="bx--text-input mt-1" placeholder="Cookie名称，如 token">
+            <input id="add-auth-provider-token-source-qs" type="text" class="bx--text-input mt-1" placeholder="QueryString参数名，如 token">
+            <div class="bx--form__helper-text">留空则使用默认（Authorization Bearer）</div>
+          </div>
+          <div class="bx--form-item mt-1"><label class="bx--label">Token发送配置 (可选)</label>
+            <input id="add-auth-provider-token-dest-header" type="text" class="bx--text-input" placeholder="Header名称，如 X-Token">
+            <input id="add-auth-provider-token-dest-cookie" type="text" class="bx--text-input mt-1" placeholder="Cookie名称，如 token">
+            <input id="add-auth-provider-token-dest-qs" type="text" class="bx--text-input mt-1" placeholder="QueryString参数名，如 token">
+            <div class="bx--form__helper-text">留空则使用默认（Authorization Bearer）</div>
+          </div>
         </div>
         <div class="bx--modal-footer">
           <button class="bx--btn bx--btn--secondary" type="button" data-modal-close>取消</button>
@@ -640,6 +652,18 @@ var admin_page_content = `
               <option value="5">5 - 传递Token+Hash</option>
               <option value="6">6 - 传递Token+Hash+用户信息</option>
             </select>
+          </div>
+          <div class="bx--form-item mt-1"><label class="bx--label">Token来源配置 (可选)</label>
+            <input id="edit-auth-provider-token-source-header" type="text" class="bx--text-input" placeholder="Header名称，如 X-Token">
+            <input id="edit-auth-provider-token-source-cookie" type="text" class="bx--text-input mt-1" placeholder="Cookie名称，如 token">
+            <input id="edit-auth-provider-token-source-qs" type="text" class="bx--text-input mt-1" placeholder="QueryString参数名，如 token">
+            <div class="bx--form__helper-text">留空则使用默认（Authorization Bearer）</div>
+          </div>
+          <div class="bx--form-item mt-1"><label class="bx--label">Token发送配置 (可选)</label>
+            <input id="edit-auth-provider-token-dest-header" type="text" class="bx--text-input" placeholder="Header名称，如 X-Token">
+            <input id="edit-auth-provider-token-dest-cookie" type="text" class="bx--text-input mt-1" placeholder="Cookie名称，如 token">
+            <input id="edit-auth-provider-token-dest-qs" type="text" class="bx--text-input mt-1" placeholder="QueryString参数名，如 token">
+            <div class="bx--form__helper-text">留空则使用默认（Authorization Bearer）</div>
           </div>
         </div>
         <div class="bx--modal-footer">
