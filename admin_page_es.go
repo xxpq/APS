@@ -721,6 +721,7 @@ function openAddUserModal() {
   document.getElementById("add-user-name").value = "";
   document.getElementById("add-user-password").value = "";
   document.getElementById("add-user-admin").checked = false;
+  document.getElementById("add-user-proxy").checked = false;
   document.getElementById("add-user-groups").value = "";
   document.getElementById("add-user-token").value = "";
   document.getElementById("add-user-log-level").value = "";
@@ -740,6 +741,7 @@ async function openEditUserModal(username) {
     document.getElementById("edit-user-name").value = username;
     document.getElementById("edit-user-password").value = "";
     document.getElementById("edit-user-admin").checked = !!u.admin;
+    document.getElementById("edit-user-proxy").checked = !!u.proxy;
     document.getElementById("edit-user-groups").value = (u.groups && u.groups.join ? u.groups.join(",") : "");
     document.getElementById("edit-user-token").value = u.token || "";
     document.getElementById("edit-user-log-level").value = (u.logLevel !== undefined && u.logLevel !== null) ? u.logLevel : "";
@@ -759,6 +761,7 @@ async function confirmAddUser() {
   var name = document.getElementById("add-user-name").value.trim();
   var password = document.getElementById("add-user-password").value.trim();
   var admin = document.getElementById("add-user-admin").checked;
+  var proxy = document.getElementById("add-user-proxy").checked;
   var groups = document.getElementById("add-user-groups").value.trim();
   var token = document.getElementById("add-user-token").value.trim();
   
@@ -767,6 +770,7 @@ async function confirmAddUser() {
   
   var payload = { 
     admin: admin, 
+    proxy: proxy,
     password: password,
     token: token || undefined, 
     groups: groups ? groups.split(",").map(function(s){return s.trim();}).filter(function(s){return s;}) : [] 
@@ -800,6 +804,7 @@ async function confirmEditUser() {
   var name = document.getElementById("edit-user-name").value.trim();
   var password = document.getElementById("edit-user-password").value.trim();
   var admin = document.getElementById("edit-user-admin").checked;
+  var proxy = document.getElementById("edit-user-proxy").checked;
   var groups = document.getElementById("edit-user-groups").value.trim();
   var token = document.getElementById("edit-user-token").value.trim();
   
@@ -807,6 +812,7 @@ async function confirmEditUser() {
   
   var payload = { 
     admin: admin, 
+    proxy: proxy,
     token: token || undefined, 
     groups: groups ? groups.split(",").map(function(s){return s.trim();}).filter(function(s){return s;}) : [] 
   };
@@ -1256,6 +1262,7 @@ function openAddServerModal() {
   document.getElementById("add-server-rawtcp").checked = false;
   document.getElementById("add-server-public").checked = true;  // default true
   document.getElementById("add-server-panel").checked = false;
+  document.getElementById("add-server-proxy").checked = false;
   document.getElementById("add-server-log-level").value = "";
   document.getElementById("add-server-log-retention").value = "";
   populateFirewallSelectors();
@@ -1283,6 +1290,7 @@ function openEditServerModal(name) {
       document.getElementById("edit-server-rawtcp").checked = s.rawTCP || false;
       document.getElementById("edit-server-public").checked = (s.public !== undefined ? s.public : true);  // default true
       document.getElementById("edit-server-panel").checked = s.panel || false;
+      document.getElementById("edit-server-proxy").checked = s.proxy || false;
       document.getElementById("edit-server-log-level").value = (s.logLevel !== undefined && s.logLevel !== null) ? s.logLevel : "";
       document.getElementById("edit-server-log-retention").value = (s.logRetentionHours !== undefined && s.logRetentionHours !== null) ? s.logRetentionHours : "";
       
@@ -1346,6 +1354,7 @@ async function confirmAddServer() {
   payload.rawTCP = document.getElementById("add-server-rawtcp").checked;
   payload.public = document.getElementById("add-server-public").checked;
   payload.panel = document.getElementById("add-server-panel").checked;
+  payload.proxy = document.getElementById("add-server-proxy").checked;
   
   var logLevel = document.getElementById("add-server-log-level").value;
   if (logLevel !== "") payload.logLevel = parseInt(logLevel, 10);
@@ -1388,6 +1397,7 @@ async function confirmEditServer() {
   payload.rawTCP = document.getElementById("edit-server-rawtcp").checked;
   payload.public = document.getElementById("edit-server-public").checked;
   payload.panel = document.getElementById("edit-server-panel").checked;
+  payload.proxy = document.getElementById("edit-server-proxy").checked;
   
   var logLevel = document.getElementById("edit-server-log-level").value;
   if (logLevel !== "") payload.logLevel = parseInt(logLevel, 10);
@@ -2559,22 +2569,22 @@ function setupAdvancedPanelToggles() {
       // 维度统计渲染
       renderLineChart('chart-requests', [{
         group: '请求数',
-        data: snapshots.map(s => ({ date: new Date(s.timestamp * 1000), value: s.requests }))
+        data: snapshots.map(s => ({ date: new Date(s.timestamp * 1000), value: s.totalRequests || s.requests || 0 }))
       }]);
       
       renderAreaChart('chart-traffic', [
-        { group: '接收流量', data: snapshots.map(s => ({ date: new Date(s.timestamp * 1000), value: (s.bytesRecv / (1024 * 1024)).toFixed(2) })) },
-        { group: '发送流量', data: snapshots.map(s => ({ date: new Date(s.timestamp * 1000), value: (s.bytesSent / (1024 * 1024)).toFixed(2) })) }
+        { group: '接收流量', data: snapshots.map(s => ({ date: new Date(s.timestamp * 1000), value: ((s.bytesReceived || s.bytesRecv || 0) / (1024 * 1024)).toFixed(2) })) },
+        { group: '发送流量', data: snapshots.map(s => ({ date: new Date(s.timestamp * 1000), value: ((s.bytesSent || 0) / (1024 * 1024)).toFixed(2) })) }
       ]);
       
       renderLineChart('chart-connections', [{
-        group: '错误数',
-        data: snapshots.map(s => ({ date: new Date(s.timestamp * 1000), value: s.errors || 0 }))
+        group: '活跃连接',
+        data: snapshots.map(s => ({ date: new Date(s.timestamp * 1000), value: s.activeConnections || s.errors || 0 }))
       }]);
       
       renderLineChart('chart-qps', [{
-        group: '响应时间(ms)',
-        data: snapshots.map(s => ({ date: new Date(s.timestamp * 1000), value: s.avgRespTime ? s.avgRespTime.toFixed(2) : 0 }))
+        group: '请求/秒',
+        data: snapshots.map(s => ({ date: new Date(s.timestamp * 1000), value: s.requestsPerSecond ? s.requestsPerSecond.toFixed(2) : (s.avgRespTime ? s.avgRespTime.toFixed(2) : 0) }))
       }]);
     }
   }
