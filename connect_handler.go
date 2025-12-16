@@ -17,13 +17,13 @@ func (p *MapRemoteProxy) handleConnectWithIntercept(w http.ResponseWriter, r *ht
 		host = host + ":443"
 	}
 
-	log.Printf("[CONNECT] %s", host)
+	DebugLog("[CONNECT] %s", host)
 
 	hostname := strings.Split(r.Host, ":")[0]
 	shouldIntercept := p.shouldInterceptHost(hostname)
 
 	if shouldIntercept {
-		log.Printf("[CONNECT] Intercepting HTTPS for mapping: %s", r.Host)
+		DebugLog("[CONNECT] Intercepting HTTPS for mapping: %s", r.Host)
 		p.handleConnectWithMITM(w, r)
 	} else {
 		// For non-intercepted CONNECT, we must enforce server-level auth here
@@ -35,7 +35,7 @@ func (p *MapRemoteProxy) handleConnectWithIntercept(w http.ResponseWriter, r *ht
 			return
 		}
 
-		log.Printf("[CONNECT] Tunneling without intercept: %s", r.Host)
+		DebugLog("[CONNECT] Tunneling without intercept: %s", r.Host)
 		p.handleConnectTunnel(w, r, host, user, username)
 	}
 }
@@ -257,7 +257,7 @@ func (p *MapRemoteProxy) handleConnectTunnel(w http.ResponseWriter, r *http.Requ
 		ClientIP:     getClientIP(r),
 	})
 
-	log.Printf("[CONNECT] %s - Connection closed. Sent: %d, Recv: %d", r.Host, bytesSent, bytesRecv)
+	DebugLog("[CONNECT] %s - Connection closed. Sent: %d, Recv: %d", r.Host, bytesSent, bytesRecv)
 }
 
 // modifyResponseBody is now only in http_handler.go
