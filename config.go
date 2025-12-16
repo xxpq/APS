@@ -206,6 +206,7 @@ type TrafficPolicies struct {
 type User struct {
 	Password          string      `json:"password"`
 	Admin             bool        `json:"admin,omitempty"`
+	Proxy             bool        `json:"proxy,omitempty"` // 是否允许使用 HTTP/HTTPS 代理服务
 	Token             string      `json:"token,omitempty"`
 	Groups            []string    `json:"groups,omitempty"`
 	Dump              string      `json:"dump,omitempty"`
@@ -471,6 +472,7 @@ type RuleAuth struct {
 type ListenConfig struct {
 	Port              int         `json:"port"`
 	RawTCP            bool        `json:"rawTCP,omitempty"` // true: raw TCP forwarding mode, false: HTTP mode (default)
+	Proxy             *bool       `json:"proxy,omitempty"`  // true: 启用 HTTP/HTTPS 代理服务, false: 禁用 (default false)
 	Cert              interface{} `json:"cert,omitempty"`   // string ("auto") or CertFiles
 	Key               string      `json:"key,omitempty"`
 	Auth              *ServerAuth `json:"auth,omitempty"`

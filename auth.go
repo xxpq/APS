@@ -10,6 +10,9 @@ import (
 // 优先级: mapping auth > server auth
 // 如果 mapping 和 server 都没有 auth 配置，则允许访问
 // 如果任一级别配置了 auth，但请求没有提供有效的凭据，则拒绝访问
+// 支持两种认证方式：
+// 1. 用户名:密码 - 标准的 Basic 认证
+// 2. x-access-token:token - 使用 token 进行认证
 func (p *MapRemoteProxy) checkAuth(r *http.Request, mapping *Mapping) (bool, *User, string) {
 	serverConfig := p.config.Servers[p.serverName]
 	if serverConfig == nil {
@@ -62,10 +65,45 @@ func (p *MapRemoteProxy) checkAuth(r *http.Request, mapping *Mapping) (bool, *Us
 	}
 	username, password := creds[0], creds[1]
 
-	// 验证用户是否存在且密码正确
+	// 验证用户是否存在
 	if p.config.Auth == nil || p.config.Auth.Users == nil {
 		return false, nil, ""
 	}
+
+	// 检查是否是 x-access-token 认证方式
+	if username == "x-access-token" {
+		// 使用 token 进行认证
+		for uname, u := range p.config.Auth.Users {
+			if u.Token != "" && u.Token == password {
+				// Token 匹配成功
+				user := u
+				username = uname
+
+				// 检查用户是否在允许的用户列表中
+				for _, requiredUser := range requiredUsers {
+					if username == requiredUser {
+						return true, user, username
+					}
+				}
+
+				// 检查用户是否属于任何一个允许的组
+				for _, requiredGroup := range requiredGroups {
+					for _, userGroup := range user.Groups {
+						if userGroup == requiredGroup {
+							return true, user, username
+						}
+					}
+				}
+
+				// Token 正确但不满足权限要求
+				return false, nil, ""
+			}
+		}
+		// Token 不匹配
+		return false, nil, ""
+	}
+
+	// 标准的用户名:密码认证
 	user, ok := p.config.Auth.Users[username]
 	if !ok || user.Password != password {
 		return false, nil, ""
@@ -120,4 +158,32 @@ func (p *MapRemoteProxy) checkTunnelAccess(user *User, username string, tunnelAu
 	}
 
 	return false
+}
+
+// checkProxyPermission 检查用户是否有代理使用权限
+// 返回值: (hasPermission bool, errorMessage string)
+func (p *MapRemoteProxy) checkProxyPermission(user *User, username string) (bool, string) {
+	// 如果用户为 nil（匿名访问），则无权限
+	if user == nil {
+		return false, "Proxy access requires authentication"
+	}
+
+	// 检查用户是否直接配置了 proxy 权限
+	if user.Proxy {
+		return true, ""
+	}
+
+	// 检查用户所属的组是否有 proxy 权限
+	if p.config.Auth != nil && p.config.Auth.Groups != nil {
+		for _, groupName := range user.Groups {
+			if group, ok := p.config.Auth.Groups[groupName]; ok {
+				// 注意：Group 结构体中没有 Proxy 字段，所以这里只检查用户级别
+				// 如果需要组级别的 proxy 权限，需要在 Group 结构体中添加 Proxy 字段
+				_ = group // 避免未使用的变量警告
+			}
+		}
+	}
+
+	// 用户没有代理权限
+	return false, "User does not have proxy permission"
 }

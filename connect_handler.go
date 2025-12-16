@@ -19,6 +19,27 @@ func (p *MapRemoteProxy) handleConnectWithIntercept(w http.ResponseWriter, r *ht
 
 	DebugLog("[CONNECT] %s", host)
 
+	// 检查 server 是否启用了代理功能
+	serverConfig := p.config.Servers[p.serverName]
+	if serverConfig == nil || serverConfig.Proxy == nil || !*serverConfig.Proxy {
+		log.Printf("[PROXY] CONNECT request rejected: server '%s' does not have proxy enabled", p.serverName)
+		w.Header().Set("Proxy-Authenticate", `Basic realm="Proxy Disabled"`)
+		DebugLog("Proxy service is not enabled on this server", http.StatusProxyAuthRequired)
+		return
+	}
+
+	// 检查防火墙规则
+	var firewallRule *FirewallRule
+	if serverConfig.Firewall != "" {
+		firewallRule = GetFirewallRule(p.config, serverConfig.Firewall)
+	}
+	clientIP := getClientIP(r)
+	if !CheckFirewall(clientIP, firewallRule) {
+		log.Printf("[FIREWALL] CONNECT request from %s blocked by firewall", clientIP)
+		http.Error(w, "Forbidden", http.StatusForbidden)
+		return
+	}
+
 	hostname := strings.Split(r.Host, ":")[0]
 	shouldIntercept := p.shouldInterceptHost(hostname)
 
@@ -32,6 +53,13 @@ func (p *MapRemoteProxy) handleConnectWithIntercept(w http.ResponseWriter, r *ht
 		if !authorized {
 			w.Header().Set("Proxy-Authenticate", `Basic realm="Restricted"`)
 			http.Error(w, "Proxy authentication required", http.StatusProxyAuthRequired)
+			return
+		}
+
+		// 检查用户是否有代理权限
+		if hasPermission, errMsg := p.checkProxyPermission(user, username); !hasPermission {
+			log.Printf("[PROXY] User '%s' denied CONNECT access: %s", username, errMsg)
+			http.Error(w, "Forbidden: "+errMsg, http.StatusForbidden)
 			return
 		}
 

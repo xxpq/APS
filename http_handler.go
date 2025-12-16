@@ -353,6 +353,20 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var username string
+	// 检查是否是代理请求（绝对URL或 CONNECT 方法）
+	isProxyRequest := r.URL.IsAbs() || r.Method == http.MethodConnect
+
+	// 如果是代理请求，检查 server 是否启用了代理功能
+	if isProxyRequest {
+		if serverConfig == nil || serverConfig.Proxy == nil || !*serverConfig.Proxy {
+			isError = true
+			log.Printf("[PROXY] Proxy request rejected: server '%s' does not have proxy enabled", p.serverName)
+			w.Header().Set("Proxy-Authenticate", `Basic realm="Proxy Disabled"`)
+			http.Error(w, "Proxy service is not enabled on this server", http.StatusProxyAuthRequired)
+			return
+		}
+	}
+
 	// Skip internal auth if third-party auth is configured
 	if authUrl == "" {
 		var authorized bool
@@ -369,6 +383,16 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		if user != nil {
 			userKey = username
+		}
+
+		// 如果是代理请求，检查用户是否有代理权限
+		if isProxyRequest {
+			if hasPermission, errMsg := p.checkProxyPermission(user, username); !hasPermission {
+				isError = true
+				log.Printf("[PROXY] User '%s' denied proxy access: %s", username, errMsg)
+				http.Error(w, "Forbidden: "+errMsg, http.StatusForbidden)
+				return
+			}
 		}
 	}
 
@@ -995,7 +1019,7 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 				log.Printf("[CACHE] Decoded %s content before caching: %d -> %d bytes", encoding, len(body), len(cacheBody))
 			}
 		}
-		
+
 		if len(cacheBody) > 0 {
 			if err := p.staticCache.Set(cacheURL, resp.Header, resp.StatusCode, cacheBody); err != nil {
 				log.Printf("[CACHE] Error saving cache for %s: %v", cacheURL, err)
@@ -1324,7 +1348,7 @@ func (p *MapRemoteProxy) checkThirdPartyAuth(r *http.Request, authUrl string) (b
 	if strings.HasSuffix(authBase, "/") {
 		authBase = strings.TrimSuffix(authBase, "/")
 	}
-	
+
 	targetAuthURL := authBase + r.URL.Path
 	if r.URL.RawQuery != "" {
 		targetAuthURL += "?" + r.URL.RawQuery
@@ -1354,7 +1378,7 @@ func (p *MapRemoteProxy) checkThirdPartyAuth(r *http.Request, authUrl string) (b
 
 	if resp.StatusCode == http.StatusOK {
 		bodyBytes, _ := io.ReadAll(resp.Body)
-		
+
 		var finalBody string
 		var finalHash string
 
@@ -1369,14 +1393,14 @@ func (p *MapRemoteProxy) checkThirdPartyAuth(r *http.Request, authUrl string) (b
 			if finalBody == "" {
 				finalBody = "1" // Fallback for empty body without hash match context
 			}
-			
+
 			// Calculate new hash
 			finalHash = calculateUserHash(finalBody)
 		}
-		
+
 		// Cache result asynchronously
 		go authCache.Set(cacheKey, finalBody, finalHash, 1*time.Hour)
-		
+
 		return true, finalBody, finalHash
 	}
 
@@ -1388,21 +1412,20 @@ func (p *MapRemoteProxy) checkThirdPartyAuth(r *http.Request, authUrl string) (b
 func calculateUserHash(body string) string {
 	var data interface{}
 	var sortedBytes []byte
-	
+
 	// Try to unmarshal as JSON to sort keys
 	if err := json.Unmarshal([]byte(body), &data); err == nil {
 		if b, err := json.Marshal(data); err == nil {
 			sortedBytes = b
 		}
 	}
-	
+
 	// If unmarshal failed or marshal failed, fallback to raw body
 	if sortedBytes == nil {
 		sortedBytes = []byte(body)
 	}
-	
+
 	encoded := base64.StdEncoding.EncodeToString(sortedBytes)
 	sum := md5.Sum([]byte(encoded))
 	return hex.EncodeToString(sum[:])
 }
-

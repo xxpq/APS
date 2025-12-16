@@ -7,10 +7,16 @@
       "panel": true,
       "firewall": "block_bad_actors"
     },
+    "proxy": {
+      "port": 1080,
+      "proxy": true,
+      "firewall": "block_bad_actors"
+    },
     "mstsc_sucdri_my_pc": {
-      "port": 3389,
+      "port": 3388,
       "rawTCP": true,
       "public": true,
+      "panel": false,
       "firewall": "block_bad_actors"
     },
     "mstsc_sucdri_ssh": {
@@ -64,20 +70,21 @@
     }
   },
   "endpoints": {
+    "cjy_server": {
+      "tunnelName": "sucdri",
+      "endpointName": "cjy_server"
+    },
     "my_pc": {
       "tunnelName": "sucdri",
-      "endpointName": "阿猫城建院的工位"
-    },
-    "sucdri_server": {
-      "tunnelName": "sucdri",
-      "endpointName": "城建院跳板服务器"
+      "endpointName": "my_pc"
     }
   },
   "auth": {
     "users": {
       "admin": {
         "password": "admin",
-        "admin": true
+        "admin": true,
+        "proxy": true
       }
     }
   },
@@ -95,8 +102,12 @@
       "block": [
         "74.7.241.12/8",
         "159.65.2.87/8",
+        "3.160.150.70/8",
         "125.67.61.66/8",
+        "18.245.86.82/8",
+        "13.226.244.90/8",
         "20.80.83.86/8",
+        "167.94.138.177/8",
         "172.217.25.68/8",
         "176.117.107.91/8",
         "128.199.207.131/8",
@@ -123,6 +134,23 @@
     {
       "from": ["http://a.l-l.cn/*", "https://a.l-l.cn/*"],
       "to": "http://ip.sb/*"
+    },
+    {
+      "from": "https://api.sucdri.p-q.co/*",
+      "to": {
+        "replace": {
+          "http://8.159.146.34:7788": "https://api.sucdri.p-q.co"
+        },
+        "url": "http://8.159.146.34:7788/*"
+      }
+    },
+    {
+      "from": "https://api.sucdri.p-q.co/shlq/*",
+      "to": "http://8.159.146.34:7788/*"
+    },
+    {
+      "from": "https://iot.api.sucdri.p-q.co/*",
+      "to": "http://175.27.166.25:7788/*"
     },
     {
       "from": ["http://shkc.p-q.co/*", "https://shkc.p-q.co/*"],
@@ -168,6 +196,13 @@
       }
     },
     {
+      "from": "tcp://0.0.0.0:3388",
+      "to": "tcp://127.0.0.1:3389",
+      "via": {
+        "endpoints": "my_pc"
+      }
+    },
+    {
       "from": ["https://vps.sucdri.p-q.co/*"],
       "to": {
         "insecure": true,
@@ -175,13 +210,6 @@
       },
       "via": {
         "endpoints": "cjy_server"
-      }
-    },
-    {
-      "from": "tcp://0.0.0.0:3389",
-      "to": "tcp://127.0.0.1:3389",
-      "via": {
-        "endpoints": "my_pc"
       }
     },
     {
@@ -272,5 +300,5 @@
       }
     }
   ],
-  "version": 34
+  "version": 44
 }
