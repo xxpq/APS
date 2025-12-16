@@ -122,13 +122,14 @@ func (s *RawTCPServer) handleConnection(clientConn net.Conn) {
 
 	// Variables for stats recording
 	var (
-		bytesSent   uint64
-		bytesRecv   uint64
-		isError     bool
-		ruleKey     string
-		userKey     string
-		tunnelKey   string
-		endpointKey string
+		bytesSent     uint64
+		bytesRecv     uint64
+		isError       bool
+		isIntercepted bool
+		ruleKey       string
+		userKey       string
+		tunnelKey     string
+		endpointKey   string
 	)
 
 	// Defer stats recording
@@ -144,6 +145,7 @@ func (s *RawTCPServer) handleConnection(clientConn net.Conn) {
 			BytesRecv:    bytesRecv,
 			ResponseTime: responseTime,
 			IsError:      isError,
+			Intercepted:  isIntercepted,
 			Protocol:     "rawtcp",
 			StatusCode:   0, // TCP has no status code
 			ClientIP:     clientConn.RemoteAddr().String(),
@@ -229,7 +231,8 @@ func (s *RawTCPServer) handleConnection(clientConn net.Conn) {
 			if !CheckFirewall(clientAddr, firewallRule) {
 				DebugLog("[RAW TCP] Connection from %s blocked by server firewall", clientAddr)
 				clientConn.Close()
-				isError = true
+				isIntercepted = true
+				// isError = true // Firewall block is now counted as intercepted
 				return
 			}
 		}
@@ -271,7 +274,8 @@ func (s *RawTCPServer) handleConnection(clientConn net.Conn) {
 			if !CheckFirewall(clientAddr, firewallRule) {
 				DebugLog("[RAW TCP] Connection from %s blocked by mapping firewall", clientAddr)
 				clientConn.Close()
-				isError = true
+				isIntercepted = true
+				// isError = true // Firewall block is now counted as intercepted
 				return
 			}
 		}

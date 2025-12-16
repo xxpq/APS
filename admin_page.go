@@ -104,6 +104,7 @@ var admin_page_content = `
                   <th>键名</th>
                   <th>请求数</th>
                   <th>错误数</th>
+                  <th>拦截数</th>
                   <th>QPS</th>
                   <th>接收字节 平均/最小/最大</th>
                   <th>发送字节 平均/最小/最大</th>

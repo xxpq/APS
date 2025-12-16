@@ -395,6 +395,7 @@ var admin_page_js = `
             <td>${key}</td>
             <td>${m.requestCount ?? "-"}</td>
             <td>${m.errors ?? "-"}</td>
+            <td>${m.intercepted ?? "-"}</td>
             <td>${fmtQPS(m.qps)}</td>
             <td>${fmtBytes(m.bytesRecv?.avg)} / ${fmtBytes(m.bytesRecv?.min)} / ${fmtBytes(m.bytesRecv?.max)}</td>
             <td>${fmtBytes(m.bytesSent?.avg)} / ${fmtBytes(m.bytesSent?.min)} / ${fmtBytes(m.bytesSent?.max)}</td>

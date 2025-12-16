@@ -35,6 +35,7 @@ type QPSMetric struct {
 type Metrics struct {
 	RequestCount uint64
 	Errors       uint64
+	Intercepted  uint64 // 拦截数
 
 	// Protocol-specific counters
 	HTTPRequests   uint64 // HTTP请求数
@@ -156,6 +157,7 @@ type RecordData struct {
 	BytesRecv    uint64
 	ResponseTime time.Duration
 	IsError      bool
+	Intercepted  bool // 是否被拦截
 
 	// Protocol-specific fields
 	Protocol   string // "http" or "rawtcp"
@@ -388,6 +390,9 @@ func (sc *StatsCollector) updateMetricsForDim(m *sync.Map, key string, data Reco
 	if data.IsError {
 		atomic.AddUint64(&metrics.Errors, 1)
 	}
+	if data.Intercepted {
+		atomic.AddUint64(&metrics.Intercepted, 1)
+	}
 
 	// Protocol-specific counting and traffic tracking
 	if data.Protocol == "http" {
@@ -518,6 +523,7 @@ type PublicQPSMetric struct {
 type PublicMetrics struct {
 	RequestCount uint64 `json:"requestCount"`
 	Errors       uint64 `json:"errors"`
+	Intercepted  uint64 `json:"intercepted"`
 
 	// Protocol-specific counters
 	HTTPRequests   uint64 `json:"httpRequests"`
@@ -649,6 +655,7 @@ func (sc *StatsCollector) GetMetricsForKey(m *sync.Map, key string) *PublicMetri
 	return &PublicMetrics{
 		RequestCount: requestCount,
 		Errors:       atomic.LoadUint64(&metrics.Errors),
+		Intercepted:  atomic.LoadUint64(&metrics.Intercepted),
 
 		// Protocol-specific counters
 		HTTPRequests:   atomic.LoadUint64(&metrics.HTTPRequests),
@@ -757,6 +764,7 @@ func (sc *StatsCollector) buildPublicMetricsMap(m *sync.Map) map[string]*PublicM
 		publicMap[k] = &PublicMetrics{
 			RequestCount: requestCount,
 			Errors:       atomic.LoadUint64(&metrics.Errors),
+			Intercepted:  atomic.LoadUint64(&metrics.Intercepted),
 
 			// Protocol-specific counters
 			HTTPRequests:   atomic.LoadUint64(&metrics.HTTPRequests),

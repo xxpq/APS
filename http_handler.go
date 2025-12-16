@@ -96,19 +96,20 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Prepare variables for stats recording
 	var (
-		bytesSent    uint64
-		bytesRecv    uint64
-		isError      bool
-		ruleKey      string
-		userKey      string
-		tunnelKey    string
-		endpointKey  string // Format: "tunnelName:endpointName"
-		proxyKey     string
-		statusCode   int // HTTP status code
-		serverConfig *ListenConfig
-		mapping      *Mapping
-		user         *User
-		firewallRule *FirewallRule
+		bytesSent     uint64
+		bytesRecv     uint64
+		isError       bool
+		isIntercepted bool
+		ruleKey       string
+		userKey       string
+		tunnelKey     string
+		endpointKey   string // Format: "tunnelName:endpointName"
+		proxyKey      string
+		statusCode    int // HTTP status code
+		serverConfig  *ListenConfig
+		mapping       *Mapping
+		user          *User
+		firewallRule  *FirewallRule
 	)
 
 	// Defer the consolidated stats recording
@@ -127,6 +128,7 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 			BytesRecv:    bytesRecv,
 			ResponseTime: responseTime,
 			IsError:      isError,
+			Intercepted:  isIntercepted,
 			Protocol:     "http",
 			StatusCode:   statusCode,
 			ClientIP:     getClientIP(r),
@@ -424,7 +426,8 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	// Check if client IP is allowed
 	clientIP := getClientIP(r)
 	if !CheckFirewall(clientIP, firewallRule) {
-		isError = true
+		isIntercepted = true
+		// isError = true // Firewall block is now counted as intercepted, not error
 		DebugLog("[FIREWALL] Request from %s blocked by firewall", clientIP)
 		http.Error(w, "Forbidden", http.StatusForbidden)
 		return
