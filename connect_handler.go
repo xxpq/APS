@@ -22,9 +22,9 @@ func (p *MapRemoteProxy) handleConnectWithIntercept(w http.ResponseWriter, r *ht
 	// 检查 server 是否启用了代理功能
 	serverConfig := p.config.Servers[p.serverName]
 	if serverConfig == nil || serverConfig.Proxy == nil || !*serverConfig.Proxy {
-		log.Printf("[PROXY] CONNECT request rejected: server '%s' does not have proxy enabled", p.serverName)
+		DebugLog("[PROXY] CONNECT request rejected: server '%s' does not have proxy enabled", p.serverName)
 		w.Header().Set("Proxy-Authenticate", `Basic realm="Proxy Disabled"`)
-		DebugLog("Proxy service is not enabled on this server", http.StatusProxyAuthRequired)
+		http.Error(w, "Proxy service is not enabled on this server", http.StatusProxyAuthRequired)
 		return
 	}
 

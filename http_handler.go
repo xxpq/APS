@@ -360,7 +360,7 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	if isProxyRequest {
 		if serverConfig == nil || serverConfig.Proxy == nil || !*serverConfig.Proxy {
 			isError = true
-			log.Printf("[PROXY] Proxy request rejected: server '%s' does not have proxy enabled", p.serverName)
+			DebugLog("[PROXY] Proxy request rejected: server '%s' does not have proxy enabled", p.serverName)
 			w.Header().Set("Proxy-Authenticate", `Basic realm="Proxy Disabled"`)
 			http.Error(w, "Proxy service is not enabled on this server", http.StatusProxyAuthRequired)
 			return

@@ -646,7 +646,7 @@ function appendActLog(msg) {
     actTerminal.appendChild(div);
     
     // Limit buffer
-    if (actTerminal.childElementCount > 2000) {
+    if (actTerminal.childElementCount > 500) {
         actTerminal.removeChild(actTerminal.firstChild);
     }
 
