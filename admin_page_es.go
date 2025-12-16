@@ -1025,6 +1025,7 @@ async function loadTunnelEndpoints(tunnelName) {
         "<td>" + (ep.latency || "-") + "</td>" +
         "<td>" + (stats.requestCount ?? "-") + "</td>" +
         "<td>" + (stats.errors ?? "-") + "</td>" +
+        "<td>" + (stats.intercepted || 0) + "</td>" +
         "<td>" + fmtQPS(stats.qps) + "</td>" +
         "<td>" + fmtBytes(bytesSent.total) + " / " + fmtBytes(bytesSent.avg) + " / " + fmtBytes(bytesSent.min) + " / " + fmtBytes(bytesSent.max) + "</td>" +
         "<td>" + fmtBytes(bytesRecv.total) + " / " + fmtBytes(bytesRecv.avg) + " / " + fmtBytes(bytesRecv.min) + " / " + fmtBytes(bytesRecv.max) + "</td>" +
@@ -2703,6 +2704,7 @@ async function loadEndpoints() {
         "<td>" + (p2pEnabled ? "<span style='color:#0e6027'>启用</span>" : "<span style='color:#da1e28'>禁用</span>") + "</td>" +
         "<td>" + (lanEnabled ? "<span style='color:#0e6027'>启用</span>" : "<span style='color:#da1e28'>禁用</span>") + "</td>" +
         "<td>" + maxHops + "</td>" +
+        "<td>" + (ep.stats ? (ep.stats.intercepted || 0) : "-") + "</td>" +
         "<td><button class='bx--btn bx--btn--sm bx--btn--ghost' onclick='openEditEndpointModal(\"" + id.replace(/"/g, '&quot;') + "\")'>编辑</button> " +
         "<button class='bx--btn bx--btn--sm bx--btn--danger--ghost' onclick='deleteEndpoint(\"" + id.replace(/"/g, '&quot;') + "\")'>删除</button></td>";
       if (tbody) tbody.appendChild(tr);

@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -966,24 +967,64 @@ func (h *AdminHandlers) handleRules(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(h.config.Mappings)
 	case http.MethodPost:
+		// Read body once
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, "Failed to read request body", http.StatusBadRequest)
+			return
+		}
+
+		// Try to decode as wrapped format first
 		var req struct {
 			Index   *int    `json:"index,omitempty"`
 			Mapping Mapping `json:"mapping"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "Invalid payload", http.StatusBadRequest)
+
+		// Check if "mapping" key exists in JSON
+		var rawMap map[string]interface{}
+		if err := json.Unmarshal(body, &rawMap); err != nil {
+			http.Error(w, "Invalid JSON format", http.StatusBadRequest)
 			return
 		}
+
 		h.configMux.Lock()
 		defer h.configMux.Unlock()
-		if req.Index != nil {
-			if *req.Index < 0 || *req.Index >= len(h.config.Mappings) {
+
+		var mapping Mapping
+		var index *int
+
+		if _, hasMapping := rawMap["mapping"]; hasMapping {
+			// Wrapped format
+			if err := json.Unmarshal(body, &req); err != nil {
+				http.Error(w, "Invalid payload format", http.StatusBadRequest)
+				return
+			}
+			mapping = req.Mapping
+			index = req.Index
+		} else {
+			// Flat format (backward compatibility or frontend convenience)
+			// Check if "index" is present at top level
+			if idxVal, ok := rawMap["index"]; ok {
+				if idxFloat, ok := idxVal.(float64); ok {
+					idx := int(idxFloat)
+					index = &idx
+				}
+			}
+			// Unmarshal entire body as Mapping
+			if err := json.Unmarshal(body, &mapping); err != nil {
+				http.Error(w, "Invalid mapping format", http.StatusBadRequest)
+				return
+			}
+		}
+
+		if index != nil {
+			if *index < 0 || *index >= len(h.config.Mappings) {
 				http.Error(w, "index out of range", http.StatusBadRequest)
 				return
 			}
-			h.config.Mappings[*req.Index] = req.Mapping
+			h.config.Mappings[*index] = mapping
 		} else {
-			h.config.Mappings = append(h.config.Mappings, req.Mapping)
+			h.config.Mappings = append(h.config.Mappings, mapping)
 		}
 		if err := h.saveConfigLocked(); err != nil {
 			http.Error(w, "Failed to persist config", http.StatusInternalServerError)

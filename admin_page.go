@@ -374,7 +374,7 @@ var admin_page_content = `
           <h4>在线节点</h4>
           <div class="table-wrap mt-1">
             <table class="bx--data-table carbon-table">
-              <thead><tr><th>节点名称</th><th>远程地址</th><th>上线时间</th><th>最后传输</th><th>延迟</th><th>请求数</th><th>错误数</th><th>QPS (平均/最小/最大)</th><th>发送字节 (总/均/最小/最大)</th><th>接收字节 (总/均/最小/最大)</th><th>响应时间 (平均/最短/最长 ms)</th></tr></thead>
+              <thead><tr><th>节点名称</th><th>远程地址</th><th>上线时间</th><th>最后传输</th><th>延迟</th><th>请求数</th><th>错误数</th><th>拦截数</th><th>QPS (平均/最小/最大)</th><th>发送字节 (总/均/最小/最大)</th><th>接收字节 (总/均/最小/最大)</th><th>响应时间 (平均/最短/最长 ms)</th></tr></thead>
               <tbody id="tunnel-endpoints-tbody"></tbody>
             </table>
           </div>
@@ -439,7 +439,7 @@ var admin_page_content = `
         </div>
         <div class="table-wrap">
           <table class="bx--data-table carbon-table">
-            <thead><tr><th>配置ID</th><th>隧道名称</th><th>节点名称</th><th>端口映射</th><th>P2P</th><th>LAN发现</th><th>最大中继</th><th>操作</th></tr></thead>
+            <thead><tr><th>配置ID</th><th>隧道名称</th><th>节点名称</th><th>端口映射</th><th>P2P</th><th>LAN发现</th><th>最大中继</th><th>拦截数</th><th>操作</th></tr></thead>
             <tbody id="endpoints-tbody"></tbody>
           </table>
         </div>
