@@ -294,50 +294,61 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	originalURL := p.buildOriginalURL(r)
 
 	// Check third-party authentication if configured
-	authUrl, authLevel := p.resolveAuthConfig(mapping)
+	authUrl, loginUrl, authLevel := p.resolveAuthConfig(mapping)
 	if matched && mapping != nil && authUrl != "" {
 		if authorized, info, hash := p.checkThirdPartyAuth(r, authUrl); !authorized {
-			isError = true
-			http.Error(w, "Unauthorized (Third-party)", http.StatusUnauthorized)
+			// Redirect logic
+			redirectUrl := loginUrl
+			if redirectUrl == "" {
+				isError = true
+				http.Error(w, "Unauthorized (Third-party)", http.StatusUnauthorized)
+				return
+			}
+
+			// Append callback
+			separator := "?"
+			if strings.Contains(redirectUrl, "?") {
+				separator = "&"
+			}
+			redirectUrl += separator + "callback=" + url.QueryEscape(originalURL)
+
+			http.Redirect(w, r, redirectUrl, http.StatusFound)
+			log.Printf("[%s] Auth failed, redirecting to %s", getClientIP(r), redirectUrl)
 			return
 		} else {
 			// Extract token again for header manipulation
 			token := p.extractToken(r)
 
-			// Level 0: Remove token
-			if authLevel == 0 {
+			// Auth Level Logic
+			// 0: No Token (Default)
+			// 1: Hash Only
+			// 2: User Info Only
+			// 3: Hash + User Info
+			// 4: Token Only
+			// 5: Token + Hash
+			// 6: Token + Hash + User Info
+
+			// Handle Token (Levels 4, 5, 6)
+			if authLevel == 4 || authLevel == 5 || authLevel == 6 {
+				if r.Header.Get("Authorization") == "" && token != "" {
+					r.Header.Set("Authorization", "Bearer "+token)
+				}
+			} else {
+				// Remove Authorization header for levels 0, 1, 2, 3
 				r.Header.Del("Authorization")
 			}
 
-			// Level 1: Pass token (already in request if Authorization header was used)
-			if authLevel == 1 {
-				if r.Header.Get("Authorization") == "" && token != "" {
-					r.Header.Set("Authorization", "Bearer "+token)
-				}
-			}
-
-			// Level 2: Pass user info (APS-AUTH-INFO), remove token
-			if authLevel == 2 {
-				r.Header.Set("APS-AUTH-INFO", info)
-				if r.Header.Get("Authorization") != "" {
-					r.Header.Del("Authorization")
-				}
-			}
-
-			// Level 3: Pass token + hash (APS-AUTH-HASH)
-			if authLevel == 3 {
-				if r.Header.Get("Authorization") == "" && token != "" {
-					r.Header.Set("Authorization", "Bearer "+token)
-				}
+			// Handle Hash (Levels 1, 3, 5, 6)
+			if authLevel == 1 || authLevel == 3 || authLevel == 5 || authLevel == 6 {
 				r.Header.Set("APS-AUTH-HASH", hash)
 			}
 
-			// Level 4: Pass token + user info (APS-AUTH-INFO)
-			if authLevel == 4 {
-				if r.Header.Get("Authorization") == "" && token != "" {
-					r.Header.Set("Authorization", "Bearer "+token)
-				}
-				r.Header.Set("APS-AUTH-INFO", info)
+			// Handle User Info (Levels 2, 3, 6)
+			if authLevel == 2 || authLevel == 3 || authLevel == 6 {
+				// info is already a JSON string from checkThirdPartyAuth
+				// Base64 encode the JSON info to ensure safe header transmission
+				encodedInfo := base64.StdEncoding.EncodeToString([]byte(info))
+				r.Header.Set("APS-AUTH-INFO", encodedInfo)
 			}
 		}
 	}
@@ -1262,18 +1273,20 @@ func (p *MapRemoteProxy) createClientWithP12(p12Path, password string, policies 
 }
 
 // resolveAuthConfig resolves the auth URL and level from mapping or referenced provider
-func (p *MapRemoteProxy) resolveAuthConfig(mapping *Mapping) (string, int) {
+func (p *MapRemoteProxy) resolveAuthConfig(mapping *Mapping) (string, string, int) {
 	if mapping == nil || mapping.Auth == nil {
-		return "", 0
+		return "", "", 0
 	}
 
 	var authUrl string
+	var loginUrl string
 	var authLevel int
 
 	// 1. Check referenced AuthProvider
 	if mapping.Auth.AuthProvider != "" && p.config.AuthProviders != nil {
 		if provider, ok := p.config.AuthProviders[mapping.Auth.AuthProvider]; ok {
 			authUrl = provider.URL
+			loginUrl = provider.LoginUrl
 			authLevel = provider.Level
 		}
 	}
@@ -1287,7 +1300,12 @@ func (p *MapRemoteProxy) resolveAuthConfig(mapping *Mapping) (string, int) {
 		}
 	}
 
-	return authUrl, authLevel
+	// 3. Check inline LoginUrl (overrides)
+	if mapping.Auth.LoginUrl != "" {
+		loginUrl = mapping.Auth.LoginUrl
+	}
+
+	return authUrl, loginUrl, authLevel
 }
 
 // extractToken extracts the token from Authorization header, Cookie, or Query String

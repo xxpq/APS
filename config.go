@@ -75,8 +75,9 @@ type EndpointP2PSettings struct {
 
 // AuthProviderConfig 第三方认证配置
 type AuthProviderConfig struct {
-	URL   string `json:"url"`
-	Level int    `json:"level"`
+	URL      string `json:"url"`
+	LoginUrl string `json:"loginUrl,omitempty"`
+	Level    int    `json:"level"` // 0=None, 1=Hash, 2=Info, 3=Hash+Info, 4=Token, 5=Token+Hash, 6=Token+Hash+Info
 }
 
 // StaticCacheConfig 静态文件缓存配置
@@ -466,7 +467,8 @@ type RuleAuth struct {
 	Groups       []string `json:"groups,omitempty"`
 	AuthProvider string   `json:"authProvider,omitempty"` // 引用 authProviders 的 key
 	AuthUrl      string   `json:"authUrl,omitempty"`      // 第三方认证URL (内联)
-	AuthLevel    *int     `json:"authLevel,omitempty"`    // 认证等级: 0=不传, 1=只传token, 2=只传info, 3=token+hash, 4=token+info
+	LoginUrl     string   `json:"loginUrl,omitempty"`     // 认证失效时的跳转地址 (内联)
+	AuthLevel    *int     `json:"authLevel,omitempty"`    // 认证等级: 0=None, 1=Hash, 2=Info, 3=Hash+Info, 4=Token, 5=Token+Hash, 6=Token+Hash+Info
 }
 
 type ListenConfig struct {

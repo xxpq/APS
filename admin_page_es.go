@@ -1960,6 +1960,7 @@ async function loadAuthProviders() {
 function openAddAuthProviderModal() {
   document.getElementById("add-auth-provider-name").value = "";
   document.getElementById("add-auth-provider-url").value = "";
+  document.getElementById("add-auth-provider-login-url").value = "";
   document.getElementById("add-auth-provider-level").value = "0";
   
   var modal = document.querySelector('#auth-provider-add-modal');
@@ -1976,6 +1977,7 @@ function openEditAuthProviderModal(name) {
       document.getElementById("edit-auth-provider-original-name").value = name;
       document.getElementById("edit-auth-provider-name").value = name;
       document.getElementById("edit-auth-provider-url").value = ap.url || "";
+      document.getElementById("edit-auth-provider-login-url").value = ap.loginUrl || "";
       document.getElementById("edit-auth-provider-level").value = ap.level || 0;
       
       var modal = document.querySelector('#auth-provider-edit-modal');
@@ -1988,6 +1990,7 @@ async function confirmAddAuthProvider() {
   if (msg) msg.textContent = "";
   var name = document.getElementById("add-auth-provider-name").value.trim();
   var url = document.getElementById("add-auth-provider-url").value.trim();
+  var loginUrl = document.getElementById("add-auth-provider-login-url").value.trim();
   var level = parseInt(document.getElementById("add-auth-provider-level").value, 10);
   
   if (!name) { if (msg) msg.textContent = "名称必填"; return; }
@@ -1997,7 +2000,7 @@ async function confirmAddAuthProvider() {
     var res = await authFetch(authProvidersUrl, {
       method: "POST",
       headers: buildAuthHeaders({ "Content-Type": "application/json" }),
-      body: JSON.stringify({ name: name, authProvider: { url: url, level: level } })
+      body: JSON.stringify({ name: name, authProvider: { url: url, loginUrl: loginUrl, level: level } })
     });
     if (!res.ok) throw new Error(await res.text());
     
@@ -2015,6 +2018,7 @@ async function confirmEditAuthProvider() {
   if (msg) msg.textContent = "";
   var name = document.getElementById("edit-auth-provider-name").value.trim();
   var url = document.getElementById("edit-auth-provider-url").value.trim();
+  var loginUrl = document.getElementById("edit-auth-provider-login-url").value.trim();
   var level = parseInt(document.getElementById("edit-auth-provider-level").value, 10);
   
   if (!name) { if (msg) msg.textContent = "名称必填"; return; }
@@ -2024,7 +2028,7 @@ async function confirmEditAuthProvider() {
     var res = await authFetch(authProvidersUrl, {
       method: "POST",
       headers: buildAuthHeaders({ "Content-Type": "application/json" }),
-      body: JSON.stringify({ name: name, authProvider: { url: url, level: level } })
+      body: JSON.stringify({ name: name, authProvider: { url: url, loginUrl: loginUrl, level: level } })
     });
     if (!res.ok) throw new Error(await res.text());
     

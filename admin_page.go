@@ -596,13 +596,16 @@ var admin_page_content = `
         <div class="bx--modal-content">
           <div class="bx--form-item"><label class="bx--label">配置名称 *</label><input id="add-auth-provider-name" type="text" class="bx--text-input"></div>
           <div class="bx--form-item mt-1"><label class="bx--label">认证URL *</label><input id="add-auth-provider-url" type="text" class="bx--text-input" placeholder="http://localhost:3311/auth/*"></div>
+          <div class="bx--form-item mt-1"><label class="bx--label">登录URL (可选)</label><input id="add-auth-provider-login-url" type="text" class="bx--text-input" placeholder="http://localhost:3311/login"></div>
           <div class="bx--form-item mt-1"><label class="bx--label">认证等级</label>
             <select id="add-auth-provider-level" class="bx--select">
               <option value="0">0 - 不传递Token</option>
-              <option value="1">1 - 仅传递Token</option>
+              <option value="1">1 - 仅传递Hash</option>
               <option value="2">2 - 仅传递用户信息</option>
-              <option value="3">3 - 传递Token+Hash</option>
-              <option value="4">4 - 传递Token+用户信息</option>
+              <option value="3">3 - 传递Hash+用户信息</option>
+              <option value="4">4 - 仅传递Token</option>
+              <option value="5">5 - 传递Token+Hash</option>
+              <option value="6">6 - 传递Token+Hash+用户信息</option>
             </select>
           </div>
         </div>
@@ -626,13 +629,16 @@ var admin_page_content = `
           <input type="hidden" id="edit-auth-provider-original-name">
           <div class="bx--form-item"><label class="bx--label">配置名称 *</label><input id="edit-auth-provider-name" type="text" class="bx--text-input"></div>
           <div class="bx--form-item mt-1"><label class="bx--label">认证URL *</label><input id="edit-auth-provider-url" type="text" class="bx--text-input"></div>
+          <div class="bx--form-item mt-1"><label class="bx--label">登录URL (可选)</label><input id="edit-auth-provider-login-url" type="text" class="bx--text-input"></div>
           <div class="bx--form-item mt-1"><label class="bx--label">认证等级</label>
             <select id="edit-auth-provider-level" class="bx--select">
               <option value="0">0 - 不传递Token</option>
-              <option value="1">1 - 仅传递Token</option>
+              <option value="1">1 - 仅传递Hash</option>
               <option value="2">2 - 仅传递用户信息</option>
-              <option value="3">3 - 传递Token+Hash</option>
-              <option value="4">4 - 传递Token+用户信息</option>
+              <option value="3">3 - 传递Hash+用户信息</option>
+              <option value="4">4 - 仅传递Token</option>
+              <option value="5">5 - 传递Token+Hash</option>
+              <option value="6">6 - 传递Token+Hash+用户信息</option>
             </select>
           </div>
         </div>
