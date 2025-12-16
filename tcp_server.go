@@ -216,10 +216,9 @@ func (s *RawTCPServer) handleConnection(clientConn net.Conn) {
 	}()
 
 	clientAddr := clientConn.RemoteAddr().String()
-	log.Printf("[RAW TCP] New connection from %s on server '%s'", clientAddr, s.name)
 
-	// Check firewall rules (server firewall takes priority over mapping firewall)
-	// Optimization: Check server firewall first before finding mapping
+	// Check firewall rules BEFORE logging anything
+	// This prevents blocked IPs from appearing in logs
 	var firewallRule *FirewallRule
 	if s.config.Firewall != "" {
 		firewallRule = GetFirewallRule(s.appConfig, s.config.Firewall)
@@ -230,10 +229,14 @@ func (s *RawTCPServer) handleConnection(clientConn net.Conn) {
 			if !CheckFirewall(clientAddr, firewallRule) {
 				DebugLog("[RAW TCP] Connection from %s blocked by server firewall", clientAddr)
 				clientConn.Close()
+				isError = true
 				return
 			}
 		}
 	}
+
+	// Only log connection if it passed server firewall check
+	log.Printf("[RAW TCP] New connection from %s on server '%s'", clientAddr, s.name)
 
 	// Find matching mapping for this server
 	mapping := s.findMapping()
@@ -268,10 +271,15 @@ func (s *RawTCPServer) handleConnection(clientConn net.Conn) {
 			if !CheckFirewall(clientAddr, firewallRule) {
 				DebugLog("[RAW TCP] Connection from %s blocked by mapping firewall", clientAddr)
 				clientConn.Close()
+				isError = true
 				return
 			}
 		}
 	}
+
+	// Log the mapping details AFTER all firewall checks pass
+	fromURL := mapping.GetFromURL()
+	log.Printf("[RAW TCP] Found mapping for server '%s': %s -> %s", s.name, fromURL, mapping.GetToURL())
 
 	// Parse target URL from mapping
 	toURL := mapping.GetToURL()
@@ -311,7 +319,7 @@ func (s *RawTCPServer) findMapping() *Mapping {
 			if serverName == s.name {
 				fromURL := m.GetFromURL()
 				if strings.HasPrefix(fromURL, "tcp://") {
-					log.Printf("[RAW TCP] Found explicit mapping for server '%s': %s -> %s", s.name, fromURL, m.GetToURL())
+					// Logging moved to caller after firewall checks
 					return m
 				}
 			}
@@ -345,8 +353,7 @@ func (s *RawTCPServer) findMapping() *Mapping {
 
 		// If ports match, use this mapping
 		if mappingPort == serverPort {
-			log.Printf("[RAW TCP] Found port-based mapping for server '%s' (port %d): %s -> %s",
-				s.name, serverPort, fromURL, m.GetToURL())
+			// Logging moved to caller after firewall checks
 			return m
 		}
 	}

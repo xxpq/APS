@@ -7,11 +7,6 @@
       "panel": true,
       "firewall": "block_bad_actors"
     },
-    "proxy": {
-      "port": 1080,
-      "proxy": true,
-      "firewall": "block_bad_actors"
-    },
     "mstsc_sucdri_my_pc": {
       "port": 3388,
       "rawTCP": true,
@@ -29,6 +24,12 @@
       "port": 3690,
       "rawTCP": true,
       "public": true
+    },
+    "proxy": {
+      "port": 1080,
+      "proxy": true,
+      "public": true,
+      "firewall": "block_bad_actors"
     },
     "ssl": {
       "port": 443,
@@ -102,10 +103,13 @@
       "block": [
         "74.7.241.12/8",
         "159.65.2.87/8",
+        "195.24.236.22/8",
         "3.160.150.70/8",
+        "45.148.10.250/8",
         "125.67.61.66/8",
         "18.245.86.82/8",
         "13.226.244.90/8",
+        "206.168.34.124/8",
         "20.80.83.86/8",
         "167.94.138.177/8",
         "172.217.25.68/8",
@@ -117,6 +121,7 @@
         "213.209.143.74/8",
         "3.80.188.160/8",
         "65.87.7.112/8",
+        "80.75.212.32/8",
         "2.57.122.95/8",
         "133.65.2.87",
         "192.111.231.175-178",
@@ -145,11 +150,21 @@
       }
     },
     {
-      "from": "https://api.sucdri.p-q.co/shlq/*",
+      "from": {
+        "headers": {
+          "x-token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJVc2VySWQiOjEsIlRlbmFudElkIjoxLCJPcmdhbml6YXRpb25JZCI6MCwiVXNlck5hbWUiOiJwYW5kYSIsIlJvbGVJZCI6MSwiUm9sZUtleSI6ImFkbWluIiwiRGVwdElkIjoxMCwiUG9zdElkIjoxLCJpc3MiOiJQYW5kYVgiLCJleHAiOjI2Mjk4NjgzMTAsIm5iZiI6MTc2NTg2ODMxMH0.qDqUEf7XOhgSI9wb_i9hQfs_5-1VDb3M3GmcqLnhwO0"
+        },
+        "url": "https://api.sucdri.p-q.co/shlq/*"
+      },
       "to": "http://8.159.146.34:7788/*"
     },
     {
-      "from": "https://iot.api.sucdri.p-q.co/*",
+      "from": {
+        "headers": {
+          "x-token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJVc2VySWQiOjEsIlRlbmFudElkIjoxLCJPcmdhbml6YXRpb25JZCI6MCwiVXNlck5hbWUiOiJwYW5kYSIsIlJvbGVJZCI6MSwiUm9sZUtleSI6ImFkbWluIiwiRGVwdElkIjoxMCwiUG9zdElkIjoxLCJpc3MiOiJQYW5kYVgiLCJleHAiOjI2Mjk4NjgzMTAsIm5iZiI6MTc2NTg2ODMxMH0.qDqUEf7XOhgSI9wb_i9hQfs_5-1VDb3M3GmcqLnhwO0"
+        },
+        "url": "https://api.sucdri.p-q.co/iot/*"
+      },
       "to": "http://175.27.166.25:7788/*"
     },
     {
@@ -300,5 +315,5 @@
       }
     }
   ],
-  "version": 44
+  "version": 8
 }
