@@ -158,6 +158,18 @@ func (p *MapRemoteProxy) calculateMatchScore(mapping *Mapping, r *http.Request, 
 
 		score := 1 // Base score for URL match
 
+		// Path specificity scoring: longer path prefixes get higher priority
+		// This ensures /shlq/* matches before /* for the same URL
+		parsedFrom, err := url.Parse(fromURL)
+		if err == nil && strings.HasSuffix(parsedFrom.Path, "*") {
+			fromPathPrefix := strings.TrimSuffix(parsedFrom.Path, "*")
+			if fromPathPrefix != "" && fromPathPrefix != "/" {
+				// Award points based on the length of the path prefix
+				// Longer prefixes = more specific matches (e.g., /shlq/ vs /)
+				score += len(fromPathPrefix) * 10 // Multiply by 10 to ensure it outweighs other factors
+			}
+		}
+
 		// Method match
 		if fromConfig.Method != nil {
 			if fromConfig.MatchesMethod(r.Method) {
