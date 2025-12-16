@@ -51,7 +51,7 @@ func (s *RawTCPServer) Start() error {
 	// Determine bind address
 	host := "127.0.0.1"
 	if s.config.Public == nil || *s.config.Public {
-	host = "0.0.0.0"
+		host = "0.0.0.0"
 	}
 	addr := fmt.Sprintf("%s:%d", host, s.config.Port)
 
@@ -158,17 +158,17 @@ func (s *RawTCPServer) handleConnection(clientConn net.Conn) {
 				tunnelConfig = s.appConfig.Tunnels[tunnelKey]
 			}
 			// Proxy key handling might need parsing if it was set
-			// In rawtcp, proxyKey isn't explicitly set in local vars usually, 
-			// but if we had it, we would use it. 
+			// In rawtcp, proxyKey isn't explicitly set in local vars usually,
+			// but if we had it, we would use it.
 			// For now, let's assume if mapping has via proxy, we might want to log it.
-			
+
 			// Collect logging config
 			logConfig := collectLoggingConfig(
 				s.appConfig,
 				s.config,
 				s.findMapping(), // Re-find mapping or pass it? Better to use 'mapping' var if available, but it's local to handleConnection
-				nil, // No user auth in rawtcp usually
-				nil, // No groups
+				nil,             // No user auth in rawtcp usually
+				nil,             // No groups
 				tunnelConfig,
 				proxyConfig,
 				nil, // Firewall rule is local, hard to pass without refactoring
@@ -199,7 +199,7 @@ func (s *RawTCPServer) handleConnection(clientConn net.Conn) {
 				} else if ruleKey != "" {
 					logEntry.Destination = ruleKey
 				}
-				
+
 				// Add firewall name from server config if present
 				if s.config.Firewall != "" {
 					// Server firewall overrides/adds to mapping? Logic says check server first.
@@ -218,6 +218,23 @@ func (s *RawTCPServer) handleConnection(clientConn net.Conn) {
 	clientAddr := clientConn.RemoteAddr().String()
 	log.Printf("[RAW TCP] New connection from %s on server '%s'", clientAddr, s.name)
 
+	// Check firewall rules (server firewall takes priority over mapping firewall)
+	// Optimization: Check server firewall first before finding mapping
+	var firewallRule *FirewallRule
+	if s.config.Firewall != "" {
+		firewallRule = GetFirewallRule(s.appConfig, s.config.Firewall)
+		if firewallRule != nil {
+			DebugLog("[FIREWALL] Using server-level firewall rule '%s'", s.config.Firewall)
+
+			// Check if client IP is allowed by server firewall
+			if !CheckFirewall(clientAddr, firewallRule) {
+				DebugLog("[RAW TCP] Connection from %s blocked by server firewall", clientAddr)
+				clientConn.Close()
+				return
+			}
+		}
+	}
+
 	// Find matching mapping for this server
 	mapping := s.findMapping()
 	if mapping == nil {
@@ -232,26 +249,28 @@ func (s *RawTCPServer) handleConnection(clientConn net.Conn) {
 		ruleKey = mapping.GetFromURL()
 	}
 
-	// Check firewall rules (server firewall takes priority over mapping firewall)
-	var firewallRule *FirewallRule
-	if s.config.Firewall != "" {
-		firewallRule = GetFirewallRule(s.appConfig, s.config.Firewall)
-		if firewallRule != nil {
-			DebugLog("[FIREWALL] Using server-level firewall rule '%s'", s.config.Firewall)
-		}
-	}
+	// Check mapping-level firewall if server firewall didn't block (and wasn't the only check)
+	// Note: If server firewall was checked and allowed, we still check mapping firewall if present.
+	// The original logic seemed to imply server firewall *replaces* mapping firewall if present,
+	// or maybe they stack?
+	// Original code:
+	// if s.config.Firewall != "" { ... }
+	// if firewallRule == nil && mapping.Firewall != "" { ... }
+	// This implies if server firewall is set, mapping firewall is IGNORED.
+	// Let's preserve that behavior.
+
 	if firewallRule == nil && mapping.Firewall != "" {
 		firewallRule = GetFirewallRule(s.appConfig, mapping.Firewall)
 		if firewallRule != nil {
 			DebugLog("[FIREWALL] Using mapping-level firewall rule '%s'", mapping.Firewall)
-		}
-	}
 
-	// Check if client IP is allowed
-	if !CheckFirewall(clientAddr, firewallRule) {
-		log.Printf("[RAW TCP] Connection from %s blocked by firewall", clientAddr)
-		clientConn.Close()
-		return
+			// Check if client IP is allowed by mapping firewall
+			if !CheckFirewall(clientAddr, firewallRule) {
+				DebugLog("[RAW TCP] Connection from %s blocked by mapping firewall", clientAddr)
+				clientConn.Close()
+				return
+			}
+		}
 	}
 
 	// Parse target URL from mapping

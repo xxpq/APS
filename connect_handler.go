@@ -35,7 +35,7 @@ func (p *MapRemoteProxy) handleConnectWithIntercept(w http.ResponseWriter, r *ht
 	}
 	clientIP := getClientIP(r)
 	if !CheckFirewall(clientIP, firewallRule) {
-		log.Printf("[FIREWALL] CONNECT request from %s blocked by firewall", clientIP)
+		DebugLog("[FIREWALL] CONNECT request from %s blocked by firewall", clientIP)
 		http.Error(w, "Forbidden", http.StatusForbidden)
 		return
 	}

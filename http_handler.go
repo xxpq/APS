@@ -425,7 +425,7 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	clientIP := getClientIP(r)
 	if !CheckFirewall(clientIP, firewallRule) {
 		isError = true
-		log.Printf("[FIREWALL] Request from %s blocked by firewall", clientIP)
+		DebugLog("[FIREWALL] Request from %s blocked by firewall", clientIP)
 		http.Error(w, "Forbidden", http.StatusForbidden)
 		return
 	}

@@ -195,7 +195,7 @@ func CheckFirewall(clientIP string, rule *FirewallRule) bool {
 				return true
 			}
 		}
-		log.Printf("[FIREWALL] IP %s blocked by whitelist (not in allow list)", ip)
+		DebugLog("[FIREWALL] IP %s blocked by whitelist (not in allow list)", ip)
 		return false
 	}
 
@@ -203,7 +203,7 @@ func CheckFirewall(clientIP string, rule *FirewallRule) bool {
 	if len(rule.blockRules) > 0 {
 		for _, blockRule := range rule.blockRules {
 			if matchIPRule(parsedIP, blockRule) {
-				log.Printf("[FIREWALL] IP %s blocked by blacklist rule", ip)
+				DebugLog("[FIREWALL] IP %s blocked by blacklist rule", ip)
 				return false
 			}
 		}
