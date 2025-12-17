@@ -237,7 +237,7 @@ func (s *TCPTunnelServer) handleConnection(conn net.Conn) {
 	}
 
 	// Initialize per-connection session key manager
-	endpoint.KeyManager = NewSessionKeyManager(reg.Password)
+	endpoint.KeyManager = NewSessionKeyManager(reg.Password, reg.EndpointName)
 	if err := endpoint.KeyManager.DeriveInitialKey(); err != nil {
 		DebugLog("[TCP TUNNEL] Failed to derive initial key for %s: %v", remoteAddr, err)
 		tc.Close()

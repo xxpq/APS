@@ -250,7 +250,7 @@ func (m *StaticCacheManager) Set(fullURL string, headers http.Header, statusCode
 		if useCompression {
 			entry.Body = compressedBody
 			entry.IsCompressed = true
-			log.Printf("[CACHE] Compressed: %s (%d -> %d bytes, %.1f%%)",
+			DebugLog("[CACHE] Compressed: %s (%d -> %d bytes, %.1f%%)",
 				fullURL, originalSize, len(compressedBody),
 				float64(len(compressedBody))/float64(originalSize)*100)
 		} else {
@@ -279,7 +279,7 @@ func (m *StaticCacheManager) Set(fullURL string, headers http.Header, statusCode
 			return
 		}
 
-		log.Printf("[CACHE] STORED: %s (%d bytes, compressed=%v)", fullURL, len(entry.Body), entry.IsCompressed)
+		DebugLog("[CACHE] STORED: %s (%d bytes, compressed=%v)", fullURL, len(entry.Body), entry.IsCompressed)
 	}()
 
 	return nil
@@ -377,7 +377,7 @@ func (m *StaticCacheManager) cleanupExpiredFiles() {
 	}
 
 	if deletedCount > 0 {
-		log.Printf("[CACHE] Cleanup completed: deleted %d expired files", deletedCount)
+		DebugLog("[CACHE] Cleanup completed: deleted %d expired files", deletedCount)
 	}
 }
 

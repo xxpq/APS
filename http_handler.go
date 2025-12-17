@@ -56,11 +56,31 @@ func getBuffer() *bytes.Buffer {
 	return buf
 }
 
-// putBuffer 归还 buffer 到池中（限制大小避免内存泄漏）
+// putBuffer 归还 buffer 到池中(限制大小避免内存泄漏)
 func putBuffer(buf *bytes.Buffer) {
 	if buf.Cap() <= 1024*1024 { // 只回收 <= 1MB 的 buffer
 		bufferPool.Put(buf)
 	}
+}
+
+// formatLocationTagHTTP formats IP location information for HTTP log output
+func formatLocationTagHTTP(ip string) string {
+	location, err := GetIPLocation(ip)
+	if err != nil || location == nil {
+		return ""
+	}
+
+	// Format: [CountryCode-Province-City]
+	if location.CountryCode != "" && location.State != "" && location.City != "" {
+		return fmt.Sprintf("[%s-%s-%s]", location.CountryCode, location.State, location.City)
+	}
+	if location.CountryCode != "" && location.State != "" {
+		return fmt.Sprintf("[%s-%s]", location.CountryCode, location.State)
+	}
+	if location.CountryCode != "" {
+		return fmt.Sprintf("[%s]", location.CountryCode)
+	}
+	return ""
 }
 
 // getByteSlice 从池中获取 byte 切片
@@ -287,7 +307,7 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(cachedEntry.StatusCode)
 			w.Write(cachedEntry.Body)
 			bytesSent = uint64(len(cachedEntry.Body))
-			log.Printf("[CACHE] HIT: %s (%d bytes, compressed=%v)", fullURL, len(cachedEntry.Body), cachedEntry.IsCompressed)
+			DebugLog("[CACHE] HIT: %s (%d bytes, compressed=%v)", fullURL, len(cachedEntry.Body), cachedEntry.IsCompressed)
 			return
 		}
 	}
@@ -467,7 +487,7 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	if !matched && !hasAnyConfig && !r.URL.IsAbs() {
 		isError = true
 		http.NotFound(w, r)
-		log.Printf("[%s][%s] %s (NO MAPPING - 404 Not Found)", clientIP, r.Method, originalURL)
+		log.Printf("[%s]%s[%s] %s (NO MAPPING - 404 Not Found)", clientIP, formatLocationTagHTTP(clientIP), r.Method, originalURL)
 		return
 	}
 
@@ -566,19 +586,19 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 
 	if matched {
 		if strings.HasPrefix(targetURL, "file://") {
-			log.Printf("[%s][%s] %s -> [LOCAL] %s", clientIP, r.Method, originalURL, targetURL)
+			log.Printf("[%s]%s[%s] %s -> [LOCAL] %s", clientIP, formatLocationTagHTTP(clientIP), r.Method, originalURL, targetURL)
 			p.serveFile(w, r, mapping)
 			return
 		}
-		log.Printf("[%s][%s] %s -> %s (MAPPED)", clientIP, r.Method, originalURL, targetURL)
+		log.Printf("[%s]%s[%s] %s -> %s (MAPPED)", clientIP, formatLocationTagHTTP(clientIP), r.Method, originalURL, targetURL)
 	} else if len(userEndpointNames) > 0 || len(userTunnelNames) > 0 {
-		log.Printf("[%s][%s] %s (NO MAPPING - FORWARDED TO USER-LEVEL ENDPOINT/TUNNEL)", clientIP, r.Method, originalURL)
+		log.Printf("[%s]%s[%s] %s (NO MAPPING - FORWARDED TO USER-LEVEL ENDPOINT/TUNNEL)", clientIP, formatLocationTagHTTP(clientIP), r.Method, originalURL)
 	} else if len(serverEndpointNames) > 0 || len(serverTunnelNames) > 0 {
-		log.Printf("[%s][%s] %s (NO MAPPING - FORWARDED TO SERVER-LEVEL ENDPOINT/TUNNEL)", clientIP, r.Method, originalURL)
+		log.Printf("[%s]%s[%s] %s (NO MAPPING - FORWARDED TO SERVER-LEVEL ENDPOINT/TUNNEL)", clientIP, formatLocationTagHTTP(clientIP), r.Method, originalURL)
 	} else if mapping != nil && (len(mapping.endpointNames) > 0 || len(mapping.tunnelNames) > 0) {
-		log.Printf("[%s][%s] %s (NO MAPPING - FORWARDED TO MAPPING-LEVEL ENDPOINT/TUNNEL)", clientIP, r.Method, originalURL)
+		log.Printf("[%s]%s[%s] %s (NO MAPPING - FORWARDED TO MAPPING-LEVEL ENDPOINT/TUNNEL)", clientIP, formatLocationTagHTTP(clientIP), r.Method, originalURL)
 	} else {
-		log.Printf("[%s][%s] %s (NO MAPPING)", clientIP, r.Method, originalURL)
+		log.Printf("[%s]%s[%s] %s (NO MAPPING)", clientIP, formatLocationTagHTTP(clientIP), r.Method, originalURL)
 	}
 
 	var requestBody io.Reader = r.Body
@@ -1042,9 +1062,9 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if policies.Quality < 1.0 {
-		log.Printf("[%s][%s] %s - %d (%d bytes, throttled)", clientIP, r.Method, originalURL, resp.StatusCode, bytesSent)
+		log.Printf("[%s]%s[%s] %s - %d (%d bytes, throttled)", clientIP, formatLocationTagHTTP(clientIP), r.Method, originalURL, resp.StatusCode, bytesSent)
 	} else {
-		log.Printf("[%s][%s] %s - %d (%d bytes)", clientIP, r.Method, originalURL, resp.StatusCode, bytesSent)
+		log.Printf("[%s]%s[%s] %s - %d (%d bytes)", clientIP, formatLocationTagHTTP(clientIP), r.Method, originalURL, resp.StatusCode, bytesSent)
 	}
 }
 

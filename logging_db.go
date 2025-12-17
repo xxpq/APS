@@ -35,6 +35,8 @@ type LogEntry struct {
 	UserName       string    `json:"userName,omitempty"`
 	UserGroup      string    `json:"userGroup,omitempty"`
 	ClientIP       string    `json:"clientIP"`
+	Country        string    `json:"country,omitempty"`        // IP geolocation: Country name
+	Region         string    `json:"region,omitempty"`         // IP geolocation: State/Region name
 	Token          string    `json:"token,omitempty"`          // Extracted token (if any)
 	RequestHeaders string    `json:"requestHeaders,omitempty"` // JSON string, level 2 only
 	RequestBody    string    `json:"requestBody,omitempty"`    // TEXT, level 2 only (limited to 1MB)
@@ -56,20 +58,10 @@ type LogQueryFilter struct {
 	PageSize   int // default 50, max 100
 }
 
-// NewLoggingDB creates and initializes a new logging database
-func NewLoggingDB(dbPath string) (*LoggingDB, error) {
-	db, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open logging db: %v", err)
-	}
-
-	if err := db.Ping(); err != nil {
-		return nil, fmt.Errorf("failed to ping logging db: %v", err)
-	}
-
+// NewLoggingDB creates and initializes logging module with a shared database connection
+func NewLoggingDB(db *sql.DB) (*LoggingDB, error) {
 	loggingDB := &LoggingDB{db: db}
 	if err := loggingDB.initSchema(); err != nil {
-		db.Close()
 		return nil, err
 	}
 
@@ -77,8 +69,10 @@ func NewLoggingDB(dbPath string) (*LoggingDB, error) {
 }
 
 // Close closes the database connection
+// Close is a no-op as the database connection is managed externally
 func (l *LoggingDB) Close() error {
-	return l.db.Close()
+	// Database is closed in main.go
+	return nil
 }
 
 // initSchema creates the necessary tables and indexes
@@ -103,6 +97,8 @@ func (l *LoggingDB) initSchema() error {
 		user_name TEXT,
 		user_group TEXT,
 		client_ip TEXT NOT NULL,
+		country TEXT,
+		region TEXT,
 		token TEXT,
 		request_headers TEXT,
 		request_body TEXT
@@ -114,6 +110,7 @@ func (l *LoggingDB) initSchema() error {
 	CREATE INDEX IF NOT EXISTS idx_logs_tunnel ON request_logs(tunnel_name);
 	CREATE INDEX IF NOT EXISTS idx_logs_user ON request_logs(user_name);
 	CREATE INDEX IF NOT EXISTS idx_logs_client_ip ON request_logs(client_ip);
+	CREATE INDEX IF NOT EXISTS idx_logs_country ON request_logs(country);
 	`
 
 	if _, err := l.db.Exec(schema); err != nil {
@@ -123,6 +120,10 @@ func (l *LoggingDB) initSchema() error {
 	// Migration: Add token column if it doesn't exist
 	// Ignore error "duplicate column name"
 	l.db.Exec("ALTER TABLE request_logs ADD COLUMN token TEXT;")
+
+	// Migration: Add geolocation columns if they don't exist
+	l.db.Exec("ALTER TABLE request_logs ADD COLUMN country TEXT;")
+	l.db.Exec("ALTER TABLE request_logs ADD COLUMN region TEXT;")
 
 	return nil
 }
@@ -135,9 +136,9 @@ func (l *LoggingDB) AddLog(entry *LogEntry) error {
 			duration_ms, request_size, response_size,
 			server_name, tunnel_name, proxy_name, endpoint_name,
 			firewall_name, user_name, user_group, client_ip,
-			token,
+			country, region, token,
 			request_headers, request_body
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
 
 	_, err := l.db.Exec(query,
@@ -158,6 +159,8 @@ func (l *LoggingDB) AddLog(entry *LogEntry) error {
 		entry.UserName,
 		entry.UserGroup,
 		entry.ClientIP,
+		entry.Country,
+		entry.Region,
 		entry.Token,
 		entry.RequestHeaders,
 		entry.RequestBody,
@@ -247,7 +250,7 @@ func (l *LoggingDB) QueryLogs(filter LogQueryFilter) ([]LogEntry, int, error) {
 		       duration_ms, request_size, response_size,
 		       server_name, tunnel_name, proxy_name, endpoint_name,
 		       firewall_name, user_name, user_group, client_ip,
-		       token,
+		       country, region, token,
 		       request_headers, request_body
 		FROM request_logs
 		%s
@@ -271,6 +274,7 @@ func (l *LoggingDB) QueryLogs(filter LogQueryFilter) ([]LogEntry, int, error) {
 		var statusCode sql.NullInt64
 		var serverName, tunnelName, proxyName, endpointName sql.NullString
 		var firewallName, userName, userGroup sql.NullString
+		var country, region sql.NullString
 		var token sql.NullString
 		var requestHeaders, requestBody sql.NullString
 
@@ -293,6 +297,8 @@ func (l *LoggingDB) QueryLogs(filter LogQueryFilter) ([]LogEntry, int, error) {
 			&userName,
 			&userGroup,
 			&entry.ClientIP,
+			&country,
+			&region,
 			&token,
 			&requestHeaders,
 			&requestBody,
@@ -334,6 +340,12 @@ func (l *LoggingDB) QueryLogs(filter LogQueryFilter) ([]LogEntry, int, error) {
 		}
 		if userGroup.Valid {
 			entry.UserGroup = userGroup.String
+		}
+		if country.Valid {
+			entry.Country = country.String
+		}
+		if region.Valid {
+			entry.Region = region.String
 		}
 		if token.Valid {
 			entry.Token = token.String

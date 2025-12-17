@@ -32,7 +32,9 @@ func TestRawTCPServer_FirewallBlock(t *testing.T) {
 	appConfig := &Config{
 		Firewalls: map[string]*FirewallRule{
 			"block_rule": {
-				Block: []string{"192.168.1.100"},
+				Block: &FilterRules{
+					Networks: []string{"192.168.1.100"},
+				},
 			},
 		},
 		mu: sync.RWMutex{},

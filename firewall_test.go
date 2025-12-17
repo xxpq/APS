@@ -7,7 +7,9 @@ import (
 
 func TestParseFirewallRule(t *testing.T) {
 	rule := &FirewallRule{
-		Block: []string{"125.67.61.66/8"},
+		Block: &FilterRules{
+			Networks: []string{"125.67.61.66/8"},
+		},
 	}
 
 	if err := ParseFirewallRule(rule); err != nil {
@@ -25,16 +27,18 @@ func TestParseFirewallRule(t *testing.T) {
 
 func TestCheckFirewall(t *testing.T) {
 	rule := &FirewallRule{
-		Block: []string{"125.67.61.66/8"},
+		Block: &FilterRules{
+			Networks: []string{"125.67.61.66/8"},
+		},
 	}
 	ParseFirewallRule(rule)
 
 	ipToTest := "125.67.61.66:59372"
-	
+
 	// CheckFirewall splits host/port
 	ip, _, _ := net.SplitHostPort(ipToTest)
 	parsedIP := net.ParseIP(ip)
-	
+
 	t.Logf("Testing IP: %s (Parsed: %v)", ip, parsedIP)
 
 	if CheckFirewall(ipToTest, rule) {
@@ -47,12 +51,14 @@ func TestCheckFirewall(t *testing.T) {
 func TestCheckFirewallCIDR(t *testing.T) {
 	// 125.0.0.0/8 includes 125.67.61.66
 	rule := &FirewallRule{
-		Block: []string{"125.0.0.0/8"},
+		Block: &FilterRules{
+			Networks: []string{"125.0.0.0/8"},
+		},
 	}
 	ParseFirewallRule(rule)
 
 	ipToTest := "125.67.61.66:59372"
-	
+
 	if CheckFirewall(ipToTest, rule) {
 		t.Errorf("CheckFirewall allowed blocked IP %s with CIDR 125.0.0.0/8", ipToTest)
 	} else {
@@ -70,7 +76,7 @@ func TestParseIPAddress(t *testing.T) {
 		t.Fatalf("net.ParseCIDR failed for %s: %v", addr, err)
 	}
 	t.Logf("Parsed CIDR: %v", ipnet)
-	
+
 	testIP := net.ParseIP("125.67.61.66")
 	if !ipnet.Contains(testIP) {
 		t.Errorf("CIDR %v does not contain %v", ipnet, testIP)

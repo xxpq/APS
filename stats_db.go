@@ -18,28 +18,20 @@ type QuotaUsageData struct {
 	RequestsUsed int64
 }
 
-// NewStatsDB initializes the SQLite database for statistics.
-func NewStatsDB(dbPath string) (*StatsDB, error) {
-	db, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open stats db: %v", err)
-	}
-
-	if err := db.Ping(); err != nil {
-		return nil, fmt.Errorf("failed to ping stats db: %v", err)
-	}
-
+// NewStatsDB initializes the stats module with a shared database connection.
+func NewStatsDB(db *sql.DB) (*StatsDB, error) {
 	statsDB := &StatsDB{db: db}
 	if err := statsDB.initSchema(); err != nil {
-		db.Close()
 		return nil, err
 	}
 
 	return statsDB, nil
 }
 
+// Close is a no-op as the database connection is managed externally
 func (s *StatsDB) Close() error {
-	return s.db.Close()
+	// Database is closed in main.go
+	return nil
 }
 
 func (s *StatsDB) initSchema() error {

@@ -31,6 +31,32 @@ type RawTCPServer struct {
 	closed   bool
 }
 
+// formatLocationTag formats IP location information for log output
+func formatLocationTag(ipWithPort string) string {
+	// Extract IP from "ip:port" format
+	ip := ipWithPort
+	if host, _, err := net.SplitHostPort(ipWithPort); err == nil {
+		ip = host
+	}
+
+	location, err := GetIPLocation(ip)
+	if err != nil || location == nil {
+		return fmt.Sprintf("[%s]", ip)
+	}
+
+	// Format: [IP][CountryCode-Province-City]
+	if location.CountryCode != "" && location.State != "" && location.City != "" {
+		return fmt.Sprintf("[%s][%s-%s-%s]", ip, location.CountryCode, location.State, location.City)
+	}
+	if location.CountryCode != "" && location.State != "" {
+		return fmt.Sprintf("[%s][%s-%s]", ip, location.CountryCode, location.State)
+	}
+	if location.CountryCode != "" {
+		return fmt.Sprintf("[%s][%s]", ip, location.CountryCode)
+	}
+	return fmt.Sprintf("[%s]", ip)
+}
+
 // NewRawTCPServer creates a new raw TCP server
 func NewRawTCPServer(name string, config *ListenConfig, appConfig *Config, mappings []*Mapping,
 	tunnelManager TunnelManagerInterface, trafficShaper *TrafficShaper, stats *StatsCollector, loggingDB *LoggingDB) *RawTCPServer {
@@ -239,12 +265,12 @@ func (s *RawTCPServer) handleConnection(clientConn net.Conn) {
 	}
 
 	// Only log connection if it passed server firewall check
-	log.Printf("[RAW TCP] New connection from %s on server '%s'", clientAddr, s.name)
+	log.Printf("[RAW TCP]%s New connection from %s on server '%s'", formatLocationTag(clientAddr), clientAddr, s.name)
 
 	// Find matching mapping for this server
 	mapping := s.findMapping()
 	if mapping == nil {
-		log.Printf("[RAW TCP] No mapping found for server '%s'", s.name)
+		log.Printf("[RAW TCP]%s No mapping found for server '%s'", formatLocationTag(clientAddr), s.name)
 		isError = true
 		clientConn.Close()
 		return
@@ -283,7 +309,7 @@ func (s *RawTCPServer) handleConnection(clientConn net.Conn) {
 
 	// Log the mapping details AFTER all firewall checks pass
 	fromURL := mapping.GetFromURL()
-	log.Printf("[RAW TCP] Found mapping for server '%s': %s -> %s", s.name, fromURL, mapping.GetToURL())
+	log.Printf("[RAW TCP]%s Found mapping for server '%s': %s -> %s", formatLocationTag(clientAddr), s.name, fromURL, mapping.GetToURL())
 
 	// Parse target URL from mapping
 	toURL := mapping.GetToURL()
@@ -312,7 +338,7 @@ func (s *RawTCPServer) handleConnection(clientConn net.Conn) {
 	}
 
 	responseTime := time.Since(startTime)
-	log.Printf("[RAW TCP] Connection from %s closed after %v", clientAddr, responseTime)
+	log.Printf("[RAW TCP]%s Connection from %s closed after %v", formatLocationTag(clientAddr), clientAddr, responseTime)
 }
 
 // findMapping finds a matching mapping for this TCP server

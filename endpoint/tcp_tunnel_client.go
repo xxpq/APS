@@ -304,7 +304,7 @@ func runTCPTunnelSession(ctx context.Context) bool {
 	if runtimeConfig != nil && runtimeConfig.Password != "" {
 		password = runtimeConfig.Password
 	}
-	keyManager := NewSessionKeyManager(password)
+	keyManager := NewSessionKeyManager(password, GetEffectiveEndpointName())
 	if err := keyManager.DeriveInitialKey(); err != nil {
 		log.Printf("Failed to derive initial key: %v", err)
 		return true

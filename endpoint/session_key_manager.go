@@ -36,6 +36,7 @@ type SessionKeyManager struct {
 	pendingKey      []byte       // Key being negotiated
 	pendingNonce    []byte       // Nonce for pending negotiation
 	onKeyRotated    func([]byte) // Callback when key is rotated
+	endpointName    string       // Name of the endpoint for logging purposes
 	mu              sync.RWMutex
 }
 
@@ -59,9 +60,10 @@ type KeyConfirmPayload struct {
 }
 
 // NewSessionKeyManager creates a new session key manager
-func NewSessionKeyManager(masterPassword string) *SessionKeyManager {
+func NewSessionKeyManager(masterPassword string, endpointName string) *SessionKeyManager {
 	return &SessionKeyManager{
 		masterPassword: masterPassword,
+		endpointName:   endpointName,
 	}
 }
 
@@ -75,7 +77,7 @@ func (skm *SessionKeyManager) DeriveInitialKey() error {
 	skm.currentKey = hash[:]
 	skm.keyCreatedAt = time.Now()
 
-	log.Printf("[KEY] Initial session key derived")
+	log.Printf("[KEY] [%s] Initial session key derived", skm.endpointName)
 	return nil
 }
 
@@ -88,13 +90,13 @@ func (skm *SessionKeyManager) StartAutoRotation(initiateFunc func() error) {
 	interval := skm.randomRotationInterval()
 	skm.rotationTimer = time.AfterFunc(interval, func() {
 		if err := initiateFunc(); err != nil {
-			log.Printf("[KEY] Auto-rotation initiation failed: %v", err)
+			log.Printf("[KEY] [%s] Auto-rotation initiation failed: %v", skm.endpointName, err)
 		}
 		// Reschedule for next rotation
 		skm.StartAutoRotation(initiateFunc)
 	})
 
-	log.Printf("[KEY] Auto-rotation scheduled in %v", interval)
+	log.Printf("[KEY] [%s] Auto-rotation scheduled in %v", skm.endpointName, interval)
 }
 
 // StopAutoRotation stops the automatic key rotation
@@ -223,7 +225,7 @@ func (skm *SessionKeyManager) HandleKeyConfirm(confirm *KeyConfirmPayload) error
 	skm.keyCreatedAt = time.Now()
 	skm.gracePeriodEnds = time.Now().Add(KeyGracePeriod)
 
-	log.Printf("[KEY] New session key activated (grace period ends: %v)", skm.gracePeriodEnds)
+	log.Printf("[KEY] [%s] New session key activated (grace period ends: %v)", skm.endpointName, skm.gracePeriodEnds)
 
 	// Call rotation callback if set
 	if skm.onKeyRotated != nil {
@@ -249,7 +251,7 @@ func (skm *SessionKeyManager) ActivateKey() error {
 	skm.keyCreatedAt = time.Now()
 	skm.gracePeriodEnds = time.Now().Add(KeyGracePeriod)
 
-	log.Printf("[KEY] New session key activated by initiator (grace period ends: %v)", skm.gracePeriodEnds)
+	log.Printf("[KEY] [%s] New session key activated by initiator (grace period ends: %v)", skm.endpointName, skm.gracePeriodEnds)
 
 	// Call rotation callback if set
 	if skm.onKeyRotated != nil {
@@ -292,7 +294,7 @@ func (skm *SessionKeyManager) Decrypt(ciphertext []byte) ([]byte, error) {
 	if previousKey != nil && time.Now().Before(gracePeriodEnds) {
 		plaintext, err := skm.decryptWithKey(previousKey, ciphertext)
 		if err == nil {
-			log.Printf("[KEY] Decrypted with previous key (grace period)")
+			log.Printf("[KEY] [%s] Decrypted with previous key (grace period)", skm.endpointName)
 			return plaintext, nil
 		}
 	}

@@ -1733,6 +1733,95 @@ async function confirmEditRule() {
 
 // ===== 防火墙 =====
 // Unified data format parser
+// =====标签输入管理 Tag Input Management =====
+function setupTagInput(inputId, tagsContainerId) {
+  var input = document.getElementById(inputId);
+  var container = document.getElementById(tagsContainerId);
+  if (!input || !container) return;
+  
+  // Remove existing listeners to avoid duplicates
+  input.onkeydown = null;
+  
+  input.onkeydown = function(e) {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      var value = input.value.trim();
+      if (value) {
+        addTag(tagsContainerId, value);
+        input.value = '';
+      }
+    }
+  };
+}
+
+function addTag(containerId, value) {
+  var container = document.getElementById(containerId);
+  if (!container) return;
+  
+  // Check if tag already exists
+  var existingTags = getTags(containerId);
+  if (existingTags.indexOf(value) !== -1) return;
+  
+  var tag = document.createElement('span');
+  tag.className = 'tag-item';
+  tag.style.cssText = 'display: inline-block; padding: 4px 8px; margin: 2px; background: #0f62fe; color: white; border-radius: 4px; font-size: 12px;';
+  tag.setAttribute('data-value', value);
+  
+  var text = document.createElement('span');
+  text.textContent = value;
+  text.style.marginRight = '6px';
+  
+  var removeBtn = document.createElement('button');
+  removeBtn.textContent = '×';
+  removeBtn.style.cssText = 'border: none; background: transparent; color: white; cursor: pointer; font-size: 16px; padding: 0; margin-left: 4px;';
+  removeBtn.onclick = function() {
+    removeTag(containerId, value);
+  };
+  
+  tag.appendChild(text);
+  tag.appendChild(removeBtn);
+  container.appendChild(tag);
+}
+
+function removeTag(containerId, value) {
+  var container = document.getElementById(containerId);
+  if (!container) return;
+  
+  var tags = container.querySelectorAll('.tag-item');
+  for (var i = 0; i < tags.length; i++) {
+    if (tags[i].getAttribute('data-value') === value) {
+      container.removeChild(tags[i]);
+      break;
+    }
+  }
+}
+
+function getTags(containerId) {
+  var container = document.getElementById(containerId);
+  if (!container) return [];
+  
+  var tags = container.querySelectorAll('.tag-item');
+  var values = [];
+  for (var i = 0; i < tags.length; i++) {
+    values.push(tags[i].getAttribute('data-value'));
+  }
+  return values;
+}
+
+function clearTags(containerId) {
+  var container = document.getElementById(containerId);
+  if (container) container.innerHTML = '';
+}
+
+function setTags(containerId, values) {
+  clearTags(containerId);
+  if (values && values.length) {
+    for (var i = 0; i < values.length; i++) {
+      addTag(containerId, values[i]);
+    }
+  }
+}
+
 function parseFirewallRules(rules) {
   if (!rules) return [];
   // Handle array format
@@ -1802,6 +1891,14 @@ function openAddFirewallModal() {
   document.getElementById("add-firewall-log-level").value = "";
   document.getElementById("add-firewall-log-retention").value = "";
   
+  // Clear region tag containers
+  clearTags('add-firewall-allow-regions-tags');
+  clearTags('add-firewall-block-regions-tags');
+  
+  // Setup tag input handlers
+  setupTagInput('add-firewall-allow-regions-input', 'add-firewall-allow-regions-tags');
+  setupTagInput('add-firewall-block-regions-input', 'add-firewall-block-regions-tags');
+  
   modal.classList.add('is-visible');
 }
 
@@ -1823,10 +1920,25 @@ function openEditFirewallModal(name) {
       var blockEl = document.getElementById('edit-firewall-block');
       
       if (nameEl) nameEl.value = name;
-      if (allowEl) allowEl.value = parseFirewallRules(fw.allow).join('\n');
-      if (blockEl) blockEl.value = parseFirewallRules(fw.block).join('\n');
+      
+      // Populate networks from nested structure
+      if (allowEl) {
+        allowEl.value = (fw.allow && fw.allow.networks) ? fw.allow.networks.join('\n') : '';
+      }
+      if (blockEl) {
+        blockEl.value = (fw.block && fw.block.networks) ? fw.block.networks.join('\n') : '';
+      }
+      
       document.getElementById("edit-firewall-log-level").value = (fw.logLevel !== undefined && fw.logLevel !== null) ? fw.logLevel : "";
       document.getElementById("edit-firewall-log-retention").value = (fw.logRetentionHours !== undefined && fw.logRetentionHours !== null) ? fw.logRetentionHours : "";
+      
+      // Set region tags from nested structure
+      setTags('edit-firewall-allow-regions-tags', (fw.allow && fw.allow.regions) ? fw.allow.regions : []);
+      setTags('edit-firewall-block-regions-tags', (fw.block && fw.block.regions) ? fw.block.regions : []);
+      
+      // Setup tag input handlers
+      setupTagInput('edit-firewall-allow-regions-input', 'edit-firewall-allow-regions-tags');
+      setupTagInput('edit-firewall-block-regions-input', 'edit-firewall-block-regions-tags');
       
       modal.classList.add('is-visible');
     })
@@ -1864,10 +1976,28 @@ async function confirmAddFirewall() {
   
   if (!name) { if (msg) msg.textContent = "名称必填"; return; }
   
-  var allow = allowRaw ? allowRaw.split("\n").map(function(s){return s.trim();}).filter(Boolean) : [];
-  var block = blockRaw ? blockRaw.split("\n").map(function(s){return s.trim();}).filter(Boolean) : [];
+  var allowNetworks = allowRaw ? allowRaw.split("\n").map(function(s){return s.trim();}).filter(Boolean) : [];
+  var blockNetworks = blockRaw ? blockRaw.split("\n").map(function(s){return s.trim();}).filter(Boolean) : [];
   
-  var firewall = { allow: allow, block: block };
+  // Collect region tags
+  var allowRegions = getTags('add-firewall-allow-regions-tags');
+  var blockRegions = getTags('add-firewall-block-regions-tags');
+  
+  // Build nested firewall structure
+  var firewall = {};
+  
+  if (allowNetworks.length > 0 || allowRegions.length > 0) {
+    firewall.allow = {};
+    if (allowNetworks.length > 0) firewall.allow.networks = allowNetworks;
+    if (allowRegions.length > 0) firewall.allow.regions = allowRegions;
+  }
+  
+  if (blockNetworks.length > 0 || blockRegions.length > 0) {
+    firewall.block = {};
+    if (blockNetworks.length > 0) firewall.block.networks = blockNetworks;
+    if (blockRegions.length > 0) firewall.block.regions = blockRegions;
+  }
+  
   var logLevel = document.getElementById("add-firewall-log-level").value;
   if (logLevel !== "") firewall.logLevel = parseInt(logLevel, 10);
   var logRetention = document.getElementById("add-firewall-log-retention").value;
@@ -1899,10 +2029,28 @@ async function confirmEditFirewall() {
   
   if (!name) { if (msg) msg.textContent = "名称必填"; return; }
   
-  var allow = allowRaw ? allowRaw.split("\n").map(function(s){return s.trim();}).filter(Boolean) : [];
-  var block = blockRaw ? blockRaw.split("\n").map(function(s){return s.trim();}).filter(Boolean) : [];
+  var allowNetworks = allowRaw ? allowRaw.split("\n").map(function(s){return s.trim();}).filter(Boolean) : [];
+  var blockNetworks = blockRaw ? blockRaw.split("\n").map(function(s){return s.trim();}).filter(Boolean) : [];
   
-  var firewall = { allow: allow, block: block };
+  // Collect region tags
+  var allowRegions = getTags('edit-firewall-allow-regions-tags');
+  var blockRegions = getTags('edit-firewall-block-regions-tags');
+  
+  // Build nested firewall structure
+  var firewall = {};
+  
+  if (allowNetworks.length > 0 || allowRegions.length > 0) {
+    firewall.allow = {};
+    if (allowNetworks.length > 0) firewall.allow.networks = allowNetworks;
+    if (allowRegions.length > 0) firewall.allow.regions = allowRegions;
+  }
+  
+  if (blockNetworks.length > 0 || blockRegions.length > 0) {
+    firewall.block = {};
+    if (blockNetworks.length > 0) firewall.block.networks = blockNetworks;
+    if (blockRegions.length > 0) firewall.block.regions = blockRegions;
+  }
+  
   var logLevel = document.getElementById("edit-firewall-log-level").value;
   if (logLevel !== "") firewall.logLevel = parseInt(logLevel, 10);
   var logRetention = document.getElementById("edit-firewall-log-retention").value;

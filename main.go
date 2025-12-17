@@ -1,8 +1,10 @@
 package main
 
 import (
+	"container/list"
 	"context"
 	"crypto/tls"
+	"database/sql"
 	"flag"
 	"fmt"
 	"log"
@@ -20,6 +22,7 @@ import (
 
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/h2c"
+	_ "modernc.org/sqlite"
 )
 
 // ServerManager manages the lifecycle of multiple HTTP servers.
@@ -32,34 +35,34 @@ type ServerManager struct {
 	config     *Config
 	configFile string
 	// dataStore     *DataStore // Removed, replaced by statsDB for persistence
-	harManager    *HarLoggerManager
-	tunnelManager TunnelManagerInterface
-	scriptRunner  *ScriptRunner
-	trafficShaper *TrafficShaper
-	stats         *StatsCollector
-	staticCache   *StaticCacheManager
-	replayManager *ReplayManager
-	statsDB       *StatsDB
-	loggingDB     *LoggingDB
+	harManager     *HarLoggerManager
+	tunnelManager  TunnelManagerInterface
+	scriptRunner   *ScriptRunner
+	trafficShaper  *TrafficShaper
+	stats          *StatsCollector
+	staticCache    *StaticCacheManager
+	replayManager  *ReplayManager
+	statsDB        *StatsDB
+	loggingDB      *LoggingDB
 	logBroadcaster *LogBroadcaster
 }
 
 func NewServerManager(config *Config, configFile string, harManager *HarLoggerManager, tunnelManager TunnelManagerInterface, scriptRunner *ScriptRunner, trafficShaper *TrafficShaper, stats *StatsCollector, staticCache *StaticCacheManager, replayManager *ReplayManager, statsDB *StatsDB, loggingDB *LoggingDB, logBroadcaster *LogBroadcaster) *ServerManager {
 	return &ServerManager{
-		servers:       make(map[string]*http.Server),
-		tcpServers:    make(map[string]*RawTCPServer),
-		muxes:         make(map[string]*ConnectionMux),
-		config:        config,
-		configFile:    configFile,
-		harManager:    harManager,
-		tunnelManager: tunnelManager,
-		scriptRunner:  scriptRunner,
-		trafficShaper: trafficShaper,
-		stats:         stats,
-		staticCache:   staticCache,
-		replayManager: replayManager,
-		statsDB:       statsDB,
-		loggingDB:     loggingDB,
+		servers:        make(map[string]*http.Server),
+		tcpServers:     make(map[string]*RawTCPServer),
+		muxes:          make(map[string]*ConnectionMux),
+		config:         config,
+		configFile:     configFile,
+		harManager:     harManager,
+		tunnelManager:  tunnelManager,
+		scriptRunner:   scriptRunner,
+		trafficShaper:  trafficShaper,
+		stats:          stats,
+		staticCache:    staticCache,
+		replayManager:  replayManager,
+		statsDB:        statsDB,
+		loggingDB:      loggingDB,
 		logBroadcaster: logBroadcaster,
 	}
 }
@@ -272,19 +275,48 @@ func main() {
 
 	InitACME(config)
 
-	// Initialize StatsDB
-	statsDB, err := NewStatsDB("stats.db")
+	// Initialize shared database
+	db, err := sql.Open("sqlite", "aps.db")
 	if err != nil {
-		log.Fatalf("Failed to initialize stats db: %v", err)
+		log.Fatalf("Failed to open database: %v", err)
+	}
+	defer db.Close()
+
+	// Set connection pool settings for SQLite
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+
+	log.Printf("[DB] Opened shared database: aps.db")
+
+	// Initialize statistics module with shared database
+	statsDB, err := NewStatsDB(db)
+	if err != nil {
+		log.Fatalf("Failed to initialize stats DB: %v", err)
 	}
 	defer statsDB.Close()
 
-	// Initialize LoggingDB
-	loggingDB, err := NewLoggingDB("logging.db")
+	// Initialize logging module with shared database
+	loggingDB, err := NewLoggingDB(db)
 	if err != nil {
-		log.Fatalf("Failed to initialize logging db: %v", err)
+		log.Fatalf("Failed to initialize logging DB: %v", err)
 	}
 	defer loggingDB.Close()
+
+	//Initialize ASN cache with shared database
+	globalASNCache, err = NewASNCache(db, 1000)
+	if err != nil {
+		log.Printf("[ASN] Failed to initialize ASN cache: %v (continuing without database caching)", err)
+		// Create minimal cache without database
+		globalASNCache = &ASNCache{
+			memoryCache: make(map[string]*cacheEntry),
+			lruList:     list.New(),
+			maxEntries:  1000,
+			httpClient: &http.Client{
+				Timeout: 10 * time.Second,
+			},
+			apiURL: "https://api.ipapi.is/",
+		}
+	}
 
 	// Initialize LogBroadcaster to capture logs for SSE
 	logBroadcaster := NewLogBroadcaster(os.Stderr)

@@ -9,11 +9,17 @@ import (
 )
 
 // FirewallRule defines a firewall rule with allow and block lists
+// FilterRules defines filtering criteria for networks and geographic regions
+type FilterRules struct {
+	Networks []string `json:"networks,omitempty"` // IP addresses, CIDR blocks, or ranges (e.g., "192.168.0.0/16", "10.0.0.1-10.0.0.255")
+	Regions  []string `json:"regions,omitempty"`  // Geographic regions in format "CC" or "CC-Region" (e.g., "CN", "US-California", "JP-Osaka")
+}
+
 type FirewallRule struct {
-	Allow             []string `json:"allow,omitempty"`             // Whitelist - if set, only these IPs can access
-	Block             []string `json:"block,omitempty"`             // Blacklist - if set, these IPs are denied
-	LogLevel          *int     `json:"logLevel,omitempty"`          // 日志等级: 0=不记录, 1=基本请求, 2=完整请求
-	LogRetentionHours *int     `json:"logRetentionHours,omitempty"` // 日志保留时长(小时)
+	Allow             *FilterRules `json:"allow,omitempty"`             // Whitelist rules - if set, only matching traffic is allowed
+	Block             *FilterRules `json:"block,omitempty"`             // Blacklist rules - if set, matching traffic is denied
+	LogLevel          *int         `json:"logLevel,omitempty"`          // 日志等级: 0=不记录, 1=基本请求, 2=完整请求
+	LogRetentionHours *int         `json:"logRetentionHours,omitempty"` // 日志保留时长(小时)
 
 	// Parsed internal structures for efficient matching
 	allowRules []*ipRule
@@ -36,9 +42,9 @@ func ParseFirewallRule(rule *FirewallRule) error {
 	}
 
 	// Parse allow rules
-	if len(rule.Allow) > 0 {
-		rule.allowRules = make([]*ipRule, 0, len(rule.Allow))
-		for _, addr := range rule.Allow {
+	if rule.Allow != nil && len(rule.Allow.Networks) > 0 {
+		rule.allowRules = make([]*ipRule, 0, len(rule.Allow.Networks))
+		for _, addr := range rule.Allow.Networks {
 			ipRules, err := parseIPAddress(addr)
 			if err != nil {
 				log.Printf("[FIREWALL] Warning: failed to parse allow rule '%s': %v", addr, err)
@@ -46,13 +52,13 @@ func ParseFirewallRule(rule *FirewallRule) error {
 			}
 			rule.allowRules = append(rule.allowRules, ipRules...)
 		}
-		log.Printf("[FIREWALL] Parsed %d allow rules from %d entries", len(rule.allowRules), len(rule.Allow))
+		log.Printf("[FIREWALL] Parsed %d allow rules from %d entries", len(rule.allowRules), len(rule.Allow.Networks))
 	}
 
 	// Parse block rules
-	if len(rule.Block) > 0 {
-		rule.blockRules = make([]*ipRule, 0, len(rule.Block))
-		for _, addr := range rule.Block {
+	if rule.Block != nil && len(rule.Block.Networks) > 0 {
+		rule.blockRules = make([]*ipRule, 0, len(rule.Block.Networks))
+		for _, addr := range rule.Block.Networks {
 			ipRules, err := parseIPAddress(addr)
 			if err != nil {
 				log.Printf("[FIREWALL] Warning: failed to parse block rule '%s': %v", addr, err)
@@ -60,7 +66,7 @@ func ParseFirewallRule(rule *FirewallRule) error {
 			}
 			rule.blockRules = append(rule.blockRules, ipRules...)
 		}
-		log.Printf("[FIREWALL] Parsed %d block rules from %d entries", len(rule.blockRules), len(rule.Block))
+		log.Printf("[FIREWALL] Parsed %d block rules from %d entries", len(rule.blockRules), len(rule.Block.Networks))
 	}
 
 	return nil
@@ -187,15 +193,16 @@ func CheckFirewall(clientIP string, rule *FirewallRule) bool {
 		parsedIP = ipv4
 	}
 
+	// IP-based filtering (existing logic)
 	// Whitelist mode: if allow rules exist, only allow IPs in the allow list
 	if len(rule.allowRules) > 0 {
 		for _, allowRule := range rule.allowRules {
 			if matchIPRule(parsedIP, allowRule) {
-				DebugLog("[FIREWALL] IP %s allowed by whitelist rule", ip)
+				DebugLog("[FIREWALL] IP %s allowed by IP whitelist rule", ip)
 				return true
 			}
 		}
-		DebugLog("[FIREWALL] IP %s blocked by whitelist (not in allow list)", ip)
+		DebugLog("[FIREWALL] IP %s blocked by IP whitelist (not in allow list)", ip)
 		return false
 	}
 
@@ -203,15 +210,79 @@ func CheckFirewall(clientIP string, rule *FirewallRule) bool {
 	if len(rule.blockRules) > 0 {
 		for _, blockRule := range rule.blockRules {
 			if matchIPRule(parsedIP, blockRule) {
-				DebugLog("[FIREWALL] IP %s blocked by blacklist rule", ip)
+				DebugLog("[FIREWALL] IP %s blocked by IP blacklist rule", ip)
 				return false
 			}
 		}
-		DebugLog("[FIREWALL] IP %s allowed (not in block list)", ip)
-		return true
 	}
 
-	// No rules defined, allow by default
+	// Geolocation-based filtering
+	hasRegionRules := (rule.Allow != nil && len(rule.Allow.Regions) > 0) || (rule.Block != nil && len(rule.Block.Regions) > 0)
+
+	if hasRegionRules {
+		location, err := GetIPLocation(ip)
+		if err != nil {
+			// If geolocation lookup fails, allow by default (fail open)
+			DebugLog("[FIREWALL] Geolocation lookup failed for %s: %v, allowing by default", ip, err)
+		} else if location != nil {
+			// Region whitelist: if set, only allow specified regions
+			if rule.Allow != nil && len(rule.Allow.Regions) > 0 {
+				allowed := false
+				for _, region := range rule.Allow.Regions {
+					// Parse region format: "CC" or "CC-Region"
+					if matchesRegion(region, location.CountryCode, location.Country, location.State) {
+						allowed = true
+						break
+					}
+				}
+				if !allowed {
+					DebugLog("[FIREWALL] IP %s (%s-%s) blocked by region whitelist", ip, location.Country, location.State)
+					return false
+				}
+			}
+
+			// Region blacklist: if set, block specified regions
+			if rule.Block != nil && len(rule.Block.Regions) > 0 {
+				for _, region := range rule.Block.Regions {
+					// Parse region format: "CC" or "CC-Region"
+					if matchesRegion(region, location.CountryCode, location.Country, location.State) {
+						DebugLog("[FIREWALL] IP %s (%s-%s) blocked by region blacklist", ip, location.Country, location.State)
+						return false
+					}
+				}
+			}
+		}
+	}
+
+	// No blocking rules matched, allow by default
+	DebugLog("[FIREWALL] IP %s allowed (no blocking rules matched)", ip)
+	return true
+}
+
+// matchesRegion checks if a region spec matches the given location
+// Region format: "CC" (country code only) or "CC-Region" (country code with region/state)
+// Examples: "CN", "US-California", "JP-Osaka"
+func matchesRegion(regionSpec, countryCode, countryName, stateName string) bool {
+	parts := strings.Split(regionSpec, "-")
+
+	// Check country code or country name
+	if len(parts) >= 1 {
+		country := parts[0]
+		// Match country code or country name
+		if country != countryCode && country != countryName {
+			return false
+		}
+	}
+
+	// If region/state is specified, check it too
+	if len(parts) >= 2 {
+		region := strings.Join(parts[1:], "-") // Handle regions with hyphens like "Île-de-France"
+		// Case-insensitive comparison for regions
+		if !strings.EqualFold(region, stateName) {
+			return false
+		}
+	}
+
 	return true
 }
 
