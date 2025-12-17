@@ -9,103 +9,44 @@ import (
 	"log"
 	"net"
 	"net/http"
-	"strconv"
-	"strings"
 	"sync"
 	"time"
 
 	_ "modernc.org/sqlite"
 )
 
-// BaiduIPResponse represents the response from Baidu Maps IP location API
-type BaiduIPResponse struct {
-	Status  int          `json:"status"`
-	Address string       `json:"address"`
-	Content BaiduContent `json:"content"`
+// IPAPIResponse represents the response from ip-api.com
+type IPAPIResponse struct {
+	Status      string  `json:"status"`
+	Country     string  `json:"country"`
+	CountryCode string  `json:"countryCode"`
+	Region      string  `json:"region"`
+	RegionName  string  `json:"regionName"`
+	City        string  `json:"city"`
+	Zip         string  `json:"zip"`
+	Lat         float64 `json:"lat"`
+	Lon         float64 `json:"lon"`
+	Timezone    string  `json:"timezone"`
+	ISP         string  `json:"isp"`
+	Org         string  `json:"org"`
+	AS          string  `json:"as"`
+	Query       string  `json:"query"`
 }
 
-type BaiduContent struct {
-	Address string     `json:"address"`
-	Point   BaiduPoint `json:"point"`
-}
-
-type BaiduPoint struct {
-	X string `json:"x"` // Mercator X coordinate
-	Y string `json:"y"` // Mercator Y coordinate
-}
-
-// IPGeolocation represents the complete response from Baidu Maps API
+// IPGeolocation represents the complete response from ip-api.com
 type IPGeolocation struct {
-	IP           string        `json:"ip"`
-	RIR          string        `json:"rir"`
-	IsBogon      bool          `json:"is_bogon"`
-	IsMobile     bool          `json:"is_mobile"`
-	IsSatellite  bool          `json:"is_satellite"`
-	IsCrawler    bool          `json:"is_crawler"`
-	IsDatacenter bool          `json:"is_datacenter"`
-	IsTor        bool          `json:"is_tor"`
-	IsProxy      bool          `json:"is_proxy"`
-	IsVPN        bool          `json:"is_vpn"`
-	IsAbuser     bool          `json:"is_abuser"`
-	Company      *CompanyInfo  `json:"company,omitempty"`
-	Abuse        *AbuseInfo    `json:"abuse,omitempty"`
-	ASN          *ASNInfo      `json:"asn,omitempty"`
-	Location     *LocationInfo `json:"location,omitempty"`
-	ElapsedMs    float64       `json:"elapsed_ms"`
-}
-
-// CompanyInfo contains company information for the IP
-type CompanyInfo struct {
-	Name        string `json:"name"`
-	AbuserScore string `json:"abuser_score"`
-	Domain      string `json:"domain"`
-	Type        string `json:"type"`
-	Network     string `json:"network"`
-	Whois       string `json:"whois"`
-}
-
-// AbuseInfo contains abuse contact information
-type AbuseInfo struct {
-	Name    string `json:"name"`
-	Address string `json:"address"`
-	Email   string `json:"email"`
-	Phone   string `json:"phone"`
-}
-
-// ASNInfo contains ASN information for the IP
-type ASNInfo struct {
-	ASN         int    `json:"asn"`
-	AbuserScore string `json:"abuser_score"`
-	Route       string `json:"route"`
-	Descr       string `json:"descr"`
-	Country     string `json:"country"`
-	Active      bool   `json:"active"`
-	Org         string `json:"org"`
-	Domain      string `json:"domain"`
-	Abuse       string `json:"abuse"`
-	Type        string `json:"type"`
-	Updated     string `json:"updated"`
-	RIR         string `json:"rir"`
-	Whois       string `json:"whois"`
+	IP       string        `json:"ip"`
+	Location *LocationInfo `json:"location,omitempty"`
 }
 
 // LocationInfo contains geographical location information
 type LocationInfo struct {
-	IsEUMember    bool    `json:"is_eu_member"`
-	CallingCode   string  `json:"calling_code"`
-	CurrencyCode  string  `json:"currency_code"`
-	Continent     string  `json:"continent"`
-	Country       string  `json:"country"`
-	CountryCode   string  `json:"country_code"`
-	State         string  `json:"state"`
-	City          string  `json:"city"`
-	Latitude      float64 `json:"latitude"`
-	Longitude     float64 `json:"longitude"`
-	Zip           string  `json:"zip"`
-	Timezone      string  `json:"timezone"`
-	LocalTime     string  `json:"local_time"`
-	LocalTimeUnix int64   `json:"local_time_unix"`
-	IsDST         bool    `json:"is_dst"`
+	Country     string  `json:"country"`
+	CountryCode string  `json:"country_code"`
+	State       string  `json:"state"`
+	City        string  `json:"city"`
+	Latitude    float64 `json:"latitude"`
+	Longitude   float64 `json:"longitude"`
 }
 
 // cacheEntry represents an entry in the LRU cache
@@ -133,6 +74,10 @@ type ASNCache struct {
 	// Rate limiting
 	lastAPICall time.Time
 	apiMu       sync.Mutex
+
+	// Async lookup
+	pendingLookups sync.Map    // map[string]bool
+	lookupQueue    chan string // Queue for background lookups
 }
 
 var (
@@ -156,8 +101,12 @@ func NewASNCache(db *sql.DB, maxEntries int) (*ASNCache, error) {
 		httpClient: &http.Client{
 			Timeout: 10 * time.Second,
 		},
-		apiURL: "https://api.map.baidu.com/location/ip?ak=1CgrT8hhsdHdVYoUQeFyr6oA",
+		apiURL:      "http://ip-api.com/json/",
+		lookupQueue: make(chan string, 1000), // Buffer for pending lookups
 	}
+
+	// Start background worker
+	go cache.backgroundWorker()
 
 	if err := cache.initSchema(); err != nil {
 		return nil, err
@@ -234,18 +183,48 @@ func (c *ASNCache) lookup(ip string) (*IPGeolocation, error) {
 		return geo, nil
 	}
 
-	// 3. Query API
-	DebugLog("[ASN] Cache miss for %s, querying API", ip)
-	geo, err := c.queryAPI(ip)
-	if err != nil {
-		return nil, err
+	// 3. Async API Lookup
+	// If not in cache, trigger background lookup and return nil immediately
+	if _, pending := c.pendingLookups.Load(ip); !pending {
+		c.pendingLookups.Store(ip, true)
+		select {
+		case c.lookupQueue <- ip:
+			DebugLog("[ASN] Triggered background lookup for %s", ip)
+		default:
+			c.pendingLookups.Delete(ip)
+			DebugLog("[ASN] Lookup queue full, skipping %s", ip)
+		}
 	}
 
-	// Cache the result
-	c.addToMemory(ip, geo)
-	c.addToDatabase(ip, geo)
+	return nil, nil
+}
 
-	return geo, nil
+// backgroundWorker processes IPs from the lookup queue
+func (c *ASNCache) backgroundWorker() {
+	for ip := range c.lookupQueue {
+		go c.processIP(ip)
+	}
+}
+
+// processIP handles the lookup retry logic for a single IP
+func (c *ASNCache) processIP(ip string) {
+	defer c.pendingLookups.Delete(ip)
+
+	for {
+		// Query API
+		geo, err := c.queryAPI(ip)
+		if err == nil && geo != nil {
+			// Success: Cache and return
+			c.addToMemory(ip, geo)
+			c.addToDatabase(ip, geo)
+			DebugLog("[ASN] Background lookup success for %s", ip)
+			return
+		}
+
+		// Failure: Log and retry after delay
+		DebugLog("[ASN] Background lookup failed for %s: %v. Retrying in 1s...", ip, err)
+		time.Sleep(1 * time.Second)
+	}
 }
 
 // getFromMemory retrieves an entry from the memory cache
@@ -349,7 +328,7 @@ func (c *ASNCache) addToDatabase(ip string, geo *IPGeolocation) {
 	}
 }
 
-// queryAPI queries the Baidu Maps API for IP geolocation data
+// queryAPI queries the ip-api.com API for IP geolocation data
 func (c *ASNCache) queryAPI(ip string) (*IPGeolocation, error) {
 	// Rate limiting: wait at least 1 second between API calls
 	c.apiMu.Lock()
@@ -360,7 +339,7 @@ func (c *ASNCache) queryAPI(ip string) (*IPGeolocation, error) {
 	c.lastAPICall = time.Now()
 	c.apiMu.Unlock()
 
-	url := fmt.Sprintf("%s&ip=%s", c.apiURL, ip)
+	url := fmt.Sprintf("%s%s", c.apiURL, ip)
 	resp, err := c.httpClient.Get(url)
 	if err != nil {
 		return nil, fmt.Errorf("API request failed: %v", err)
@@ -376,47 +355,29 @@ func (c *ASNCache) queryAPI(ip string) (*IPGeolocation, error) {
 		return nil, fmt.Errorf("failed to read API response: %v", err)
 	}
 
-	var baiduResp BaiduIPResponse
-	if err := json.Unmarshal(body, &baiduResp); err != nil {
+	var apiResp IPAPIResponse
+	if err := json.Unmarshal(body, &apiResp); err != nil {
 		return nil, fmt.Errorf("failed to parse API response: %v", err)
 	}
 
-	if baiduResp.Status != 0 {
-		return nil, fmt.Errorf("Baidu API returned error status: %d", baiduResp.Status)
+	if apiResp.Status != "success" {
+		return nil, fmt.Errorf("API returned error status: %s", apiResp.Status)
 	}
 
-	// Parse pipe-separated address: Country|Province|City|...
-	// Format: US|Ohio|Franklin|None|None|100|0|0
-	addressParts := strings.Split(baiduResp.Address, "|")
-	var countryCode, province, city string
-	if len(addressParts) >= 3 {
-		countryCode = addressParts[0]
-		province = addressParts[1]
-		city = addressParts[2]
-	}
-
-	// Parse coordinates (no conversion needed per user's request)
-	var lat, lng float64
-	if baiduResp.Content.Point.Y != "" && baiduResp.Content.Point.X != "" {
-		lat, _ = strconv.ParseFloat(baiduResp.Content.Point.Y, 64)
-		lng, _ = strconv.ParseFloat(baiduResp.Content.Point.X, 64)
-	}
-
-	// Convert Baidu response to IPGeolocation structure
 	geo := &IPGeolocation{
 		IP: ip,
 		Location: &LocationInfo{
-			Country:     province, // Use province as country name for compatibility
-			CountryCode: countryCode,
-			State:       province,
-			City:        city,
-			Latitude:    lat,
-			Longitude:   lng,
+			Country:     apiResp.Country,
+			CountryCode: apiResp.CountryCode,
+			State:       apiResp.RegionName,
+			City:        apiResp.City,
+			Latitude:    apiResp.Lat,
+			Longitude:   apiResp.Lon,
 		},
 	}
 
 	DebugLog("[ASN] Retrieved geolocation for %s: %s-%s-%s (%.6f, %.6f)",
-		ip, countryCode, province, city, lat, lng)
+		ip, apiResp.Country, apiResp.RegionName, apiResp.City, apiResp.Lat, apiResp.Lon)
 	return geo, nil
 }
 

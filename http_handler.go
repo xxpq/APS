@@ -454,6 +454,10 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if firewallRule != nil {
+		log.Printf("[%s]%s[FIREWALL] Request from %s allowed by firewall", clientIP, clientLocation, clientIP)
+	}
+
 	// 获取用户和组级别的Endpoints/Tunnels配置（最高优先级）
 	var userEndpointNames, userTunnelNames []string
 

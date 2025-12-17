@@ -87,7 +87,7 @@ func (s *RawTCPServer) Start() error {
 	}
 	s.listener = listener
 
-	log.Printf("%s[RAW TCP] Server '%s' listening on %s", s.name, addr)
+	log.Printf("[RAW TCP] Server '%s' listening on %s", s.name, addr)
 
 	go s.acceptLoop()
 	return nil
@@ -114,7 +114,7 @@ func (s *RawTCPServer) UpdateMappings(mappings []*Mapping) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.mappings = mappings
-	log.Printf("%s[RAW TCP] Server '%s' mappings updated (%d mappings)", s.name, len(mappings))
+	log.Printf("[RAW TCP] Server '%s' mappings updated (%d mappings)", s.name, len(mappings))
 }
 
 // acceptLoop accepts incoming connections
@@ -128,7 +128,7 @@ func (s *RawTCPServer) acceptLoop() {
 			if closed {
 				return
 			}
-			log.Printf("%s[RAW TCP] Accept error on '%s': %v", s.name, err)
+			log.Printf("[RAW TCP] Accept error on '%s': %v", s.name, err)
 			continue
 		}
 
@@ -266,7 +266,11 @@ func (s *RawTCPServer) handleConnection(clientConn net.Conn) {
 	}
 
 	// Only log connection if it passed server firewall check
-	log.Printf("%s[RAW TCP] New connection from %s on server '%s'", clientLocation, clientAddr, s.name)
+	if firewallRule != nil {
+		log.Printf("%s[RAW TCP] New connection from %s on server '%s' (allowed by firewall)", clientLocation, clientAddr, s.name)
+	} else {
+		log.Printf("%s[RAW TCP] New connection from %s on server '%s'", clientLocation, clientAddr, s.name)
+	}
 
 	// Find matching mapping for this server
 	mapping := s.findMapping()
