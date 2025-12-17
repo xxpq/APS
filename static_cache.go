@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -124,7 +125,9 @@ func (m *StaticCacheManager) IsCacheable(urlPath string) bool {
 	if !m.enabled {
 		return false
 	}
-	ext := strings.ToLower(filepath.Ext(urlPath))
+	// Use path.Ext for URL paths to handle forward slashes correctly
+	ext := strings.ToLower(path.Ext(urlPath))
+	DebugLog("[DEBUG] IsCacheable: path=%s, ext=%s, result=%v", urlPath, ext, m.extensions[ext])
 	return m.extensions[ext]
 }
 
@@ -175,11 +178,14 @@ func (m *StaticCacheManager) Get(fullURL string) (*CacheEntry, bool) {
 	}
 
 	// 读取文件内容
-	data, err := os.ReadFile(cachePath)
+	encryptedData, err := os.ReadFile(cachePath)
 	if err != nil {
 		log.Printf("[CACHE] Failed to read cache file %s: %v", cachePath, err)
 		return nil, false
 	}
+
+	// XOR 解密
+	data := xorData(encryptedData, cacheKey)
 
 	// 反序列化缓存条目
 	var entry CacheEntry
@@ -271,10 +277,13 @@ func (m *StaticCacheManager) Set(fullURL string, headers http.Header, statusCode
 			return
 		}
 
+		// XOR 加密
+		encryptedData := xorData(data, cacheKey)
+
 		m.mu.Lock()
 		defer m.mu.Unlock()
 
-		if err := os.WriteFile(cachePath, data, 0644); err != nil {
+		if err := os.WriteFile(cachePath, encryptedData, 0644); err != nil {
 			log.Printf("[CACHE] Failed to write cache file %s: %v", cachePath, err)
 			return
 		}
@@ -283,6 +292,19 @@ func (m *StaticCacheManager) Set(fullURL string, headers http.Header, statusCode
 	}()
 
 	return nil
+}
+
+// xorData 使用密钥对数据进行 XOR 加密/解密
+func xorData(data []byte, key string) []byte {
+	if len(key) == 0 {
+		return data
+	}
+	result := make([]byte, len(data))
+	keyLen := len(key)
+	for i := 0; i < len(data); i++ {
+		result[i] = data[i] ^ key[i%keyLen]
+	}
+	return result
 }
 
 // compressWithBrotli 使用Brotli压缩数据

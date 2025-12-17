@@ -445,6 +445,7 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Check if client IP is allowed
 	clientIP := getClientIP(r)
+	clientLocation := formatLocationTagHTTP(clientIP)
 	if !CheckFirewall(clientIP, firewallRule) {
 		isIntercepted = true
 		// isError = true // Firewall block is now counted as intercepted, not error
@@ -487,7 +488,7 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	if !matched && !hasAnyConfig && !r.URL.IsAbs() {
 		isError = true
 		http.NotFound(w, r)
-		log.Printf("[%s]%s[%s] %s (NO MAPPING - 404 Not Found)", clientIP, formatLocationTagHTTP(clientIP), r.Method, originalURL)
+		log.Printf("[%s]%s[%s] %s (NO MAPPING - 404 Not Found)", clientIP, clientLocation, r.Method, originalURL)
 		return
 	}
 
@@ -507,7 +508,7 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		if tunnelConfig, ok := p.config.Tunnels[tunnelKey]; ok && tunnelConfig.Auth != nil {
 			if !p.checkTunnelAccess(user, username, tunnelConfig.Auth) {
 				isError = true
-				log.Printf("[TUNNEL] User '%s' is not authorized for tunnel '%s'", username, tunnelKey)
+				log.Printf("[%s]%s[TUNNEL] User '%s' is not authorized for tunnel '%s'", clientIP, clientLocation, username, tunnelKey)
 				http.Error(w, "Forbidden by tunnel access rule", http.StatusForbidden)
 				return
 			}
@@ -586,19 +587,19 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 
 	if matched {
 		if strings.HasPrefix(targetURL, "file://") {
-			log.Printf("[%s]%s[%s] %s -> [LOCAL] %s", clientIP, formatLocationTagHTTP(clientIP), r.Method, originalURL, targetURL)
+			log.Printf("[%s]%s[%s] %s -> [LOCAL] %s", clientIP, clientLocation, r.Method, originalURL, targetURL)
 			p.serveFile(w, r, mapping)
 			return
 		}
-		log.Printf("[%s]%s[%s] %s -> %s (MAPPED)", clientIP, formatLocationTagHTTP(clientIP), r.Method, originalURL, targetURL)
+		log.Printf("[%s]%s[%s] %s -> %s (MAPPED)", clientIP, clientLocation, r.Method, originalURL, targetURL)
 	} else if len(userEndpointNames) > 0 || len(userTunnelNames) > 0 {
-		log.Printf("[%s]%s[%s] %s (NO MAPPING - FORWARDED TO USER-LEVEL ENDPOINT/TUNNEL)", clientIP, formatLocationTagHTTP(clientIP), r.Method, originalURL)
+		log.Printf("[%s]%s[%s] %s (NO MAPPING - FORWARDED TO USER-LEVEL ENDPOINT/TUNNEL)", clientIP, clientLocation, r.Method, originalURL)
 	} else if len(serverEndpointNames) > 0 || len(serverTunnelNames) > 0 {
-		log.Printf("[%s]%s[%s] %s (NO MAPPING - FORWARDED TO SERVER-LEVEL ENDPOINT/TUNNEL)", clientIP, formatLocationTagHTTP(clientIP), r.Method, originalURL)
+		log.Printf("[%s]%s[%s] %s (NO MAPPING - FORWARDED TO SERVER-LEVEL ENDPOINT/TUNNEL)", clientIP, clientLocation, r.Method, originalURL)
 	} else if mapping != nil && (len(mapping.endpointNames) > 0 || len(mapping.tunnelNames) > 0) {
-		log.Printf("[%s]%s[%s] %s (NO MAPPING - FORWARDED TO MAPPING-LEVEL ENDPOINT/TUNNEL)", clientIP, formatLocationTagHTTP(clientIP), r.Method, originalURL)
+		log.Printf("[%s]%s[%s] %s (NO MAPPING - FORWARDED TO MAPPING-LEVEL ENDPOINT/TUNNEL)", clientIP, clientLocation, r.Method, originalURL)
 	} else {
-		log.Printf("[%s]%s[%s] %s (NO MAPPING)", clientIP, formatLocationTagHTTP(clientIP), r.Method, originalURL)
+		log.Printf("[%s]%s[%s] %s (NO MAPPING)", clientIP, clientLocation, r.Method, originalURL)
 	}
 
 	var requestBody io.Reader = r.Body
@@ -775,14 +776,14 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		if !ok {
 			isError = true
 			http.Error(w, "User-level endpoint not found or not connected: "+randomEndpoint, http.StatusBadGateway)
-			log.Printf("[TUNNEL] User-level specified endpoint '%s' not found in any active tunnel", randomEndpoint)
+			log.Printf("[%s]%s[TUNNEL] User-level specified endpoint '%s' not found in any active tunnel", clientIP, clientLocation, randomEndpoint)
 			return
 		}
 		tunnelName = foundTunnel
 		endpointName = randomEndpoint
 		tunnelKey = tunnelName                        // for stats
 		endpointKey = tunnelName + ":" + endpointName // for per-endpoint stats
-		DebugLog("[TUNNEL] Using user-level endpoint '%s' via tunnel '%s'", endpointName, tunnelName)
+		DebugLog("[%s]%s[TUNNEL] Using user-level endpoint '%s' via tunnel '%s'", clientIP, clientLocation, endpointName, tunnelName)
 
 	} else if len(userTunnelNames) > 0 {
 		// Priority 2: 用户级别的tunnels配置
@@ -791,14 +792,14 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			isError = true
 			http.Error(w, "No available endpoint for user-level tunnels", http.StatusBadGateway)
-			log.Printf("[TUNNEL] %v", err)
+			log.Printf("[%s]%s[TUNNEL] %v", clientIP, clientLocation, err)
 			return
 		}
 		tunnelName = foundTunnel
 		endpointName = foundEndpoint
 		tunnelKey = tunnelName                        // for stats
 		endpointKey = tunnelName + ":" + endpointName // for per-endpoint stats
-		DebugLog("[TUNNEL] Using user-level tunnel '%s' to endpoint '%s'", tunnelName, endpointName)
+		DebugLog("[%s]%s[TUNNEL] Using user-level tunnel '%s' to endpoint '%s'", clientIP, clientLocation, tunnelName, endpointName)
 
 	} else if len(serverEndpointNames) > 0 {
 		// Priority 3: server级别的endpoints配置
@@ -809,14 +810,14 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		if !ok {
 			isError = true
 			http.Error(w, "Server-level endpoint not found or not connected: "+randomEndpoint, http.StatusBadGateway)
-			log.Printf("[TUNNEL] Server-level specified endpoint '%s' not found in any active tunnel", randomEndpoint)
+			log.Printf("[%s]%s[TUNNEL] Server-level specified endpoint '%s' not found in any active tunnel", clientIP, clientLocation, randomEndpoint)
 			return
 		}
 		tunnelName = foundTunnel
 		endpointName = randomEndpoint
 		tunnelKey = tunnelName                        // for stats
 		endpointKey = tunnelName + ":" + endpointName // for per-endpoint stats
-		DebugLog("[TUNNEL] Using server-level endpoint '%s' via tunnel '%s'", endpointName, tunnelName)
+		DebugLog("[%s]%s[TUNNEL] Using server-level endpoint '%s' via tunnel '%s'", clientIP, clientLocation, endpointName, tunnelName)
 
 	} else if len(serverTunnelNames) > 0 {
 		// Priority 4: server级别的tunnels配置
@@ -825,14 +826,14 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			isError = true
 			http.Error(w, "No available endpoint for server-level tunnels", http.StatusBadGateway)
-			log.Printf("[TUNNEL] %v", err)
+			log.Printf("[%s]%s[TUNNEL] %v", clientIP, clientLocation, err)
 			return
 		}
 		tunnelName = foundTunnel
 		endpointName = foundEndpoint
 		tunnelKey = tunnelName                        // for stats
 		endpointKey = tunnelName + ":" + endpointName // for per-endpoint stats
-		DebugLog("[TUNNEL] Using server-level tunnel '%s' to endpoint '%s'", tunnelName, endpointName)
+		DebugLog("[%s]%s[TUNNEL] Using server-level tunnel '%s' to endpoint '%s'", clientIP, clientLocation, tunnelName, endpointName)
 
 	} else if mapping != nil && len(mapping.endpointNames) > 0 {
 		// Priority 5: mapping级别的endpoints配置（fallback）
@@ -843,7 +844,7 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		if !ok {
 			isError = true
 			http.Error(w, "Endpoint not found or not connected: "+randomEndpoint, http.StatusBadGateway)
-			log.Printf("[TUNNEL] Specified endpoint '%s' not found in any active tunnel", randomEndpoint)
+			log.Printf("[%s]%s[TUNNEL] Specified endpoint '%s' not found in any active tunnel", clientIP, clientLocation, randomEndpoint)
 			return
 		}
 		tunnelName = foundTunnel
@@ -857,7 +858,7 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			isError = true
 			http.Error(w, "No available endpoint for specified tunnels", http.StatusBadGateway)
-			log.Printf("[TUNNEL] %v", err)
+			log.Printf("[%s]%s[TUNNEL] %v", clientIP, clientLocation, err)
 			return
 		}
 		tunnelName = foundTunnel
@@ -876,11 +877,11 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			isError = true
 			http.Error(w, "Failed to serialize request for tunnel", http.StatusInternalServerError)
-			log.Printf("[TUNNEL] Error serializing request: %v", err)
+			log.Printf("[%s]%s[TUNNEL] Error serializing request: %v", clientIP, clientLocation, err)
 			return
 		}
 
-		DebugLog("[TUNNEL] Forwarding request for %s via tunnel '%s' to endpoint '%s'", originalURL, tunnelName, endpointName)
+		DebugLog("[%s]%s[TUNNEL] Forwarding request for %s via tunnel '%s' to endpoint '%s'", clientIP, clientLocation, originalURL, tunnelName, endpointName)
 
 		reqPayload := &RequestPayload{
 			URL:  proxyReq.URL.String(),
@@ -891,7 +892,7 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			isError = true
 			http.Error(w, "Failed to send request through tunnel: "+err.Error(), http.StatusBadGateway)
-			log.Printf("[TUNNEL] Error sending request via endpoint '%s': %v", endpointName, err)
+			log.Printf("[%s]%s[TUNNEL] Error sending request via endpoint '%s': %v", clientIP, clientLocation, endpointName, err)
 			return
 		}
 		defer bodyStream.Close()
@@ -901,7 +902,7 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			isError = true
 			http.Error(w, "Failed to read response header from tunnel", http.StatusInternalServerError)
-			log.Printf("[TUNNEL] Error reading response header from endpoint '%s': %v", endpointName, err)
+			log.Printf("[%s]%s[TUNNEL] Error reading response header from endpoint '%s': %v", clientIP, clientLocation, endpointName, err)
 			return
 		}
 		// The body from ReadResponse is empty; we will stream the real body.
@@ -1042,6 +1043,7 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	bytesSent = counterWriter.BytesWritten
 
 	// 静态文件缓存保存 - 仅缓存成功的200响应且为GET请求
+	DebugLog("[DEBUG] Checking cacheability: Method=%s, StaticCache!=nil=%v, Path=%s, Status=%d", r.Method, p.staticCache != nil, r.URL.Path, resp.StatusCode)
 	if r.Method == http.MethodGet && p.staticCache != nil && p.staticCache.IsCacheable(r.URL.Path) && resp.StatusCode == http.StatusOK {
 		cacheURL := p.buildOriginalURL(r)
 		// 确保缓存的是解压后的明文内容
@@ -1050,7 +1052,7 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 			decodedBody, _, decoded, err := decodeBodyWithEncoding(body, encoding)
 			if err == nil && decoded {
 				cacheBody = decodedBody
-				log.Printf("[CACHE] Decoded %s content before caching: %d -> %d bytes", encoding, len(body), len(cacheBody))
+				DebugLog("[CACHE] Decoded %s content before caching: %d -> %d bytes", encoding, len(body), len(cacheBody))
 			}
 		}
 
@@ -1062,9 +1064,9 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if policies.Quality < 1.0 {
-		log.Printf("[%s]%s[%s] %s - %d (%d bytes, throttled)", clientIP, formatLocationTagHTTP(clientIP), r.Method, originalURL, resp.StatusCode, bytesSent)
+		log.Printf("[%s]%s[%s] %s - %d (%d bytes, throttled)", clientIP, clientLocation, r.Method, originalURL, resp.StatusCode, bytesSent)
 	} else {
-		log.Printf("[%s]%s[%s] %s - %d (%d bytes)", clientIP, formatLocationTagHTTP(clientIP), r.Method, originalURL, resp.StatusCode, bytesSent)
+		log.Printf("[%s]%s[%s] %s - %d (%d bytes)", clientIP, clientLocation, r.Method, originalURL, resp.StatusCode, bytesSent)
 	}
 }
 
@@ -1183,7 +1185,7 @@ func (p *MapRemoteProxy) modifyResponseBody(resp *http.Response, mapping *Mappin
 			}
 			unescapedValue := unescapeReplacementString(value)
 			tempBody = re.ReplaceAllString(tempBody, unescapedValue)
-			log.Printf("[RESPONSE REPLACE] Applied replacement: %s -> %s", key, value)
+			DebugLog("[RESPONSE REPLACE] Applied replacement: %s -> %s", key, value)
 		}
 		body = []byte(tempBody)
 	}

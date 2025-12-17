@@ -87,7 +87,7 @@ func (s *RawTCPServer) Start() error {
 	}
 	s.listener = listener
 
-	log.Printf("[RAW TCP] Server '%s' listening on %s", s.name, addr)
+	log.Printf("%s[RAW TCP] Server '%s' listening on %s", s.name, addr)
 
 	go s.acceptLoop()
 	return nil
@@ -114,7 +114,7 @@ func (s *RawTCPServer) UpdateMappings(mappings []*Mapping) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.mappings = mappings
-	log.Printf("[RAW TCP] Server '%s' mappings updated (%d mappings)", s.name, len(mappings))
+	log.Printf("%s[RAW TCP] Server '%s' mappings updated (%d mappings)", s.name, len(mappings))
 }
 
 // acceptLoop accepts incoming connections
@@ -128,7 +128,7 @@ func (s *RawTCPServer) acceptLoop() {
 			if closed {
 				return
 			}
-			log.Printf("[RAW TCP] Accept error on '%s': %v", s.name, err)
+			log.Printf("%s[RAW TCP] Accept error on '%s': %v", s.name, err)
 			continue
 		}
 
@@ -244,6 +244,7 @@ func (s *RawTCPServer) handleConnection(clientConn net.Conn) {
 	}()
 
 	clientAddr := clientConn.RemoteAddr().String()
+	clientLocation := formatLocationTag(clientAddr)
 
 	// Check firewall rules BEFORE logging anything
 	// This prevents blocked IPs from appearing in logs
@@ -255,7 +256,7 @@ func (s *RawTCPServer) handleConnection(clientConn net.Conn) {
 
 			// Check if client IP is allowed by server firewall
 			if !CheckFirewall(clientAddr, firewallRule) {
-				DebugLog("[RAW TCP] Connection from %s blocked by server firewall", clientAddr)
+				DebugLog("%s[RAW TCP] Connection from %s blocked by server firewall", clientLocation, clientAddr)
 				clientConn.Close()
 				isIntercepted = true
 				// isError = true // Firewall block is now counted as intercepted
@@ -265,12 +266,12 @@ func (s *RawTCPServer) handleConnection(clientConn net.Conn) {
 	}
 
 	// Only log connection if it passed server firewall check
-	log.Printf("[RAW TCP]%s New connection from %s on server '%s'", formatLocationTag(clientAddr), clientAddr, s.name)
+	log.Printf("%s[RAW TCP] New connection from %s on server '%s'", clientLocation, clientAddr, s.name)
 
 	// Find matching mapping for this server
 	mapping := s.findMapping()
 	if mapping == nil {
-		log.Printf("[RAW TCP]%s No mapping found for server '%s'", formatLocationTag(clientAddr), s.name)
+		log.Printf("%s[RAW TCP] No mapping found for server '%s'", clientLocation, s.name)
 		isError = true
 		clientConn.Close()
 		return
@@ -298,7 +299,7 @@ func (s *RawTCPServer) handleConnection(clientConn net.Conn) {
 
 			// Check if client IP is allowed by mapping firewall
 			if !CheckFirewall(clientAddr, firewallRule) {
-				DebugLog("[RAW TCP] Connection from %s blocked by mapping firewall", clientAddr)
+				DebugLog("%s[RAW TCP] Connection from %s blocked by mapping firewall", clientLocation, clientAddr)
 				clientConn.Close()
 				isIntercepted = true
 				// isError = true // Firewall block is now counted as intercepted
@@ -309,13 +310,13 @@ func (s *RawTCPServer) handleConnection(clientConn net.Conn) {
 
 	// Log the mapping details AFTER all firewall checks pass
 	fromURL := mapping.GetFromURL()
-	log.Printf("[RAW TCP]%s Found mapping for server '%s': %s -> %s", formatLocationTag(clientAddr), s.name, fromURL, mapping.GetToURL())
+	log.Printf("%s[RAW TCP] Found mapping for server '%s': %s -> %s", clientLocation, s.name, fromURL, mapping.GetToURL())
 
 	// Parse target URL from mapping
 	toURL := mapping.GetToURL()
 	targetHost, targetPort, useTLS, err := parseTCPURL(toURL)
 	if err != nil {
-		log.Printf("[RAW TCP] Invalid target URL '%s': %v", toURL, err)
+		log.Printf("%s[RAW TCP] Invalid target URL '%s': %v", clientLocation, toURL, err)
 		clientConn.Close()
 		return
 	}
@@ -338,7 +339,7 @@ func (s *RawTCPServer) handleConnection(clientConn net.Conn) {
 	}
 
 	responseTime := time.Since(startTime)
-	log.Printf("[RAW TCP]%s Connection from %s closed after %v", formatLocationTag(clientAddr), clientAddr, responseTime)
+	log.Printf("%s[RAW TCP] Connection from %s closed after %v", clientLocation, clientAddr, responseTime)
 }
 
 // findMapping finds a matching mapping for this TCP server
@@ -513,18 +514,19 @@ func (s *RawTCPServer) forwardViaProxy(clientConn net.Conn, mapping *Mapping, ta
 
 // forwardViaTunnel forwards the connection via the tunnel
 func (s *RawTCPServer) forwardViaTunnel(clientConn net.Conn, mapping *Mapping, targetHost string, targetPort int, useTLS bool, clientAddr string, bytesSent, bytesRecv *uint64) {
-	log.Printf("[RAW TCP] Forwarding to %s:%d via tunnel (client: %s)", targetHost, targetPort, clientAddr)
+	clientLocation := formatLocationTag(clientAddr)
+	log.Printf("%s[RAW TCP] Forwarding to %s:%d via tunnel (client: %s)", clientLocation, targetHost, targetPort, clientAddr)
 
 	// Get tunnel and endpoint
 	tunnelName, endpointName, err := s.getTunnelAndEndpoint(mapping)
 	if err != nil {
-		log.Printf("[RAW TCP] Failed to get tunnel/endpoint: %v", err)
+		log.Printf("%s[RAW TCP] Failed to get tunnel/endpoint: %v", clientLocation, err)
 		// Fallback to direct connection
 		s.forwardDirect(clientConn, targetHost, targetPort, bytesSent, bytesRecv)
 		return
 	}
 
-	log.Printf("[RAW TCP] Using tunnel '%s' endpoint '%s'", tunnelName, endpointName)
+	log.Printf("%s[RAW TCP] Using tunnel '%s' endpoint '%s'", clientLocation, tunnelName, endpointName)
 
 	// Wrap clientConn to count bytes
 	countedConn := &CountedConn{
@@ -540,15 +542,15 @@ func (s *RawTCPServer) forwardViaTunnel(clientConn net.Conn, mapping *Mapping, t
 	defer cancel()
 
 	// Pass client IP for security audit logging on endpoint
-	log.Printf("[RAW TCP] Calling SendProxyConnect for %s:%d", targetHost, targetPort)
+	log.Printf("%s[RAW TCP] Calling SendProxyConnect for %s:%d", clientLocation, targetHost, targetPort)
 	done, err := s.tunnelManager.SendProxyConnect(ctx, tunnelName, endpointName, targetHost, targetPort, useTLS, countedConn, clientAddr)
 	if err != nil {
-		log.Printf("[RAW TCP] Tunnel proxy connect failed: %v", err)
+		log.Printf("%s[RAW TCP] Tunnel proxy connect failed: %v", clientLocation, err)
 		clientConn.Close()
 		return
 	}
 
-	log.Printf("[RAW TCP] Tunnel proxy connection established, waiting for data flow completion")
+	log.Printf("%s[RAW TCP] Tunnel proxy connection established, waiting for data flow completion", clientLocation)
 
 	// Wait for the tunnel manager to signal that the connection is done
 	// The done channel will be closed when:
@@ -556,7 +558,7 @@ func (s *RawTCPServer) forwardViaTunnel(clientConn net.Conn, mapping *Mapping, t
 	// 2. The endpoint closes the connection
 	// 3. An error occurs
 	<-done
-	log.Printf("[RAW TCP] Tunnel connection closed (client: %s)", clientAddr)
+	log.Printf("%s[RAW TCP] Tunnel connection closed (client: %s)", clientLocation, clientAddr)
 }
 
 // getTunnelAndEndpoint gets the tunnel and endpoint names from mapping configuration
