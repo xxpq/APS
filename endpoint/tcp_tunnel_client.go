@@ -48,8 +48,9 @@ const (
 	MsgTypeResponseEnd     uint8 = 0x14
 	MsgTypeProxyConnect    uint8 = 0x20
 	MsgTypeProxyConnectAck uint8 = 0x21
-	MsgTypeProxyData       uint8 = 0x22
+	// MsgTypeProxyData removed
 	MsgTypeProxyClose      uint8 = 0x23
+	MsgTypeProxyDataBinary uint8 = 0x24
 	MsgTypeHeartbeat       uint8 = 0xF0
 	MsgTypeCancel          uint8 = 0xF1
 
@@ -131,11 +132,7 @@ type ProxyConnectAckPayload struct {
 	Error        string `json:"error,omitempty"`
 }
 
-// ProxyDataPayload for TCP data
-type ProxyDataPayload struct {
-	ConnectionID string `json:"connection_id"`
-	Data         []byte `json:"data"`
-}
+// ProxyDataPayload removed
 
 // ProxyClosePayload for closing proxy
 type ProxyClosePayload struct {
@@ -360,8 +357,8 @@ func handleTCPMessage(tc *TunnelConn, msg *TunnelMessage, km *SessionKeyManager)
 		handleTCPRequest(tc, msg)
 	case MsgTypeProxyConnect:
 		handleTCPProxyConnect(tc, msg)
-	case MsgTypeProxyData:
-		handleTCPProxyData(msg)
+	case MsgTypeProxyDataBinary:
+		handleTCPProxyDataBinary(msg)
 	case MsgTypeProxyClose:
 		handleTCPProxyClose(msg)
 	case MsgTypePortForwardResponse:
@@ -551,29 +548,34 @@ func handleTCPProxyConnect(tc *TunnelConn, msg *TunnelMessage) {
 	tc.SendJSON(MsgTypeProxyConnectAck, ack)
 }
 
-// handleTCPProxyData handles proxy data via TCP tunnel
-func handleTCPProxyData(msg *TunnelMessage) {
-	var payload ProxyDataPayload
-	if err := msg.ParseJSON(&payload); err != nil {
-		log.Printf("[PROXY] Failed to parse proxy data: %v", err)
+// handleTCPProxyData removed (legacy JSON format)
+
+// handleTCPProxyDataBinary handles proxy data in binary format
+func handleTCPProxyDataBinary(msg *TunnelMessage) {
+	if len(msg.Payload) < 1 {
 		return
 	}
 
-	connVal, ok := proxyConnections.Load(payload.ConnectionID)
+	idLen := int(msg.Payload[0])
+	if len(msg.Payload) < 1+idLen {
+		return
+	}
+
+	connectionID := string(msg.Payload[1 : 1+idLen])
+	data := msg.Payload[1+idLen:]
+
+	connVal, ok := proxyConnections.Load(connectionID)
 	if !ok {
-		log.Printf("[PROXY %s] Connection not found for proxy data", payload.ConnectionID)
+		// log.Printf("[PROXY %s] Connection not found for binary proxy data", connectionID)
 		return
 	}
 
-	log.Printf("[PROXY %s] Received %d bytes from APS, writing to backend", payload.ConnectionID, len(payload.Data))
 	conn := connVal.(net.Conn)
-	n, err := conn.Write(payload.Data)
+	_, err := conn.Write(data)
 	if err != nil {
-		log.Printf("[PROXY %s] Write error: %v", payload.ConnectionID, err)
+		log.Printf("[PROXY %s] Write error: %v", connectionID, err)
 		conn.Close()
-		proxyConnections.Delete(payload.ConnectionID)
-	} else {
-		log.Printf("[PROXY %s] Wrote %d bytes to backend", payload.ConnectionID, n)
+		proxyConnections.Delete(connectionID)
 	}
 }
 
@@ -611,9 +613,17 @@ func tcpProxyReadLoop(tc *TunnelConn, connID string, conn net.Conn) {
 		n, err := conn.Read(buf)
 		if n > 0 {
 			log.Printf("[PROXY %s] Read %d bytes from backend, sending to APS", connID, n)
-			if sendErr := tc.SendJSON(MsgTypeProxyData, ProxyDataPayload{
-				ConnectionID: connID,
-				Data:         buf[:n],
+
+			// Send data to APS using binary format
+			connIDBytes := []byte(connID)
+			payload := make([]byte, 1+len(connIDBytes)+n)
+			payload[0] = uint8(len(connIDBytes))
+			copy(payload[1:], connIDBytes)
+			copy(payload[1+len(connIDBytes):], buf[:n])
+
+			if sendErr := tc.WriteMessage(&TunnelMessage{
+				Type:    MsgTypeProxyDataBinary,
+				Payload: payload,
 			}); sendErr != nil {
 				log.Printf("[PROXY %s] Failed to send data to APS: %v", connID, sendErr)
 				return

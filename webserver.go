@@ -1,6 +1,7 @@
 package main
 
 import (
+	"aps/charts"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -8,6 +9,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/http/pprof"
 	"os"
 	"strconv"
 	"strings"
@@ -113,10 +115,11 @@ type AdminHandlers struct {
 	statsDB        *StatsDB
 	loggingDB      *LoggingDB
 	logBroadcaster *LogBroadcaster
+	staticCache    *StaticCacheManager
 }
 
 // NewAdminHandlers creates a new AdminHandlers instance.
-func NewAdminHandlers(config *Config, configPath string, statsCollector *StatsCollector, statsDB *StatsDB, loggingDB *LoggingDB, logBroadcaster *LogBroadcaster) *AdminHandlers {
+func NewAdminHandlers(config *Config, configPath string, statsCollector *StatsCollector, statsDB *StatsDB, loggingDB *LoggingDB, logBroadcaster *LogBroadcaster, staticCache *StaticCacheManager) *AdminHandlers {
 	return &AdminHandlers{
 		config:         config,
 		configPath:     configPath,
@@ -125,6 +128,7 @@ func NewAdminHandlers(config *Config, configPath string, statsCollector *StatsCo
 		statsDB:        statsDB,
 		loggingDB:      loggingDB,
 		logBroadcaster: logBroadcaster,
+		staticCache:    staticCache,
 	}
 }
 
@@ -151,6 +155,8 @@ func (h *AdminHandlers) RegisterHandlers(mux *http.ServeMux) {
 	mux.HandleFunc("/.api/auth_providers", h.handleAuthProviders)
 	mux.HandleFunc("/.api/log", h.handleLogs)
 	mux.HandleFunc("/.api/act", h.handleAct)
+	mux.HandleFunc("/.api/cache/config", h.handleCacheConfig)
+	mux.HandleFunc("/.api/cache/refresh", h.handleCacheRefresh)
 	mux.HandleFunc("/.api/stats/timeseries", h.handleTimeSeriesStats)
 	mux.HandleFunc("/.api/stats/ip", func(w http.ResponseWriter, r *http.Request) {
 		// Admin authentication check
@@ -172,6 +178,14 @@ func (h *AdminHandlers) RegisterHandlers(mux *http.ServeMux) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(response)
 	})
+
+	charts.Register(mux)
+
+	mux.HandleFunc("/debug/pprof/", pprof.Index)
+	mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+	mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
 
 	// 管理面板页面
 	mux.HandleFunc("/.admin/", func(w http.ResponseWriter, r *http.Request) {

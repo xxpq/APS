@@ -339,3 +339,37 @@ func decrypt(data []byte, password string) ([]byte, error) {
 	nonce, ciphertext := data[:gcm.NonceSize()], data[gcm.NonceSize():]
 	return gcm.Open(nil, nonce, ciphertext, nil)
 }
+
+// isMediaContent checks if the content type indicates a media file or archive
+// that should be skipped for modification and compression.
+func isMediaContent(r *http.Request) bool {
+	lowerType := strings.ToLower(r.Header.Get("Content-Type"))
+	return strings.HasPrefix(lowerType, "video/") ||
+		strings.HasPrefix(lowerType, "audio/") ||
+		(strings.HasPrefix(lowerType, "image/") && !strings.Contains(lowerType, "svg")) ||
+		strings.Contains(lowerType, "zip") ||
+		strings.Contains(lowerType, "compressed") ||
+		strings.Contains(lowerType, "pdf") ||
+		strings.Contains(lowerType, "octet-stream") || containsString(defaultCacheExtensions, strings.ToLower(r.URL.Path))
+}
+
+// isTextContentType checks if the content type indicates a text-based format
+// that is safe for string-based modification (e.g. regex replacement).
+func isTextContentType(contentType string) bool {
+	if contentType == "" {
+		// Assume text if no content type is provided?
+		// Safer to assume binary to avoid corruption, but for web requests often default is text/html.
+		// However, for proxying, it's safer to skip modification if unknown.
+		return false
+	}
+	lowerType := strings.ToLower(contentType)
+	return strings.Contains(lowerType, "text/") ||
+		strings.Contains(lowerType, "json") ||
+		strings.Contains(lowerType, "xml") ||
+		strings.Contains(lowerType, "javascript") ||
+		strings.Contains(lowerType, "ecmascript") ||
+		strings.Contains(lowerType, "css") ||
+		strings.Contains(lowerType, "html") ||
+		strings.Contains(lowerType, "csv") ||
+		strings.Contains(lowerType, "yaml")
+}

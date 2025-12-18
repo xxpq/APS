@@ -37,8 +37,10 @@ var admin_page_content = `
     <a class="mobile-nav-item auth-required" href="#" data-tab="tab-users">用户</a>
     <a class="mobile-nav-item auth-required" href="#" data-tab="tab-config">配置</a>
     <a class="mobile-nav-item auth-required" href="#" data-tab="tab-logs">日志</a>
+    <a class="mobile-nav-item auth-required" href="#" data-tab="tab-logs">日志</a>
+    <a class="mobile-nav-item auth-required" href="#" data-tab="tab-cache">缓存</a>
     <a class="mobile-nav-item auth-required" href="#" data-tab="tab-act">动态</a>
-    <a class="mobile-nav-item" href="#" data-tab="tab-auth" style="margin-top: auto; border-top: 2px solid #525252;">登录/退出</a>
+    <a class="mobile-nav-item" href="#" data-tab="tab-auth" style="margin-top: auto; border-top: 2px solid #525252;">用户登录</a>
   </div>
   
   <header class="bx--header" role="banner" aria-label="APS Admin">
@@ -57,10 +59,12 @@ var admin_page_content = `
         <li class="auth-required"><a class="bx--header__menu-item" href="#" data-tab="tab-users">用户</a></li>
         <li class="auth-required"><a class="bx--header__menu-item" href="#" data-tab="tab-config">配置</a></li>
         <li class="auth-required"><a class="bx--header__menu-item" href="#" data-tab="tab-logs">日志</a></li>
+        <li class="auth-required"><a class="bx--header__menu-item" href="#" data-tab="tab-logs">日志</a></li>
+        <li class="auth-required"><a class="bx--header__menu-item" href="#" data-tab="tab-cache">缓存</a></li>
         <li class="auth-required"><a class="bx--header__menu-item" href="#" data-tab="tab-act">动态</a></li>
       </ul>
     </nav>
-    <a class="header-auth-link" href="#" data-tab="tab-auth">登录/退出</a>
+    <a class="header-auth-link" href="#" data-tab="tab-auth">用户登录</a>
   </header>
 
   <main class="container">
@@ -757,6 +761,56 @@ var admin_page_content = `
            </div>
         </div>
         <div id="logs-msg" class="mt-2"></div>
+      </div>
+    </section>
+
+    <!-- 缓存管理 -->
+    <section id="tab-cache" class="bx--tab-content hidden" role="tabpanel" aria-labelledby="缓存">
+      <div class="bx--tile">
+        <div class="flex mb-2">
+          <button id="btn-cache-load" class="bx--btn bx--btn--secondary">加载配置</button>
+          <button id="btn-cache-save" class="bx--btn bx--btn--primary">保存配置</button>
+        </div>
+        
+        <div class="bx--form-item mt-2">
+          <div class="bx--checkbox-wrapper">
+            <input id="cache-enabled" type="checkbox" class="bx--checkbox">
+            <label for="cache-enabled" class="bx--checkbox-label"><span class="bx--checkbox-label-text">启用缓存</span></label>
+          </div>
+        </div>
+
+        <div class="flex" style="gap: 2rem; margin-top: 1rem;">
+          <!-- 内存缓存策略 -->
+          <div style="flex: 1;">
+            <h4>内存缓存策略 (Mem)</h4>
+            <div class="bx--form-item mt-1"><label class="bx--label">最大分配 (Alloc)</label><input id="cache-mem-alloc" type="text" class="bx--text-input" placeholder="e.g. 2g"></div>
+            <div class="bx--form-item mt-1"><label class="bx--label">单文件限制 (File)</label><input id="cache-mem-file" type="text" class="bx--text-input" placeholder="e.g. 10m"></div>
+            <div class="bx--form-item mt-1"><label class="bx--label">最大条目数 (Count)</label><input id="cache-mem-count" type="number" class="bx--text-input" placeholder="e.g. 100"></div>
+            <div class="bx--form-item mt-1"><label class="bx--label">空闲超时 (TTL)</label><input id="cache-mem-ttl" type="text" class="bx--text-input" placeholder="e.g. 1m"></div>
+            <div class="bx--form-item mt-1"><label class="bx--label">最大生命周期 (Life)</label><input id="cache-mem-life" type="text" class="bx--text-input" placeholder="e.g. 5m"></div>
+          </div>
+
+          <!-- 磁盘缓存策略 -->
+          <div style="flex: 1;">
+            <h4>磁盘缓存策略 (Disk)</h4>
+            <div class="bx--form-item mt-1"><label class="bx--label">最大分配 (Alloc)</label><input id="cache-disk-alloc" type="text" class="bx--text-input" placeholder="e.g. 10g"></div>
+            <div class="bx--form-item mt-1"><label class="bx--label">单文件限制 (File)</label><input id="cache-disk-file" type="text" class="bx--text-input" placeholder="e.g. 100m"></div>
+            <div class="bx--form-item mt-1"><label class="bx--label">最大条目数 (Count)</label><input id="cache-disk-count" type="number" class="bx--text-input" placeholder="e.g. 1000"></div>
+            <div class="bx--form-item mt-1"><label class="bx--label">空闲超时 (TTL)</label><input id="cache-disk-ttl" type="text" class="bx--text-input" placeholder="e.g. 24h"></div>
+            <div class="bx--form-item mt-1"><label class="bx--label">最大生命周期 (Life)</label><input id="cache-disk-life" type="text" class="bx--text-input" placeholder="e.g. 3d"></div>
+          </div>
+        </div>
+
+        <div class="mt-3" style="border-top: 1px solid #393939; padding-top: 1rem;">
+          <h4>批量刷新缓存</h4>
+          <div class="bx--form-item mt-1">
+            <label class="bx--label">输入URL列表 (每行一个)</label>
+            <textarea id="cache-refresh-urls" class="bx--text-input" rows="5" placeholder="http://example.com/style.css&#10;http://example.com/app.js"></textarea>
+          </div>
+          <button id="btn-cache-refresh" class="bx--btn bx--btn--danger mt-1">立即刷新</button>
+        </div>
+        
+        <div id="cache-msg" class="mt-2"></div>
       </div>
     </section>
 

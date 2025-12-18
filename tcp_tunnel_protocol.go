@@ -21,8 +21,9 @@ const (
 	MsgTypeResponseEnd     uint8 = 0x14 // Response end (streaming)
 	MsgTypeProxyConnect    uint8 = 0x20 // TCP proxy connect request
 	MsgTypeProxyConnectAck uint8 = 0x21 // TCP proxy connect acknowledgement
-	MsgTypeProxyData       uint8 = 0x22 // TCP proxy data
+	// MsgTypeProxyData removed (legacy JSON format)
 	MsgTypeProxyClose      uint8 = 0x23 // TCP proxy close
+	MsgTypeProxyDataBinary uint8 = 0x24 // TCP proxy data (binary format)
 	MsgTypeHeartbeat       uint8 = 0xF0 // Heartbeat/keepalive
 	MsgTypeCancel          uint8 = 0xF1 // Cancel request
 
@@ -107,11 +108,7 @@ type ProxyConnectAckPayload struct {
 	Error        string `json:"error,omitempty"`
 }
 
-// ProxyDataPayload carries raw TCP data
-type ProxyDataPayload struct {
-	ConnectionID string `json:"connection_id"`
-	Data         []byte `json:"data"`
-}
+// ProxyDataPayload removed (legacy JSON format)
 
 // ProxyClosePayload signals proxy connection close
 type ProxyClosePayload struct {

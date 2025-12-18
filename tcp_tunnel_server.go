@@ -426,8 +426,8 @@ func (ep *TCPEndpoint) readLoop(server *TCPTunnelServer) {
 			ep.handleResponseMessage(msg)
 		case MsgTypeProxyConnectAck:
 			ep.handleProxyConnectAck(msg)
-		case MsgTypeProxyData:
-			ep.handleProxyData(msg)
+		case MsgTypeProxyDataBinary:
+			ep.handleTCPProxyDataBinary(msg)
 		case MsgTypeProxyClose:
 			ep.handleProxyClose(msg)
 		case MsgTypePortForwardRequest:
@@ -535,36 +535,7 @@ func (ep *TCPEndpoint) handleProxyConnectAck(msg *TunnelMessage) {
 	}
 }
 
-// handleProxyData handles proxy data from endpoint
-func (ep *TCPEndpoint) handleProxyData(msg *TunnelMessage) {
-	var payload ProxyDataPayload
-	if err := msg.ParseJSON(&payload); err != nil {
-		DebugLog("[TCP TUNNEL] Invalid proxy data: %v", err)
-		return
-	}
-
-	ep.mu.Lock()
-	pc, ok := ep.proxyConns[payload.ConnectionID]
-	ep.mu.Unlock()
-
-	if !ok {
-		return
-	}
-
-	pc.mu.Lock()
-	closed := pc.closed
-	pc.mu.Unlock()
-
-	if closed {
-		return
-	}
-
-	// Write data to client connection
-	if _, err := pc.clientConn.Write(payload.Data); err != nil {
-		DebugLog("[TCP TUNNEL] Write to client error for proxy %s: %v", payload.ConnectionID, err)
-		ep.closeProxyConnection(payload.ConnectionID, "write error")
-	}
-}
+// handleProxyData removed (legacy JSON format)
 
 // handleProxyClose handles proxy close from endpoint
 func (ep *TCPEndpoint) handleProxyClose(msg *TunnelMessage) {
@@ -683,10 +654,17 @@ func (ep *TCPEndpoint) proxyClientReadLoop(connectionID string, pc *tcpProxyConn
 
 		n, err := pc.clientConn.Read(buf)
 		if n > 0 {
-			// Send data to endpoint
-			if err := ep.SendJSON(MsgTypeProxyData, ProxyDataPayload{
-				ConnectionID: connectionID,
-				Data:         buf[:n],
+			// Send data to endpoint using binary format
+			// Format: [ID Length (1 byte)] + [Connection ID] + [Data]
+			connIDBytes := []byte(connectionID)
+			payload := make([]byte, 1+len(connIDBytes)+n)
+			payload[0] = uint8(len(connIDBytes))
+			copy(payload[1:], connIDBytes)
+			copy(payload[1+len(connIDBytes):], buf[:n])
+
+			if err := ep.Send(&TunnelMessage{
+				Type:    MsgTypeProxyDataBinary,
+				Payload: payload,
 			}); err != nil {
 				DebugLog("[TCP TUNNEL] Send to endpoint error for proxy %s: %v", connectionID, err)
 				return
@@ -698,6 +676,43 @@ func (ep *TCPEndpoint) proxyClientReadLoop(connectionID string, pc *tcpProxyConn
 			}
 			return
 		}
+	}
+}
+
+// handleTCPProxyDataBinary handles proxy data in binary format
+func (ep *TCPEndpoint) handleTCPProxyDataBinary(msg *TunnelMessage) {
+	if len(msg.Payload) < 1 {
+		return
+	}
+
+	idLen := int(msg.Payload[0])
+	if len(msg.Payload) < 1+idLen {
+		return
+	}
+
+	connectionID := string(msg.Payload[1 : 1+idLen])
+	data := msg.Payload[1+idLen:]
+
+	ep.mu.Lock()
+	pc, ok := ep.proxyConns[connectionID]
+	ep.mu.Unlock()
+
+	if !ok {
+		return
+	}
+
+	pc.mu.Lock()
+	closed := pc.closed
+	pc.mu.Unlock()
+
+	if closed {
+		return
+	}
+
+	// Write data to client connection
+	if _, err := pc.clientConn.Write(data); err != nil {
+		DebugLog("[TCP TUNNEL] Write to client error for proxy %s: %v", connectionID, err)
+		ep.closeProxyConnection(connectionID, "write error")
 	}
 }
 

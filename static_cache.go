@@ -1,6 +1,7 @@
 package main
 
 import (
+	"container/list"
 	"crypto/md5"
 	"encoding/hex"
 	"encoding/json"
@@ -8,53 +9,151 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/andybalholm/brotli"
 )
 
-// CacheEntry 缓存条目，包含响应头和body
+// CacheMetadata 缓存元数据，存储在.meta文件中
+type CacheMetadata struct {
+	Headers         map[string][]string `json:"headers"`
+	StatusCode      int                 `json:"status_code"`
+	IsCompressed    bool                `json:"is_compressed,omitempty"`    // body是否已压缩
+	CompressionType string              `json:"compression_type,omitempty"` // 压缩类型: "br", "gzip", "deflate", "" (未压缩)
+	ETag            string              `json:"etag,omitempty"`             // ETag缓存标识
+	LastModified    string              `json:"last_modified,omitempty"`    // 最后修改时间
+	ContentType     string              `json:"content_type,omitempty"`     // Content-Type
+	LastAccess      int64               `json:"last_access,omitempty"`      // 最后访问时间 (Unix timestamp)
+	CreatedAt       int64               `json:"created_at,omitempty"`       // 创建时间 (Unix timestamp)
+}
+
+// CacheEntry 缓存条目，包含响应头和body（用于内存缓存）
 type CacheEntry struct {
-	Headers      map[string][]string `json:"headers"`
-	StatusCode   int                 `json:"status_code"`
-	Body         []byte              `json:"body"`
-	IsCompressed bool                `json:"is_compressed,omitempty"` // body是否已br压缩
-	ETag         string              `json:"etag,omitempty"`          // ETag缓存标识
-	LastModified string              `json:"last_modified,omitempty"` // 最后修改时间
+	CacheMetadata
+	Body []byte `json:"body,omitempty"` // 仅用于内存缓存
 }
 
 // StaticCacheManager 管理静态文件缓存
 type StaticCacheManager struct {
-	cacheDir      string
-	ttl           time.Duration
-	extensions    map[string]bool
-	mu            sync.RWMutex
-	enabled       bool
-	stopChan      chan struct{}
-	memCache      sync.Map // 内存热缓存: URL -> *memCacheEntry
-	memEntryCount int64    // 当前内存缓存条目数（原子操作）
-	maxMemEntries int      // 内存缓存最大条目数
+	cacheDir   string
+	extensions map[string]bool
+	mu         sync.RWMutex
+	enabled    bool
+	stopChan   chan struct{}
+
+	// Policies
+	memPolicy  ParsedCachePolicy
+	diskPolicy ParsedCachePolicy
+
+	// Memory Cache
+	memCache *LRUCache
 }
 
-// memCacheEntry 内存缓存条目（包含过期时间）
-type memCacheEntry struct {
-	entry     *CacheEntry
-	expiresAt time.Time
+// ParsedCachePolicy 解析后的缓存策略
+type ParsedCachePolicy struct {
+	Alloc int64         // Max size in bytes
+	File  int64         // Max single file size in bytes
+	Count int           // Max count
+	TTL   time.Duration // Idle timeout
+	Life  time.Duration // Absolute lifetime
+}
+
+// LRUCache 简单的LRU缓存实现
+type LRUCache struct {
+	capacity  int
+	maxSize   int64
+	size      int64
+	mu        sync.Mutex
+	items     map[string]*list.Element
+	evictList *list.List
+}
+
+type lruItem struct {
+	key   string
+	value *CacheEntry
+	size  int64
+}
+
+func NewLRUCache(capacity int, maxSize int64) *LRUCache {
+	return &LRUCache{
+		capacity:  capacity,
+		maxSize:   maxSize,
+		items:     make(map[string]*list.Element),
+		evictList: list.New(),
+	}
+}
+
+func (c *LRUCache) Get(key string) (*CacheEntry, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if ent, ok := c.items[key]; ok {
+		c.evictList.MoveToFront(ent)
+		return ent.Value.(*lruItem).value, true
+	}
+	return nil, false
+}
+
+func (c *LRUCache) Add(key string, value *CacheEntry) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// Calculate size
+	itemSize := int64(len(value.Body))
+
+	// Check if update
+	if ent, ok := c.items[key]; ok {
+		c.evictList.MoveToFront(ent)
+		oldItem := ent.Value.(*lruItem)
+		c.size -= oldItem.size
+		oldItem.value = value
+		oldItem.size = itemSize
+		c.size += itemSize
+	} else {
+		ent := c.evictList.PushFront(&lruItem{key, value, itemSize})
+		c.items[key] = ent
+		c.size += itemSize
+	}
+
+	// Evict if needed (count or size)
+	for (c.capacity > 0 && c.evictList.Len() > c.capacity) || (c.maxSize > 0 && c.size > c.maxSize) {
+		c.removeOldest()
+	}
+}
+
+func (c *LRUCache) Remove(key string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if ent, ok := c.items[key]; ok {
+		c.removeElement(ent)
+	}
+}
+
+func (c *LRUCache) removeOldest() {
+	ent := c.evictList.Back()
+	if ent != nil {
+		c.removeElement(ent)
+	}
+}
+
+func (c *LRUCache) removeElement(e *list.Element) {
+	c.evictList.Remove(e)
+	kv := e.Value.(*lruItem)
+	delete(c.items, kv.key)
+	c.size -= kv.size
 }
 
 // 支持缓存的静态文件扩展名
 var defaultCacheExtensions = []string{
-	"css", "js", "jpg", "jpeg", "gif", "ico", "png", "bmp", "pict", "csv",
-	"doc", "pdf", "pls", "ppt", "tif", "tiff", "eps", "ejs", "swf", "midi",
-	"mida", "ttf", "eot", "woff", "otf", "svg", "svgz", "webp", "docx", "xlsx",
-	"xls", "pptx", "ps", "class", "jar", "bz2", "bzip", "exe", "flv", "gzip",
-	"rar", "rtf", "tgz", "gz", "txt", "zip", "mp3", "mp4", "ogg", "m4a",
-	"m4v", "apk", "woff2",
+	".css", ".js", ".jpg", ".jpeg", ".gif", ".ico", ".png", ".bmp", ".pict", ".csv",
+	".doc", ".pdf", ".pls", ".ppt", ".tif", ".tiff", ".eps", ".ejs", ".swf", ".midi",
+	".mida", ".ttf", ".eot", ".woff", ".otf", ".svg", ".svgz", ".webp", ".docx", ".xlsx",
+	".xls", ".pptx", ".ps", ".class", ".jar", ".bz2", ".bzip", ".exe", ".flv", ".gzip",
+	".rar", ".rtf", ".tgz", ".gz", ".txt", ".zip", ".mp3", ".mp4", ".ogg", ".m4a",
+	".m4v", ".apk", ".woff2",
 }
 
 // NewStaticCacheManager 创建新的静态缓存管理器
@@ -68,10 +167,9 @@ func NewStaticCacheManager(config *StaticCacheConfig) *StaticCacheManager {
 		cacheDir = ".cache"
 	}
 
-	ttl := time.Duration(config.TTL) * time.Second
-	if ttl <= 0 {
-		ttl = 24 * time.Hour // 默认1天
-	}
+	// Parse Policies
+	memPolicy := parsePolicy(config.Mem, true)
+	diskPolicy := parsePolicy(config.Disk, false)
 
 	// 创建缓存目录
 	if err := os.MkdirAll(cacheDir, 0755); err != nil {
@@ -80,7 +178,6 @@ func NewStaticCacheManager(config *StaticCacheConfig) *StaticCacheManager {
 	}
 
 	// 构建扩展名映射
-	// 如果配置了 FileType，使用配置的；否则使用默认值
 	extensions := make(map[string]bool)
 	var extList []string
 	if len(config.FileType) > 0 {
@@ -91,7 +188,6 @@ func NewStaticCacheManager(config *StaticCacheConfig) *StaticCacheManager {
 		log.Printf("[CACHE] Using default file types (%d extensions)", len(extList))
 	}
 	for _, ext := range extList {
-		// 确保扩展名以点开头
 		if !strings.HasPrefix(ext, ".") {
 			extensions["."+ext] = true
 		} else {
@@ -100,19 +196,102 @@ func NewStaticCacheManager(config *StaticCacheConfig) *StaticCacheManager {
 	}
 
 	manager := &StaticCacheManager{
-		cacheDir:      cacheDir,
-		ttl:           ttl,
-		extensions:    extensions,
-		enabled:       true,
-		stopChan:      make(chan struct{}),
-		maxMemEntries: 1000, // 默认最多 1000 个内存缓存条目
+		cacheDir:   cacheDir,
+		extensions: extensions,
+		enabled:    true,
+		stopChan:   make(chan struct{}),
+		memPolicy:  memPolicy,
+		diskPolicy: diskPolicy,
+		memCache:   NewLRUCache(memPolicy.Count, memPolicy.Alloc),
 	}
 
 	// 启动定期清理协程
 	go manager.startCleanupRoutine()
 
-	log.Printf("[CACHE] Static cache manager initialized: dir=%s, ttl=%v", cacheDir, ttl)
+	log.Printf("[CACHE] Initialized. Dir: %s. Mem: %+v. Disk: %+v", cacheDir, memPolicy, diskPolicy)
 	return manager
+}
+
+func parsePolicy(p *CachePolicy, isMem bool) ParsedCachePolicy {
+	pp := ParsedCachePolicy{}
+	if p == nil {
+		// Defaults
+		if isMem {
+			pp.TTL = 1 * time.Minute
+			pp.Life = 5 * time.Minute
+		} else {
+			pp.TTL = 24 * time.Hour
+			pp.Life = 3 * 24 * time.Hour
+		}
+		return pp
+	}
+
+	pp.Alloc, _ = parseCacheSize(p.Alloc)
+	pp.File, _ = parseCacheSize(p.File)
+	pp.Count = p.Count
+
+	var err error
+	pp.TTL, err = parseDuration(p.TTL)
+	if err != nil {
+		if isMem {
+			pp.TTL = 1 * time.Minute
+		} else {
+			pp.TTL = 24 * time.Hour
+		}
+	}
+
+	pp.Life, err = parseDuration(p.Life)
+	if err != nil {
+		if isMem {
+			pp.Life = 5 * time.Minute
+		} else {
+			pp.Life = 3 * 24 * time.Hour
+		}
+	}
+
+	return pp
+}
+
+func parseCacheSize(s string) (int64, error) {
+	s = strings.TrimSpace(strings.ToLower(s))
+	if s == "" || s == "0" {
+		return 0, nil
+	}
+
+	multiplier := int64(1)
+	if strings.HasSuffix(s, "g") || strings.HasSuffix(s, "gb") {
+		multiplier = 1024 * 1024 * 1024
+		s = strings.TrimRight(s, "gb")
+	} else if strings.HasSuffix(s, "m") || strings.HasSuffix(s, "mb") {
+		multiplier = 1024 * 1024
+		s = strings.TrimRight(s, "mb")
+	} else if strings.HasSuffix(s, "k") || strings.HasSuffix(s, "kb") {
+		multiplier = 1024
+		s = strings.TrimRight(s, "kb")
+	}
+
+	val, err := strconv.ParseInt(s, 10, 64)
+	if err != nil {
+		return 0, err
+	}
+	return val * multiplier, nil
+}
+
+func parseDuration(s string) (time.Duration, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, fmt.Errorf("empty duration")
+	}
+	// Support simple days 'd'
+	if strings.HasSuffix(s, "d") {
+		daysStr := strings.TrimSuffix(s, "d")
+		days, err := strconv.Atoi(daysStr)
+		if err != nil {
+			return 0, err
+		}
+		return time.Duration(days) * 24 * time.Hour, nil
+	}
+	return time.ParseDuration(s)
 }
 
 // IsEnabled 返回缓存是否启用
@@ -125,9 +304,7 @@ func (m *StaticCacheManager) IsCacheable(urlPath string) bool {
 	if !m.enabled {
 		return false
 	}
-	// Use path.Ext for URL paths to handle forward slashes correctly
-	ext := strings.ToLower(path.Ext(urlPath))
-	DebugLog("[DEBUG] IsCacheable: path=%s, ext=%s, result=%v", urlPath, ext, m.extensions[ext])
+	ext := strings.ToLower(filepath.Ext(urlPath))
 	return m.extensions[ext]
 }
 
@@ -142,66 +319,127 @@ func (m *StaticCacheManager) GetCachePath(cacheKey string) string {
 	return filepath.Join(m.cacheDir, cacheKey)
 }
 
+// GetCacheMetaPath 获取缓存元数据文件路径
+func (m *StaticCacheManager) GetCacheMetaPath(cacheKey string) string {
+	return filepath.Join(m.cacheDir, cacheKey+".meta")
+}
+
+// GetCacheBinPath 获取缓存内容文件路径
+func (m *StaticCacheManager) GetCacheBinPath(cacheKey string) string {
+	return filepath.Join(m.cacheDir, cacheKey+".bin")
+}
+
 // Get 获取缓存内容（优先从内存热缓存获取）
 func (m *StaticCacheManager) Get(fullURL string) (*CacheEntry, bool) {
 	if !m.enabled {
 		return nil, false
 	}
 
-	// 优先检查内存热缓存
-	if cached, ok := m.memCache.Load(fullURL); ok {
-		memEntry := cached.(*memCacheEntry)
-		if time.Now().Before(memEntry.expiresAt) {
-			return memEntry.entry, true
+	now := time.Now()
+
+	// 1. Check Memory Cache
+	if entry, ok := m.memCache.Get(fullURL); ok {
+		// Check TTL (Idle timeout)
+		if m.memPolicy.TTL > 0 && now.Sub(time.Unix(entry.LastAccess, 0)) > m.memPolicy.TTL {
+			m.memCache.Remove(fullURL)
+			return nil, false
 		}
-		// 过期则从内存中删除
-		m.memCache.Delete(fullURL)
-		atomic.AddInt64(&m.memEntryCount, -1)
+		// Check Life (Absolute timeout)
+		if m.memPolicy.Life > 0 && now.Sub(time.Unix(entry.CreatedAt, 0)) > m.memPolicy.Life {
+			m.memCache.Remove(fullURL)
+			return nil, false
+		}
+
+		// Update LastAccess
+		entry.LastAccess = now.Unix()
+		return entry, true
 	}
 
-	// 内存未命中，从磁盘读取
+	// 2. Check Disk Cache
 	cacheKey := m.GetCacheKey(fullURL)
-	cachePath := m.GetCachePath(cacheKey)
+	metaPath := m.GetCacheMetaPath(cacheKey)
+	binPath := m.GetCacheBinPath(cacheKey)
 
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	// 检查文件是否存在
-	info, err := os.Stat(cachePath)
+	// Read metadata
+	metaData, err := os.ReadFile(metaPath)
 	if err != nil {
 		return nil, false
 	}
 
-	// 检查是否过期
-	if time.Since(info.ModTime()) > m.ttl {
+	var metadata CacheMetadata
+	if err := json.Unmarshal(metaData, &metadata); err != nil {
+		log.Printf("[CACHE] Failed to unmarshal cache metadata: %v", err)
 		return nil, false
 	}
 
-	// 读取文件内容
-	encryptedData, err := os.ReadFile(cachePath)
+	// Check Disk Expiration
+	createdAt := time.Unix(metadata.CreatedAt, 0)
+	lastAccess := time.Unix(metadata.LastAccess, 0)
+
+	// Fallback for old cache files without CreatedAt/LastAccess
+	if metadata.CreatedAt == 0 {
+		info, err := os.Stat(metaPath)
+		if err == nil {
+			createdAt = info.ModTime()
+			lastAccess = info.ModTime()
+		}
+	}
+
+	// Check TTL
+	if m.diskPolicy.TTL > 0 && now.Sub(lastAccess) > m.diskPolicy.TTL {
+		// Lazy cleanup
+		go func() {
+			os.Remove(metaPath)
+			os.Remove(binPath)
+		}()
+		return nil, false
+	}
+
+	// Check Life
+	if m.diskPolicy.Life > 0 && now.Sub(createdAt) > m.diskPolicy.Life {
+		go func() {
+			os.Remove(metaPath)
+			os.Remove(binPath)
+		}()
+		return nil, false
+	}
+
+	// Read body
+	body, err := os.ReadFile(binPath)
 	if err != nil {
-		log.Printf("[CACHE] Failed to read cache file %s: %v", cachePath, err)
 		return nil, false
 	}
 
-	// XOR 解密
-	data := xorData(encryptedData, cacheKey)
-
-	// 反序列化缓存条目
-	var entry CacheEntry
-	if err := json.Unmarshal(data, &entry); err != nil {
-		log.Printf("[CACHE] Failed to unmarshal cache entry: %v", err)
-		return nil, false
+	// Update LastAccess on disk (throttled)
+	// Only update if more than 1 minute has passed to avoid excessive writes
+	if now.Sub(lastAccess) > 1*time.Minute {
+		metadata.LastAccess = now.Unix()
+		go func() {
+			newMeta, _ := json.Marshal(metadata)
+			os.WriteFile(metaPath, newMeta, 0644)
+		}()
 	}
 
-	// 磁盘命中后写入内存热缓存
-	m.addToMemCache(fullURL, &entry)
+	entry := &CacheEntry{
+		CacheMetadata: metadata,
+		Body:          body,
+	}
 
-	return &entry, true
+	// Add to Memory Cache
+	// Check file size limit for memory
+	if m.memPolicy.File == 0 || int64(len(body)) <= m.memPolicy.File {
+		// Update memory specific timestamps
+		entry.LastAccess = now.Unix()
+		// Keep original CreatedAt
+		m.memCache.Add(fullURL, entry)
+	}
+
+	return entry, true
 }
 
 // Set 保存缓存内容（同时写入内存和磁盘，异步Brotli压缩）
-func (m *StaticCacheManager) Set(fullURL string, headers http.Header, statusCode int, body []byte) error {
+// originalEncoding: 原始上游的Content-Encoding，如"gzip", "br", "deflate"等，空字符串表示未压缩
+func (m *StaticCacheManager) Set(fullURL string, headers http.Header, statusCode int, body []byte, originalEncoding string) error {
 	if !m.enabled {
 		return nil
 	}
@@ -213,98 +451,129 @@ func (m *StaticCacheManager) Set(fullURL string, headers http.Header, statusCode
 
 	// 生成 ETag (基于内容的MD5哈希)
 	hash := md5.Sum(body)
-	etag := fmt.Sprintf(`"%s"`, hex.EncodeToString(hash[:]))
+	etag := fmt.Sprintf(`W/"%s"`, hex.EncodeToString(hash[:]))
 
 	// 生成 Last-Modified
 	lastModified := time.Now().UTC().Format(http.TimeFormat)
 
+	// 提取 Content-Type
+	contentType := headers.Get("Content-Type")
+
+	// 判断是否有原始压缩
+	hasOriginalCompression := originalEncoding != ""
+
 	// 创建未压缩的缓存条目（立即写入内存供即时使用）
+	// 注意：如果有原始压缩，body实际是压缩的，但为了即时使用我们仍然存入内存
 	uncompressedEntry := &CacheEntry{
-		Headers:      headers,
-		StatusCode:   statusCode,
-		Body:         body,
-		IsCompressed: false,
-		ETag:         etag,
-		LastModified: lastModified,
+		CacheMetadata: CacheMetadata{
+			Headers:         headers,
+			StatusCode:      statusCode,
+			IsCompressed:    hasOriginalCompression,
+			CompressionType: originalEncoding,
+			ETag:            etag,
+			LastModified:    lastModified,
+			ContentType:     contentType,
+		},
+		Body: body,
 	}
 
-	// 立即写入内存热缓存（未压缩版本，供当前请求后续使用）
+	// 立即写入内存热缓存
 	m.addToMemCache(fullURL, uncompressedEntry)
 
-	// 异步进行Brotli压缩并写入磁盘
+	// 异步写入磁盘
 	go func() {
-		originalSize := len(body)
+		var diskBody []byte
+		var compressionType string
+		var isCompressed bool
 
-		// Brotli 压缩
-		compressedBody, err := compressWithBrotli(body)
-		if err != nil {
-			log.Printf("[CACHE] Failed to compress with brotli: %v", err)
-			compressedBody = body // 压缩失败使用原始数据
-		}
-
-		// 判断压缩是否有效（压缩后至少节省10%空间，且不为空）
-		useCompression := err == nil && len(compressedBody) > 0 && len(compressedBody) < originalSize*9/10
-
-		// 创建最终缓存条目
-		entry := &CacheEntry{
-			Headers:      headers,
-			StatusCode:   statusCode,
-			ETag:         etag,
-			LastModified: lastModified,
-		}
-
-		if useCompression {
-			entry.Body = compressedBody
-			entry.IsCompressed = true
-			DebugLog("[CACHE] Compressed: %s (%d -> %d bytes, %.1f%%)",
-				fullURL, originalSize, len(compressedBody),
-				float64(len(compressedBody))/float64(originalSize)*100)
+		if hasOriginalCompression {
+			// 保留原始压缩，直接存储
+			diskBody = body
+			compressionType = originalEncoding
+			isCompressed = true
+			DebugLog("[CACHE] Preserving original %s compression: %s (%d bytes)",
+				originalEncoding, fullURL, len(body))
 		} else {
-			entry.Body = body
-			entry.IsCompressed = false
+			// 没有原始压缩，尝试Brotli压缩
+			originalSize := len(body)
+
+			// Brotli 压缩
+			compressedBody, err := compressWithBrotli(body)
+			if err != nil {
+				log.Printf("[CACHE] Failed to compress with brotli: %v", err)
+				compressedBody = body // 压缩失败使用原始数据
+			}
+
+			// 判断压缩是否有效（压缩后至少节省10%空间，且不为空）
+			useCompression := err == nil && len(compressedBody) > 0 && len(compressedBody) < originalSize*9/10
+
+			if useCompression {
+				diskBody = compressedBody
+				compressionType = "br"
+				isCompressed = true
+				DebugLog("[CACHE] Compressed with br: %s (%d -> %d bytes, %.1f%%)",
+					fullURL, originalSize, len(compressedBody),
+					float64(len(compressedBody))/float64(originalSize)*100)
+			} else {
+				diskBody = body
+				compressionType = ""
+				isCompressed = false
+			}
 		}
 
-		// 更新内存热缓存为压缩版本
+		// 创建元数据
+		metadata := CacheMetadata{
+			Headers:         headers,
+			StatusCode:      statusCode,
+			ETag:            etag,
+			LastModified:    lastModified,
+			ContentType:     contentType,
+			IsCompressed:    isCompressed,
+			CompressionType: compressionType,
+		}
+
+		// 创建带Body的条目用于更新内存缓存
+		entry := &CacheEntry{
+			CacheMetadata: metadata,
+			Body:          diskBody,
+		}
+
+		// 更新内存热缓存
 		m.addToMemCache(fullURL, entry)
 
-		// 写入磁盘
+		// 获取缓存文件路径
 		cacheKey := m.GetCacheKey(fullURL)
-		cachePath := m.GetCachePath(cacheKey)
+		metaPath := m.GetCacheMetaPath(cacheKey)
+		binPath := m.GetCacheBinPath(cacheKey)
 
-		data, err := json.Marshal(entry)
+		// 序列化元数据
+		metaData, err := json.Marshal(metadata)
 		if err != nil {
-			log.Printf("[CACHE] Failed to marshal cache entry: %v", err)
+			log.Printf("[CACHE] Failed to marshal cache metadata: %v", err)
 			return
 		}
-
-		// XOR 加密
-		encryptedData := xorData(data, cacheKey)
 
 		m.mu.Lock()
 		defer m.mu.Unlock()
 
-		if err := os.WriteFile(cachePath, encryptedData, 0644); err != nil {
-			log.Printf("[CACHE] Failed to write cache file %s: %v", cachePath, err)
+		// 写入元数据文件
+		if err := os.WriteFile(metaPath, metaData, 0644); err != nil {
+			log.Printf("[CACHE] Failed to write cache meta file %s: %v", metaPath, err)
 			return
 		}
 
-		DebugLog("[CACHE] STORED: %s (%d bytes, compressed=%v)", fullURL, len(entry.Body), entry.IsCompressed)
+		// 写入body文件
+		if err := os.WriteFile(binPath, diskBody, 0644); err != nil {
+			log.Printf("[CACHE] Failed to write cache bin file %s: %v", binPath, err)
+			// 删除已写入的meta文件
+			os.Remove(metaPath)
+			return
+		}
+
+		DebugLog("[CACHE] STORED: %s (%d bytes, compressed=%v, type=%s)", fullURL, len(diskBody), isCompressed, compressionType)
 	}()
 
 	return nil
-}
-
-// xorData 使用密钥对数据进行 XOR 加密/解密
-func xorData(data []byte, key string) []byte {
-	if len(key) == 0 {
-		return data
-	}
-	result := make([]byte, len(data))
-	keyLen := len(key)
-	for i := 0; i < len(data); i++ {
-		result[i] = data[i] ^ key[i%keyLen]
-	}
-	return result
 }
 
 // compressWithBrotli 使用Brotli压缩数据
@@ -329,23 +598,10 @@ func compressWithBrotli(data []byte) ([]byte, error) {
 
 // addToMemCache 添加条目到内存热缓存
 func (m *StaticCacheManager) addToMemCache(fullURL string, entry *CacheEntry) {
-	// 检查是否超过最大条目数限制
-	currentCount := atomic.LoadInt64(&m.memEntryCount)
-	if currentCount >= int64(m.maxMemEntries) {
-		// 简单随机淘汰策略：删除遇到的第一个条目
-		m.memCache.Range(func(key, value interface{}) bool {
-			m.memCache.Delete(key)
-			atomic.AddInt64(&m.memEntryCount, -1)
-			return false // 只删除一个
-		})
+	// Check file size limit for memory
+	if m.memPolicy.File == 0 || int64(len(entry.Body)) <= m.memPolicy.File {
+		m.memCache.Add(fullURL, entry)
 	}
-
-	// 存储新条目
-	m.memCache.Store(fullURL, &memCacheEntry{
-		entry:     entry,
-		expiresAt: time.Now().Add(m.ttl),
-	})
-	atomic.AddInt64(&m.memEntryCount, 1)
 }
 
 // startCleanupRoutine 启动定期清理过期缓存的协程
@@ -382,24 +638,68 @@ func (m *StaticCacheManager) cleanupExpiredFiles() {
 			continue
 		}
 
-		filePath := filepath.Join(m.cacheDir, entry.Name())
-		info, err := entry.Info()
+		fileName := entry.Name()
+
+		// 只处理.meta文件，删除时同时删除对应的.bin文件
+		if !strings.HasSuffix(fileName, ".meta") {
+			continue
+		}
+
+		metaPath := filepath.Join(m.cacheDir, fileName)
+
+		// Read metadata to check expiration
+		metaData, err := os.ReadFile(metaPath)
 		if err != nil {
 			continue
 		}
 
-		// 检查文件是否过期
-		if now.Sub(info.ModTime()) > m.ttl {
-			if err := os.Remove(filePath); err != nil {
-				log.Printf("[CACHE] Failed to delete expired file %s: %v", filePath, err)
+		var metadata CacheMetadata
+		if err := json.Unmarshal(metaData, &metadata); err != nil {
+			continue
+		}
+
+		createdAt := time.Unix(metadata.CreatedAt, 0)
+		lastAccess := time.Unix(metadata.LastAccess, 0)
+
+		// Fallback
+		if metadata.CreatedAt == 0 {
+			info, err := entry.Info()
+			if err == nil {
+				createdAt = info.ModTime()
+				lastAccess = info.ModTime()
+			}
+		}
+
+		shouldDelete := false
+
+		// Check TTL
+		if m.diskPolicy.TTL > 0 && now.Sub(lastAccess) > m.diskPolicy.TTL {
+			shouldDelete = true
+		}
+
+		// Check Life
+		if !shouldDelete && m.diskPolicy.Life > 0 && now.Sub(createdAt) > m.diskPolicy.Life {
+			shouldDelete = true
+		}
+
+		if shouldDelete {
+			// 删除.meta文件
+			if err := os.Remove(metaPath); err != nil {
+				log.Printf("[CACHE] Failed to delete expired meta file %s: %v", metaPath, err)
 			} else {
 				deletedCount++
+			}
+
+			// 删除对应的.bin文件
+			binPath := strings.TrimSuffix(metaPath, ".meta") + ".bin"
+			if err := os.Remove(binPath); err != nil {
+				DebugLog("[CACHE] Failed to delete corresponding bin file %s: %v", binPath, err)
 			}
 		}
 	}
 
 	if deletedCount > 0 {
-		DebugLog("[CACHE] Cleanup completed: deleted %d expired files", deletedCount)
+		DebugLog("[CACHE] Cleanup completed: deleted %d expired cache entries", deletedCount)
 	}
 }
 
@@ -408,6 +708,37 @@ func (m *StaticCacheManager) Stop() {
 	if m.enabled && m.stopChan != nil {
 		close(m.stopChan)
 	}
+}
+
+// Refresh 刷新指定URL的缓存（删除）
+func (m *StaticCacheManager) Refresh(fullURL string) error {
+	if !m.enabled {
+		return nil
+	}
+
+	// 1. Remove from Memory Cache
+	m.memCache.Remove(fullURL)
+
+	// 2. Remove from Disk Cache
+	cacheKey := m.GetCacheKey(fullURL)
+	metaPath := m.GetCacheMetaPath(cacheKey)
+	binPath := m.GetCacheBinPath(cacheKey)
+
+	var errs []string
+
+	if err := os.Remove(metaPath); err != nil && !os.IsNotExist(err) {
+		errs = append(errs, fmt.Sprintf("failed to remove meta: %v", err))
+	}
+	if err := os.Remove(binPath); err != nil && !os.IsNotExist(err) {
+		errs = append(errs, fmt.Sprintf("failed to remove bin: %v", err))
+	}
+
+	if len(errs) > 0 {
+		return fmt.Errorf("cache refresh errors: %s", strings.Join(errs, "; "))
+	}
+
+	DebugLog("[CACHE] Refreshed: %s", fullURL)
+	return nil
 }
 
 // GetStats 获取缓存统计信息
@@ -420,7 +751,8 @@ func (m *StaticCacheManager) GetStats() map[string]interface{} {
 	}
 
 	stats["cache_dir"] = m.cacheDir
-	stats["ttl_seconds"] = m.ttl.Seconds()
+	stats["mem_policy"] = m.memPolicy
+	stats["disk_policy"] = m.diskPolicy
 
 	// 统计缓存文件数量和大小
 	var totalSize int64

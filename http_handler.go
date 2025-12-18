@@ -17,6 +17,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -270,13 +271,15 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	fullURL := p.buildOriginalURL(r)
 	if r.Method == http.MethodGet && p.staticCache != nil && p.staticCache.IsCacheable(r.URL.Path) {
 		if cachedEntry, ok := p.staticCache.Get(fullURL); ok {
-			// 缓存命中，直接返回缓存内容（包含原始响应头）
+			// 缓存命中，使用 http.ServeContent 返回缓存内容
+
+			// 设置原始响应头（跳过一些我们会自己设置的头）
 			for key, values := range cachedEntry.Headers {
-				// 跳过这些头，我们会自己设置
 				lowerKey := strings.ToLower(key)
 				if lowerKey == "content-encoding" || lowerKey == "transfer-encoding" ||
 					lowerKey == "content-length" || lowerKey == "cache-control" ||
-					lowerKey == "etag" || lowerKey == "last-modified" {
+					lowerKey == "etag" || lowerKey == "last-modified" ||
+					lowerKey == "accept-ranges" || lowerKey == "content-type" {
 					continue
 				}
 				for _, value := range values {
@@ -286,27 +289,38 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 
 			// 设置缓存相关头
 			w.Header().Set("X-Cache", "HIT")
-			w.Header().Set("Content-Length", fmt.Sprintf("%d", len(cachedEntry.Body)))
-
-			// 设置浏览器缓存头（Cache-Control: 1天）
 			w.Header().Set("Cache-Control", "public, max-age=86400")
 
+			// 设置 Content-Type
+			if cachedEntry.ContentType != "" {
+				w.Header().Set("Content-Type", cachedEntry.ContentType)
+			}
+
 			// 设置 ETag 和 Last-Modified
+			var modTime time.Time
+			if cachedEntry.LastModified != "" {
+				w.Header().Set("Last-Modified", cachedEntry.LastModified)
+				// 解析 Last-Modified 用于 ServeContent
+				if t, err := time.Parse(http.TimeFormat, cachedEntry.LastModified); err == nil {
+					modTime = t
+				}
+			}
 			if cachedEntry.ETag != "" {
 				w.Header().Set("ETag", cachedEntry.ETag)
 			}
-			if cachedEntry.LastModified != "" {
-				w.Header().Set("Last-Modified", cachedEntry.LastModified)
+
+			// 如果是压缩内容，设置正确的 Content-Encoding
+			if cachedEntry.IsCompressed && cachedEntry.CompressionType != "" {
+				w.Header().Set("Content-Encoding", cachedEntry.CompressionType)
 			}
 
-			// 如果是压缩内容，设置 Content-Encoding: br
-			if cachedEntry.IsCompressed {
-				w.Header().Set("Content-Encoding", "br")
-			}
+			// 使用 ServeContent 提供内容（支持 Range 请求）
+			// ServeContent 会自动处理状态码（200 或 206）和 Content-Length
+			content := bytes.NewReader(cachedEntry.Body)
+			http.ServeContent(w, r, filepath.Base(r.URL.Path), modTime, content)
 
-			w.WriteHeader(cachedEntry.StatusCode)
-			w.Write(cachedEntry.Body)
 			bytesSent = uint64(len(cachedEntry.Body))
+			statusCode = cachedEntry.StatusCode // 记录原始状态码用于统计
 			DebugLog("[CACHE] HIT: %s (%d bytes, compressed=%v)", fullURL, len(cachedEntry.Body), cachedEntry.IsCompressed)
 			return
 		}
@@ -452,10 +466,6 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		DebugLog("[FIREWALL] Request from %s blocked by firewall", clientIP)
 		http.Error(w, "Forbidden", http.StatusForbidden)
 		return
-	}
-
-	if firewallRule != nil {
-		log.Printf("[%s]%s[FIREWALL] Request from %s allowed by firewall", clientIP, clientLocation, clientIP)
 	}
 
 	// 获取用户和组级别的Endpoints/Tunnels配置（最高优先级）
@@ -608,21 +618,32 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 
 	var requestBody io.Reader = r.Body
 	if matched && mapping != nil {
-		originalBody, err := io.ReadAll(r.Body)
-		if err != nil {
-			isError = true
-			http.Error(w, "Failed to read request body", http.StatusInternalServerError)
-			return
+		// Check if we need to modify the request body
+		fromConfig := mapping.GetFromConfig()
+		needsModification := fromConfig != nil && (fromConfig.Match != "" || len(fromConfig.Replace) > 0)
+
+		if needsModification {
+			contentType := r.Header.Get("Content-Type")
+			if isTextContentType(contentType) {
+				originalBody, err := io.ReadAll(r.Body)
+				if err != nil {
+					isError = true
+					http.Error(w, "Failed to read request body", http.StatusInternalServerError)
+					return
+				}
+				r.Body = io.NopCloser(bytes.NewBuffer(originalBody))
+				modifiedBody, err := p.modifyRequestBody(r, mapping)
+				if err != nil {
+					isError = true
+					http.Error(w, "Failed to modify request body", http.StatusInternalServerError)
+					log.Printf("Error modifying request body: %v", err)
+					return
+				}
+				requestBody = bytes.NewReader(modifiedBody)
+			} else {
+				DebugLog("[MODIFICATION] Skipping request body modification for non-text content type: %s", contentType)
+			}
 		}
-		r.Body = io.NopCloser(bytes.NewBuffer(originalBody))
-		modifiedBody, err := p.modifyRequestBody(r, mapping)
-		if err != nil {
-			isError = true
-			http.Error(w, "Failed to modify request body", http.StatusInternalServerError)
-			log.Printf("Error modifying request body: %v", err)
-			return
-		}
-		requestBody = bytes.NewReader(modifiedBody)
 	}
 
 	// 处理IPS参数：如果mapping配置了ips，则随机选择一个IP并替换目标地址
@@ -1006,27 +1027,74 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	body, err := p.modifyResponseBody(resp, mapping)
-	if err != nil {
-		isError = true
-		http.Error(w, "Failed to modify response body", http.StatusInternalServerError)
-		log.Printf("Error modifying response body: %v", err)
-		return
-	}
-	bytesRecv = uint64(len(body))
+	// Check if we need to modify the response body
+	needsModification := needsResponseModification(mapping)
 
-	if encoding := resp.Header.Get("Content-Encoding"); encoding == "" {
-		w.Header().Del("Content-Encoding")
+	// Check if we should cache this response (preliminary check, status code confirmed later)
+	shouldCache := r.Method == http.MethodGet && p.staticCache != nil && p.staticCache.IsCacheable(r.URL.Path) && resp.StatusCode == http.StatusOK
+
+	var body []byte
+	var errRead error
+
+	// Decide if we need to read the full body into memory
+	// We read if:
+	// 1. Modification is needed AND it's a text content type
+	// 2. Caching is enabled AND it's a cacheable file (regardless of type)
+	readBody := (needsModification && isTextContentType(resp.Header.Get("Content-Type"))) || shouldCache
+
+	if readBody {
+		if needsModification && isTextContentType(resp.Header.Get("Content-Type")) {
+			body, err = p.modifyResponseBody(resp, mapping)
+			if err != nil {
+				isError = true
+				http.Error(w, "Failed to modify response body", http.StatusInternalServerError)
+				log.Printf("Error modifying response body: %v", err)
+				return
+			}
+		} else {
+			// Just read the body without modification (e.g. binary file or cacheable but no mod)
+			body, errRead = io.ReadAll(resp.Body)
+			if errRead != nil {
+				isError = true
+				http.Error(w, "Failed to read response body", http.StatusInternalServerError)
+				log.Printf("Error reading response body: %v", errRead)
+				return
+			}
+			resp.Body.Close()
+			// We don't need to reset resp.Body here because we'll use 'body' variable below
+
+			// If we skipped modification but had a rule, log it
+			if needsModification {
+				DebugLog("[MODIFICATION] Skipping response body modification for non-text content type: %s", resp.Header.Get("Content-Type"))
+			}
+		}
+
+		bytesRecv = uint64(len(body))
+
+		if encoding := resp.Header.Get("Content-Encoding"); encoding == "" {
+			w.Header().Del("Content-Encoding")
+		} else {
+			w.Header().Set("Content-Encoding", encoding)
+		}
+
+		// Remove conflicting Transfer-Encoding and set a strict numeric Content-Length
+		w.Header().Del("Transfer-Encoding")
+		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(body)))
 	} else {
-		w.Header().Set("Content-Encoding", encoding)
+		// Streaming mode (no modification, no caching)
+		if needsModification {
+			DebugLog("[MODIFICATION] Skipping response body modification for non-text content type: %s", resp.Header.Get("Content-Type"))
+		}
 	}
 
-	// Remove conflicting Transfer-Encoding and set a strict numeric Content-Length
-	w.Header().Del("Transfer-Encoding")
-	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(body)))
 	w.WriteHeader(resp.StatusCode)
 
-	var reader io.Reader = bytes.NewReader(body)
+	var reader io.Reader
+	if readBody {
+		reader = bytes.NewReader(body)
+	} else {
+		reader = resp.Body
+	}
 	if policies.Quality < 1.0 && policies.Quality > 0 {
 		reader = NewThrottledReader(reader, policies.Quality)
 	}
@@ -1047,21 +1115,17 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	bytesSent = counterWriter.BytesWritten
 
 	// 静态文件缓存保存 - 仅缓存成功的200响应且为GET请求
-	DebugLog("[DEBUG] Checking cacheability: Method=%s, StaticCache!=nil=%v, Path=%s, Status=%d", r.Method, p.staticCache != nil, r.URL.Path, resp.StatusCode)
-	if r.Method == http.MethodGet && p.staticCache != nil && p.staticCache.IsCacheable(r.URL.Path) && resp.StatusCode == http.StatusOK {
+	DebugLog("[DEBUG] Checking cacheability: Method=%s, StaticCache!=nil=%v, Path=%s, Status=%d, ReadBody=%v", r.Method, p.staticCache != nil, r.URL.Path, resp.StatusCode, readBody)
+	if shouldCache && readBody {
 		cacheURL := p.buildOriginalURL(r)
-		// 确保缓存的是解压后的明文内容
-		cacheBody := body
-		if encoding := resp.Header.Get("Content-Encoding"); encoding != "" {
-			decodedBody, _, decoded, err := decodeBodyWithEncoding(body, encoding)
-			if err == nil && decoded {
-				cacheBody = decodedBody
-				DebugLog("[CACHE] Decoded %s content before caching: %d -> %d bytes", encoding, len(body), len(cacheBody))
-			}
-		}
 
-		if len(cacheBody) > 0 {
-			if err := p.staticCache.Set(cacheURL, resp.Header, resp.StatusCode, cacheBody); err != nil {
+		// Always use the current Content-Encoding from the response header.
+		// If modification happened, modifyResponseBody handles re-encoding and updates the header.
+		// If no modification, it's the original encoding.
+		originalEncoding := resp.Header.Get("Content-Encoding")
+
+		if len(body) > 0 {
+			if err := p.staticCache.Set(cacheURL, resp.Header, resp.StatusCode, body, originalEncoding); err != nil {
 				log.Printf("[CACHE] Error saving cache for %s: %v", cacheURL, err)
 			}
 		}
@@ -1084,6 +1148,19 @@ func (w *ByteCounterWriter) Write(p []byte) (n int, err error) {
 	n, err = w.Writer.Write(p)
 	w.BytesWritten += uint64(n)
 	return
+}
+
+// needsResponseModification 检查是否需要修改响应
+func needsResponseModification(mapping *Mapping) bool {
+	if mapping == nil {
+		return false
+	}
+	toConfig := mapping.GetToConfig()
+	if toConfig == nil {
+		return false
+	}
+	// 检查是否配置了响应修改
+	return toConfig.Match != "" || len(toConfig.Replace) > 0
 }
 
 func (p *MapRemoteProxy) modifyRequestBody(r *http.Request, mapping *Mapping) ([]byte, error) {

@@ -455,7 +455,7 @@ func createServerHandler(serverName string, mappings []*Mapping, serverConfig *L
 		mux.HandleFunc("/.api/stats", stats.ServeHTTP)
 
 		// 注册管理面板处理器
-		adminHandlers := NewAdminHandlers(config, configFile, stats, statsDB, loggingDB, logBroadcaster)
+		adminHandlers := NewAdminHandlers(config, configFile, stats, statsDB, loggingDB, logBroadcaster, staticCache)
 		// 设置tunnel管理器引用，用于查询endpoint状态
 		adminHandlers.SetTunnelManager(tunnelManager)
 		adminHandlers.RegisterHandlers(mux)

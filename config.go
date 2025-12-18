@@ -90,11 +90,25 @@ type AuthProviderConfig struct {
 }
 
 // StaticCacheConfig 静态文件缓存配置
+// StaticCacheConfig 静态文件缓存配置
 type StaticCacheConfig struct {
-	Enabled  bool     `json:"enabled"`             // 是否启用缓存
-	CacheDir string   `json:"cache_dir,omitempty"` // 缓存目录，默认 ".cache"
-	TTL      int      `json:"ttl,omitempty"`       // 缓存有效期(秒)，默认 86400 (1天)
-	FileType []string `json:"file_type,omitempty"` // 可缓存的文件扩展名，如果指定则覆盖默认值
+	Enabled            bool         `json:"enabled"`                          // 是否启用缓存
+	CacheDir           string       `json:"cache_dir,omitempty"`              // 缓存目录，默认 ".cache"
+	FileType           []string     `json:"file_type,omitempty"`              // 可缓存的文件扩展名，如果指定则覆盖默认值
+	StreamingThreshold int          `json:"streaming_threshold_mb,omitempty"` // 直接流式传输阈值(MB)，默认20MB，超过则跳过缓存
+	EnableEncryption   *bool        `json:"enable_encryption,omitempty"`      // 是否启用加密，默认 true
+	EnableCompression  *bool        `json:"enable_compression,omitempty"`     // 是否启用压缩，默认 true
+	Mem                *CachePolicy `json:"mem,omitempty"`                    // 内存缓存策略
+	Disk               *CachePolicy `json:"disk,omitempty"`                   // 磁盘缓存策略
+}
+
+// CachePolicy 缓存策略配置
+type CachePolicy struct {
+	Alloc string `json:"alloc,omitempty"` // 最大分配大小 (e.g., "2g", "0"禁用)
+	File  string `json:"file,omitempty"`  // 单文件最大大小 (e.g., "10m")
+	Count int    `json:"count,omitempty"` // 最大条目数
+	TTL   string `json:"ttl,omitempty"`   // 空闲超时 (e.g., "1m")
+	Life  string `json:"life,omitempty"`  // 最大生命周期 (e.g., "5m")
 }
 
 // TimeSeriesSnapshot represents a point-in-time statistics snapshot with dimensional data

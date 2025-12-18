@@ -96,10 +96,10 @@ var validTunnelTypes = map[byte]bool{
 	MsgTypeResponseEnd:     true,
 	MsgTypeProxyConnect:    true,
 	MsgTypeProxyConnectAck: true,
-	MsgTypeProxyData:       true,
-	MsgTypeProxyClose:      true,
-	MsgTypeHeartbeat:       true,
-	MsgTypeCancel:          true,
+	// MsgTypeProxyData removed
+	MsgTypeProxyClose: true,
+	MsgTypeHeartbeat:  true,
+	MsgTypeCancel:     true,
 }
 
 // ============================================================================

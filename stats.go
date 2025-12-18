@@ -103,6 +103,10 @@ func NewStatsCollector(config *Config) *StatsCollector {
 		go sc.statsWorker()
 	}
 
+	// Start periodic cleanup goroutine for IP stats
+	sc.wg.Add(1)
+	go sc.ipStatsCleanupWorker()
+
 	return sc
 }
 
@@ -229,36 +233,31 @@ type IPStatsData struct {
 	HTTPBytesRecv   uint64
 	RawTCPBytesSent uint64
 	RawTCPBytesRecv uint64
+	mutex           sync.Mutex // Protects Timestamps slice
 }
 
 // recordIPRequest records a request from a specific IP address with traffic data.
-// It maintains a 24-hour rolling window by filtering out old timestamps.
+// It appends the timestamp without filtering (filtering is done periodically).
 func (sc *StatsCollector) recordIPRequest(ip string, protocol string, bytesSent, bytesRecv uint64) {
 	if ip == "" {
 		return
 	}
 
 	now := time.Now()
-	cutoff := now.Add(-24 * time.Hour)
 
 	// Load or create the stats data for this IP
 	value, _ := sc.IPStats.LoadOrStore(ip, &IPStatsData{
-		Timestamps: []time.Time{},
+		Timestamps: make([]time.Time, 0, 100),
 	})
 	data := value.(*IPStatsData)
 
 	// Increment total requests
 	atomic.AddUint64(&data.TotalRequests, 1)
 
-	// Filter out timestamps older than 24 hours and add the new one
-	filtered := make([]time.Time, 0, len(data.Timestamps)+1)
-	for _, t := range data.Timestamps {
-		if t.After(cutoff) {
-			filtered = append(filtered, t)
-		}
-	}
-	filtered = append(filtered, now)
-	data.Timestamps = filtered
+	// Append timestamp with mutex protection (no filtering here)
+	data.mutex.Lock()
+	data.Timestamps = append(data.Timestamps, now)
+	data.mutex.Unlock()
 
 	// Update traffic stats by protocol
 	if protocol == "http" {
@@ -268,6 +267,51 @@ func (sc *StatsCollector) recordIPRequest(ip string, protocol string, bytesSent,
 		atomic.AddUint64(&data.RawTCPBytesSent, bytesSent)
 		atomic.AddUint64(&data.RawTCPBytesRecv, bytesRecv)
 	}
+}
+
+// ipStatsCleanupWorker periodically cleans up old timestamps from IP statistics.
+func (sc *StatsCollector) ipStatsCleanupWorker() {
+	defer sc.wg.Done()
+
+	ticker := time.NewTicker(5 * time.Minute) // Cleanup every 5 minutes
+	defer ticker.Stop()
+
+	for {
+		// Block until ticker fires or we need to shut down
+		if sc.closed.Load() {
+			return
+		}
+
+		select {
+		case <-ticker.C:
+			sc.cleanupOldIPTimestamps()
+		}
+	}
+}
+
+// cleanupOldIPTimestamps removes timestamps older than 24 hours from all IP stats.
+func (sc *StatsCollector) cleanupOldIPTimestamps() {
+	cutoff := time.Now().Add(-24 * time.Hour)
+
+	sc.IPStats.Range(func(key, value interface{}) bool {
+		data := value.(*IPStatsData)
+
+		data.mutex.Lock()
+		defer data.mutex.Unlock()
+
+		// Filter out old timestamps
+		if len(data.Timestamps) > 0 {
+			filtered := make([]time.Time, 0, len(data.Timestamps))
+			for _, t := range data.Timestamps {
+				if t.After(cutoff) {
+					filtered = append(filtered, t)
+				}
+			}
+			data.Timestamps = filtered
+		}
+
+		return true
+	})
 }
 
 // GetTopIPsAsDimensionStats retrieves the top N active IPs as DimensionStats for storage.
@@ -344,12 +388,14 @@ func (sc *StatsCollector) GetIPStats() []IPRequestStats {
 		ipData := value.(*IPStatsData)
 
 		// Filter timestamps within 24 hours
+		ipData.mutex.Lock()
 		recent := make([]time.Time, 0)
 		for _, t := range ipData.Timestamps {
 			if t.After(cutoff) {
 				recent = append(recent, t)
 			}
 		}
+		ipData.mutex.Unlock()
 
 		// Only include IPs with requests in the past 24 hours
 		if len(recent) > 0 {

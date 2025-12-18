@@ -101,6 +101,9 @@ var admin_page_js = `
           if (typeof populateFirewallSelectors === "function") populateFirewallSelectors();
           if (typeof populateAuthProviderSelectors === "function") populateAuthProviderSelectors();
         }
+        else if (tabId === "tab-cache" && typeof loadCacheConfig === "function") {
+          loadCacheConfig();
+        }
         else if (tabId === "tab-firewalls" && typeof loadFirewalls === "function") loadFirewalls();
         else if (tabId === "tab-auth-providers" && typeof loadAuthProviders === "function") loadAuthProviders();
         else if (tabId === "tab-endpoints" && typeof loadEndpoints === "function") {
@@ -3096,6 +3099,116 @@ window.deleteEndpoint = deleteEndpoint;
 window.confirmAddEndpoint = confirmAddEndpoint;
 window.confirmEditEndpoint = confirmEditEndpoint;
 window.populateTunnelSelectorsForEndpoints = populateTunnelSelectorsForEndpoints;
+
+
+// ===== 缓存管理 =====
+const cacheConfigUrl = "/.api/cache/config";
+const cacheRefreshUrl = "/.api/cache/refresh";
+
+async function loadCacheConfig() {
+  var msg = document.getElementById("cache-msg");
+  if (msg) msg.textContent = "加载中...";
+  try {
+    var res = await authFetch(cacheConfigUrl, { headers: buildAuthHeaders({}) });
+    if (!res.ok) throw new Error(await res.text());
+    var config = await res.json();
+
+    document.getElementById("cache-enabled").checked = !!config.enabled;
+
+    // Mem Policy
+    var mem = config.mem || {};
+    document.getElementById("cache-mem-alloc").value = mem.alloc || "";
+    document.getElementById("cache-mem-file").value = mem.file || "";
+    document.getElementById("cache-mem-count").value = mem.count || "";
+    document.getElementById("cache-mem-ttl").value = mem.ttl || "";
+    document.getElementById("cache-mem-life").value = mem.life || "";
+
+    // Disk Policy
+    var disk = config.disk || {};
+    document.getElementById("cache-disk-alloc").value = disk.alloc || "";
+    document.getElementById("cache-disk-file").value = disk.file || "";
+    document.getElementById("cache-disk-count").value = disk.count || "";
+    document.getElementById("cache-disk-ttl").value = disk.ttl || "";
+    document.getElementById("cache-disk-life").value = disk.life || "";
+
+    if (msg) msg.textContent = "配置已加载";
+  } catch (e) {
+    if (msg) msg.textContent = "加载失败: " + (e.message || e);
+  }
+}
+
+async function saveCacheConfig() {
+  var msg = document.getElementById("cache-msg");
+  if (msg) msg.textContent = "保存中...";
+
+  var config = {
+    enabled: document.getElementById("cache-enabled").checked,
+    mem: {
+      alloc: document.getElementById("cache-mem-alloc").value.trim(),
+      file: document.getElementById("cache-mem-file").value.trim(),
+      count: parseInt(document.getElementById("cache-mem-count").value.trim(), 10) || 0,
+      ttl: document.getElementById("cache-mem-ttl").value.trim(),
+      life: document.getElementById("cache-mem-life").value.trim(),
+    },
+    disk: {
+      alloc: document.getElementById("cache-disk-alloc").value.trim(),
+      file: document.getElementById("cache-disk-file").value.trim(),
+      count: parseInt(document.getElementById("cache-disk-count").value.trim(), 10) || 0,
+      ttl: document.getElementById("cache-disk-ttl").value.trim(),
+      life: document.getElementById("cache-disk-life").value.trim(),
+    }
+  };
+
+  try {
+    var res = await authFetch(cacheConfigUrl, {
+      method: "POST",
+      headers: buildAuthHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify(config)
+    });
+    var text = await res.text();
+    if (!res.ok) throw new Error(text);
+    if (msg) msg.textContent = "保存成功";
+  } catch (e) {
+    if (msg) msg.textContent = "保存失败: " + (e.message || e);
+  }
+}
+
+async function refreshCache() {
+  var msg = document.getElementById("cache-msg");
+  if (msg) msg.textContent = "刷新中...";
+  
+  var urlsText = document.getElementById("cache-refresh-urls").value;
+  var urls = urlsText.split("\n").map(function(s){return s.trim();}).filter(function(s){return s;});
+
+  if (urls.length === 0) {
+    if (msg) msg.textContent = "请输入要刷新的URL";
+    return;
+  }
+
+  try {
+    var res = await authFetch(cacheRefreshUrl, {
+      method: "POST",
+      headers: buildAuthHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ urls: urls })
+    });
+    var text = await res.text();
+    if (!res.ok) throw new Error(text);
+    if (msg) msg.textContent = "刷新成功";
+    document.getElementById("cache-refresh-urls").value = ""; // Clear input on success
+  } catch (e) {
+    if (msg) msg.textContent = "刷新失败: " + (e.message || e);
+  }
+}
+
+// Event listeners for Cache
+document.getElementById("btn-cache-load").addEventListener("click", loadCacheConfig);
+document.getElementById("btn-cache-save").addEventListener("click", saveCacheConfig);
+document.getElementById("btn-cache-refresh").addEventListener("click", refreshCache);
+
+// Export to window
+window.loadCacheConfig = loadCacheConfig;
+window.saveCacheConfig = saveCacheConfig;
+window.refreshCache = refreshCache;
 
 }); // End of DOMContentLoaded
 `
