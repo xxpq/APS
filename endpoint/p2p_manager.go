@@ -3,10 +3,13 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"sync"
 	"time"
+
+	"github.com/xtaci/smux"
 )
 
 // P2PConnectionType represents the type of P2P connection
@@ -37,6 +40,7 @@ type P2PConnection struct {
 	TargetEndpoint string
 	ConnectionType P2PConnectionType
 	Conn           net.Conn
+	Session        *smux.Session // SMUX session for multiplexing
 	NATInfo        *NATInfo
 	CreatedAt      time.Time
 	LastActivity   time.Time
@@ -230,7 +234,7 @@ func (pm *P2PManager) registerConnection(targetEndpoint string, conn net.Conn, c
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 
-	pm.connections[targetEndpoint] = &P2PConnection{
+	p2pConn := &P2PConnection{
 		TargetEndpoint: targetEndpoint,
 		ConnectionType: connType,
 		Conn:           conn,
@@ -239,6 +243,22 @@ func (pm *P2PManager) registerConnection(targetEndpoint string, conn net.Conn, c
 		LastActivity:   time.Now(),
 	}
 
+	// Upgrade to SMUX for real connections (not P2SP virtual connections)
+	if conn != nil && connType != ConnectionTypeP2SP {
+		session, err := smux.Client(conn, nil)
+		if err != nil {
+			log.Printf("[P2P] Failed to create SMUX session to %s: %v", targetEndpoint, err)
+			conn.Close()
+			return
+		}
+		p2pConn.Session = session
+		log.Printf("[P2P] SMUX session established to %s", targetEndpoint)
+
+		// Start accepting incoming streams
+		go pm.acceptP2PStreams(session, targetEndpoint)
+	}
+
+	pm.connections[targetEndpoint] = p2pConn
 	log.Printf("[P2P] Registered %s connection to %s", connType, targetEndpoint)
 }
 
@@ -249,6 +269,9 @@ func (pm *P2PManager) CloseConnection(targetEndpoint string) {
 
 	if conn, ok := pm.connections[targetEndpoint]; ok {
 		conn.mu.Lock()
+		if conn.Session != nil {
+			conn.Session.Close()
+		}
 		if conn.Conn != nil {
 			conn.Conn.Close()
 		}
@@ -256,6 +279,72 @@ func (pm *P2PManager) CloseConnection(targetEndpoint string) {
 		delete(pm.connections, targetEndpoint)
 		log.Printf("[P2P] Closed connection to %s", targetEndpoint)
 	}
+}
+
+// acceptP2PStreams accepts incoming SMUX streams on a P2P connection
+func (pm *P2PManager) acceptP2PStreams(session *smux.Session, sourceEndpoint string) {
+	for {
+		stream, err := session.AcceptStream()
+		if err != nil {
+			log.Printf("[P2P] Stream accept error from %s: %v", sourceEndpoint, err)
+			return
+		}
+		go pm.handleIncomingP2PStream(stream, sourceEndpoint)
+	}
+}
+
+// handleIncomingP2PStream handles an incoming port forward stream
+func (pm *P2PManager) handleIncomingP2PStream(stream *smux.Stream, sourceEndpoint string) {
+	defer stream.Close()
+
+	// Read port forward request (first message on stream)
+	tc := NewTunnelConn(stream)
+	msg, err := tc.ReadMessage()
+	if err != nil {
+		log.Printf("[P2P] Failed to read request from %s: %v", sourceEndpoint, err)
+		return
+	}
+
+	if msg.Type != MsgTypePortForwardRequest {
+		log.Printf("[P2P] Unexpected message type from %s: %d", sourceEndpoint, msg.Type)
+		return
+	}
+
+	var payload PortForwardRequestPayload
+	if err := msg.ParseJSON(&payload); err != nil {
+		log.Printf("[P2P] Failed to parse request from %s: %v", sourceEndpoint, err)
+		return
+	}
+
+	log.Printf("[P2P] Port forward request from %s -> %s (client: %s)",
+		sourceEndpoint, payload.RemoteTarget, payload.ClientIP)
+
+	// Dial local target
+	targetConn, err := net.DialTimeout("tcp", payload.RemoteTarget, 30*time.Second)
+	if err != nil {
+		log.Printf("[P2P] Failed to dial %s: %v", payload.RemoteTarget, err)
+		return
+	}
+	defer targetConn.Close()
+
+	log.Printf("[P2P] Connected to %s, starting bidirectional copy", payload.RemoteTarget)
+
+	// Bidirectional copy
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		io.Copy(stream, targetConn)
+	}()
+
+	go func() {
+		defer wg.Done()
+		io.Copy(targetConn, stream)
+	}()
+
+	wg.Wait()
+	log.Printf("[P2P] Port forward finished: %s -> %s", sourceEndpoint, payload.RemoteTarget)
 }
 
 // udpConnWrapper wraps UDPConn to implement net.Conn for a specific remote address

@@ -36,6 +36,7 @@ const (
 
 	// Configuration management
 	MsgTypeConfigUpdate uint8 = 0x40 // APS pushes config update to endpoint
+	MsgTypeMirrorUpdate uint8 = 0x41 // APS sends mirror addresses to endpoint
 
 	// Key negotiation for dynamic encryption
 	MsgTypeKeyRequest  uint8 = 0x50 // Request new session key negotiation
@@ -121,6 +122,11 @@ type ProxyStreamModePayload struct {
 type ProxyClosePayload struct {
 	ConnectionID string `json:"connection_id"`
 	Reason       string `json:"reason,omitempty"`
+}
+
+// MirrorUpdatePayload is sent by server to inform endpoint of mirror APS addresses
+type MirrorUpdatePayload struct {
+	Mirrors []string `json:"mirrors"` // Format: ["addr:port", "cid@addr:port", ...]
 }
 
 // HeartbeatPayload for keepalive

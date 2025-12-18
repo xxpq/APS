@@ -65,6 +65,7 @@ const (
 
 	// Configuration management
 	MsgTypeConfigUpdate uint8 = 0x40 // APS pushes config update to endpoint
+	MsgTypeMirrorUpdate uint8 = 0x41 // APS sends mirror addresses to endpoint
 
 	// Key negotiation for dynamic encryption
 	MsgTypeKeyRequest  uint8 = 0x50 // Request new session key negotiation
@@ -404,6 +405,9 @@ func handleTCPMessage(tc *TunnelConn, msg *TunnelMessage, km *SessionKeyManager)
 		// TODO: Handle cancellation
 	case MsgTypeConfigUpdate:
 		handleConfigUpdate(tc, msg)
+
+	case MsgTypeMirrorUpdate:
+		handleMirrorUpdate(tc, msg)
 	}
 }
 
@@ -694,6 +698,11 @@ type ConfigUpdatePayload struct {
 	P2PSettings  *P2PSettings        `json:"p2pSettings,omitempty"`
 }
 
+// MirrorUpdatePayload is sent by APS to inform endpoint of mirror addresses
+type MirrorUpdatePayload struct {
+	Mirrors []string `json:"mirrors\"` // Format: ["addr:port", "cid@addr:port", ...]
+}
+
 // handleConfigUpdate handles configuration update pushed from APS
 func handleConfigUpdate(tc *TunnelConn, msg *TunnelMessage) {
 	var payload ConfigUpdatePayload
@@ -758,6 +767,38 @@ func handleConfigUpdate(tc *TunnelConn, msg *TunnelMessage) {
 
 		log.Println("[CONFIG] P2P components restarted successfully")
 	}()
+}
+
+// handleMirrorUpdate processes mirror address updates from APS
+func handleMirrorUpdate(tc *TunnelConn, msg *TunnelMessage) {
+	var payload MirrorUpdatePayload
+	if err := msg.ParseJSON(&payload); err != nil {
+		log.Printf("[MIRROR] Failed to parse mirror update: %v", err)
+		return
+	}
+
+	if connectionManager == nil {
+		log.Printf("[MIRROR] Connection manager not initialized, ignoring mirror update")
+		return
+	}
+
+	log.Printf("[MIRROR] Received %d mirror address(es) from APS", len(payload.Mirrors))
+
+	// Process each mirror address
+	for _, mirror := range payload.Mirrors {
+		// Parse the mirror address (could be "addr:port" or "cid@addr:port")
+		cfg := connectionManager.ParseServerAddress(mirror, false) // false = not a seed
+		
+		// Add as dynamic server if not already connected
+		if connectionManager.AddDynamicServer(cfg) {
+			log.Printf("[MIRROR] Starting connection to new mirror: %s (cid: %s)", cfg.Address, cfg.ConfigID)
+			
+			// Start connection in a new goroutine
+			go runServerConnection(context.Background(), cfg.Address)
+		} else {
+			log.Printf("[MIRROR] Already connected to mirror: %s", cfg.Address)
+		}
+	}
 }
 
 // initiateKeyRotation initiates a new key rotation by sending a key request

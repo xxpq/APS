@@ -37,6 +37,7 @@ type Config struct {
 	Proxies           map[string]*ProxyConfig        `json:"proxies,omitempty"`
 	Tunnels           map[string]*TunnelConfig       `json:"tunnels,omitempty"`
 	Endpoints         map[string]*EndpointConfig_APS `json:"endpoints,omitempty"` // Endpoint configurations for P2P management
+	Mirrors           map[string][]string            `json:"mirrors,omitempty"`   // Mirror groups
 	Auth              *AuthConfig                    `json:"auth,omitempty"`
 	AuthProviders     map[string]*AuthProviderConfig `json:"authProviders,omitempty"` // 第三方认证提供商配置
 	P12s              map[string]*P12Config          `json:"p12s,omitempty"`
@@ -53,6 +54,7 @@ type EndpointConfig_APS struct {
 	TunnelName        string                `json:"tunnelName"`
 	EndpointName      string                `json:"endpointName"`
 	Password          string                `json:"password,omitempty"`
+	Mirror            string                `json:"mirror,omitempty"` // Reference to mirrors group
 	PortMappings      []EndpointPortMapping `json:"portMappings,omitempty"`
 	P2P               *EndpointP2PSettings  `json:"p2p,omitempty"`
 	LogLevel          *int                  `json:"logLevel,omitempty"`

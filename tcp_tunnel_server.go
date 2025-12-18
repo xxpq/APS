@@ -301,6 +301,9 @@ func (s *TCPTunnelServer) handleConnection(conn net.Conn) {
 	go endpoint.writeLoop()
 	go endpoint.readLoop(s)
 
+	// Send mirror addresses if configured (non-blocking)
+	go sendMirrorUpdate(s, endpoint)
+
 	// Start auto key rotation (APS initiates first key negotiation after a delay)
 	go func() {
 		time.Sleep(5 * time.Second) // Wait for connection to stabilize
@@ -1022,4 +1025,41 @@ func (ep *TCPEndpoint) handleKeyConfirm(msg *TunnelMessage) {
 	}
 
 	DebugLog("[KEY] Key rotation completed for endpoint %s (responder)", ep.EndpointName)
+}
+
+// sendMirrorUpdate sends mirror APS addresses to an endpoint after registration
+func sendMirrorUpdate(s *TCPTunnelServer, ep *TCPEndpoint) {
+	// Get endpoint config from global config
+	s.mu.RLock()
+	endpointKey := ep.TunnelName + "/" + ep.EndpointName
+	endpointConfig, exists := s.config.Endpoints[endpointKey]
+	mirrors := s.config.Mirrors
+	s.mu.RUnlock()
+
+	if !exists || endpointConfig.Mirror == "" {
+		// No mirror configured for this endpoint
+		return
+	}
+
+	// Get mirror group
+	mirrorList, exists := mirrors[endpointConfig.Mirror]
+
+	if !exists || len(mirrorList) == 0 {
+		DebugLog("[MIRROR] Mirror group '%s' not found or empty for endpoint %s",
+			endpointConfig.Mirror, ep.EndpointName)
+		return
+	}
+
+	// Send mirror update to endpoint
+	payload := MirrorUpdatePayload{
+		Mirrors: mirrorList,
+	}
+
+	if err := ep.Conn.SendJSON(MsgTypeMirrorUpdate, payload); err != nil {
+		DebugLog("[MIRROR] Failed to send mirror update to %s: %v", ep.EndpointName, err)
+		return
+	}
+
+	DebugLog("[MIRROR] Sent %d mirror(s) from group '%s' to endpoint %s",
+		len(mirrorList), endpointConfig.Mirror, ep.EndpointName)
 }
