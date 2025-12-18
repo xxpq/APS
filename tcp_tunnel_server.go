@@ -11,6 +11,8 @@ import (
 	"net"
 	"sync"
 	"time"
+
+	"github.com/xtaci/smux"
 )
 
 // TCPTunnelServer handles TCP connections from endpoints
@@ -45,6 +47,7 @@ type TCPEndpoint struct {
 	sendChan  chan *TunnelMessage
 	done      chan struct{}
 	closeOnce sync.Once // Ensures done channel is closed only once
+	session   *smux.Session
 }
 
 // tcpPendingRequest represents a pending HTTP request
@@ -260,6 +263,35 @@ func (s *TCPTunnelServer) handleConnection(conn net.Conn) {
 	DebugLog("[TCP TUNNEL] Endpoint '%s' connected to tunnel '%s' (ID: %s)",
 		reg.EndpointName, reg.TunnelName, endpoint.ID)
 
+	// Upgrade to SMUX
+	// Server side acts as SMUX server
+	session, err := smux.Server(conn, nil)
+	if err != nil {
+		DebugLog("[TCP TUNNEL] Failed to create SMUX server for %s: %v", remoteAddr, err)
+		tc.Close()
+		s.unregisterEndpoint(endpoint.ID)
+		return
+	}
+	endpoint.session = session
+
+	// Accept the first stream for control channel
+	controlStream, err := session.AcceptStream()
+	if err != nil {
+		DebugLog("[TCP TUNNEL] Failed to accept control stream from %s: %v", remoteAddr, err)
+		session.Close()
+		s.unregisterEndpoint(endpoint.ID)
+		return
+	}
+	DebugLog("[TCP TUNNEL] Control stream established for %s", endpoint.ID)
+
+	// Replace the connection in TunnelConn with the control stream
+	// Note: We need to create a new TunnelConn or update the existing one
+	// Since TunnelConn is just a wrapper, we can create a new one for the control stream
+	// But we need to be careful about the initial tc which wrapped the raw conn.
+	// The raw conn is now owned by SMUX.
+	// We should update endpoint.Conn to use the control stream.
+	endpoint.Conn = NewTunnelConn(controlStream)
+
 	// Notify tunnel manager
 	if s.tunnelManager != nil {
 		s.tunnelManager.RegisterEndpoint(endpoint)
@@ -349,6 +381,9 @@ func (ep *TCPEndpoint) Close() {
 	})
 
 	ep.Conn.Close()
+	if ep.session != nil {
+		ep.session.Close()
+	}
 
 	// Close all pending requests
 	ep.mu.Lock()
@@ -589,35 +624,76 @@ func (ep *TCPEndpoint) CreateProxyConnection(ctx context.Context, host string, p
 	ep.proxyConns[connectionID] = pc
 	ep.mu.Unlock()
 
-	// Send proxy connect request
-	if err := ep.SendJSON(MsgTypeProxyConnect, ProxyConnectPayload{
+	// Open a new stream for this proxy connection
+	stream, err := ep.session.OpenStream()
+	if err != nil {
+		ep.closeProxyConnection(connectionID, "open stream failed")
+		return nil, err
+	}
+
+	// Send proxy connect request on the new stream
+	// We use a temporary TunnelConn wrapper to send the JSON payload
+	streamConn := NewTunnelConn(stream)
+	if err := streamConn.SendJSON(MsgTypeProxyConnect, ProxyConnectPayload{
 		ConnectionID: connectionID,
 		Host:         host,
 		Port:         port,
 		TLS:          useTLS,
 		ClientIP:     clientIP,
 	}); err != nil {
+		stream.Close()
 		ep.closeProxyConnection(connectionID, "send error")
 		return nil, err
 	}
 
-	// Wait for connection acknowledgement
+	// Wait for connection acknowledgement (on the control channel? No, usually on the same stream if possible,
+	// but our protocol sends Acks on the control channel.
+	// The client will receive the request on the new stream, connect to backend, and send Ack on the control channel.
+	// So we still wait for Ack here.
+
 	select {
 	case err := <-pc.connectAck:
 		if err != nil {
+			stream.Close()
 			ep.closeProxyConnection(connectionID, "connect failed")
 			return nil, err
 		}
 	case <-ctx.Done():
+		stream.Close()
 		ep.closeProxyConnection(connectionID, "context cancelled")
 		return nil, ctx.Err()
 	case <-time.After(30 * time.Second):
+		stream.Close()
 		ep.closeProxyConnection(connectionID, "connect timeout")
 		return nil, errors.New("proxy connect timeout")
 	}
 
-	// Start reading from client and forwarding to endpoint
-	go ep.proxyClientReadLoop(connectionID, pc)
+	// Start bidirectional copy
+	// No need to switch mode or hijack, just copy between clientConn and stream
+	go func() {
+		defer func() {
+			// Close stream when copy is done
+			stream.Close()
+			// Don't close endpoint, just this proxy connection
+			clientConn.Close()
+			ep.closeProxyConnection(connectionID, "stream ended")
+		}()
+
+		var wg sync.WaitGroup
+		wg.Add(2)
+
+		go func() {
+			defer wg.Done()
+			io.Copy(stream, clientConn)
+		}()
+
+		go func() {
+			defer wg.Done()
+			io.Copy(clientConn, stream)
+		}()
+
+		wg.Wait()
+	}()
 
 	return pc.done, nil
 }

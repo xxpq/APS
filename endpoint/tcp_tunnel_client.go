@@ -16,6 +16,8 @@ import (
 	"net/url"
 	"sync"
 	"time"
+
+	"github.com/xtaci/smux"
 )
 
 // Local buffer pools for the endpoint client
@@ -48,6 +50,7 @@ const (
 	MsgTypeResponseEnd     uint8 = 0x14
 	MsgTypeProxyConnect    uint8 = 0x20
 	MsgTypeProxyConnectAck uint8 = 0x21
+	MsgTypeProxyStreamMode uint8 = 0x25
 	// MsgTypeProxyData removed
 	MsgTypeProxyClose      uint8 = 0x23
 	MsgTypeProxyDataBinary uint8 = 0x24
@@ -123,6 +126,7 @@ type ProxyConnectPayload struct {
 	Port         int    `json:"port"`
 	TLS          bool   `json:"tls"`
 	ClientIP     string `json:"client_ip"`
+	StreamMode   bool   `json:"stream_mode"`
 }
 
 // ProxyConnectAckPayload for proxy connect response
@@ -130,6 +134,11 @@ type ProxyConnectAckPayload struct {
 	ConnectionID string `json:"connection_id"`
 	Success      bool   `json:"success"`
 	Error        string `json:"error,omitempty"`
+}
+
+// ProxyStreamModePayload for stream mode signal
+type ProxyStreamModePayload struct {
+	ConnectionID string `json:"connection_id"`
 }
 
 // ProxyDataPayload removed
@@ -307,7 +316,30 @@ func runTCPTunnelSession(ctx context.Context) bool {
 		return true
 	}
 
-	// Start message handling loop
+	// Upgrade to SMUX
+	// Client side acts as SMUX client
+	session, err := smux.Client(conn, nil)
+	if err != nil {
+		log.Printf("Failed to create SMUX client: %v", err)
+		return false
+	}
+	defer session.Close()
+
+	// Open control stream
+	controlStream, err := session.OpenStream()
+	if err != nil {
+		log.Printf("Failed to open control stream: %v", err)
+		return false
+	}
+	log.Printf("Control stream established")
+
+	// Use control stream for TunnelConn
+	tc = NewTunnelConn(controlStream)
+
+	// Start accepting incoming streams (for proxy connections)
+	go acceptStreams(session, tc, keyManager)
+
+	// Start message handling loop (on control stream)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -357,7 +389,6 @@ func handleTCPMessage(tc *TunnelConn, msg *TunnelMessage, km *SessionKeyManager)
 		handleTCPRequest(tc, msg)
 	case MsgTypeProxyConnect:
 		handleTCPProxyConnect(tc, msg)
-	case MsgTypeProxyDataBinary:
 		handleTCPProxyDataBinary(msg)
 	case MsgTypeProxyClose:
 		handleTCPProxyClose(msg)
@@ -540,8 +571,14 @@ func handleTCPProxyConnect(tc *TunnelConn, msg *TunnelMessage) {
 	} else {
 		log.Printf("[PROXY %s] TCP connection established to %s", connID, address)
 		proxyConnections.Store(connID, conn)
-		log.Printf("[PROXY %s] Starting read loop", connID)
-		go tcpProxyReadLoop(tc, connID, conn)
+
+		if payload.StreamMode {
+			log.Printf("[PROXY %s] Stream mode requested, waiting for switch signal", connID)
+			// Do not start read loop, wait for MsgTypeProxyStreamMode
+		} else {
+			log.Printf("[PROXY %s] Starting read loop", connID)
+			go tcpProxyReadLoop(tc, connID, conn)
+		}
 	}
 
 	log.Printf("[PROXY %s] Sending ack (success=%v)", connID, ack.Success)
@@ -822,4 +859,91 @@ func handleKeyConfirm(tc *TunnelConn, msg *TunnelMessage, km *SessionKeyManager)
 	}
 
 	log.Printf("[KEY] Key rotation completed (responder)")
+}
+
+// acceptStreams handles incoming streams from SMUX session
+func acceptStreams(session *smux.Session, controlTc *TunnelConn, km *SessionKeyManager) {
+	for {
+		stream, err := session.AcceptStream()
+		if err != nil {
+			log.Printf("SMUX accept error: %v", err)
+			return
+		}
+		go handleIncomingStream(stream, controlTc)
+	}
+}
+
+// handleIncomingStream handles a new stream from APS
+func handleIncomingStream(stream *smux.Stream, controlTc *TunnelConn) {
+	defer stream.Close()
+
+	// Read ProxyConnectPayload from the stream
+	tc := NewTunnelConn(stream)
+	msg, err := tc.ReadMessage()
+	if err != nil {
+		log.Printf("Failed to read proxy connect from stream: %v", err)
+		return
+	}
+
+	if msg.Type != MsgTypeProxyConnect {
+		log.Printf("Unexpected message type on new stream: %d", msg.Type)
+		return
+	}
+
+	var payload ProxyConnectPayload
+	if err := msg.ParseJSON(&payload); err != nil {
+		log.Printf("Failed to parse proxy connect payload: %v", err)
+		return
+	}
+
+	connID := payload.ConnectionID
+	address := net.JoinHostPort(payload.Host, fmt.Sprintf("%d", payload.Port))
+	log.Printf("[PROXY %s] Connecting to %s (client: %s)", connID, address, payload.ClientIP)
+
+	// Dial backend
+	backendConn, err := net.DialTimeout("tcp", address, 30*time.Second)
+
+	ack := ProxyConnectAckPayload{
+		ConnectionID: connID,
+		Success:      err == nil,
+	}
+	if err != nil {
+		ack.Error = err.Error()
+		log.Printf("[PROXY %s] Connection failed: %v", connID, err)
+	} else {
+		log.Printf("[PROXY %s] TCP connection established to %s", connID, address)
+	}
+
+	// Send Ack on control channel
+	if err := controlTc.SendJSON(MsgTypeProxyConnectAck, ack); err != nil {
+		log.Printf("[PROXY %s] Failed to send ack: %v", connID, err)
+		if backendConn != nil {
+			backendConn.Close()
+		}
+		return
+	}
+
+	if err != nil {
+		return
+	}
+
+	defer backendConn.Close()
+
+	// Bidirectional copy
+	log.Printf("[PROXY %s] Starting stream copy", connID)
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		io.Copy(stream, backendConn)
+	}()
+
+	go func() {
+		defer wg.Done()
+		io.Copy(backendConn, stream)
+	}()
+
+	wg.Wait()
+	log.Printf("[PROXY %s] Stream copy finished", connID)
 }

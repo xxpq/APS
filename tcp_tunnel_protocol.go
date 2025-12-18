@@ -21,6 +21,7 @@ const (
 	MsgTypeResponseEnd     uint8 = 0x14 // Response end (streaming)
 	MsgTypeProxyConnect    uint8 = 0x20 // TCP proxy connect request
 	MsgTypeProxyConnectAck uint8 = 0x21 // TCP proxy connect acknowledgement
+	MsgTypeProxyStreamMode uint8 = 0x25 // Signal switch to direct stream mode
 	// MsgTypeProxyData removed (legacy JSON format)
 	MsgTypeProxyClose      uint8 = 0x23 // TCP proxy close
 	MsgTypeProxyDataBinary uint8 = 0x24 // TCP proxy data (binary format)
@@ -98,7 +99,8 @@ type ProxyConnectPayload struct {
 	Host         string `json:"host"`
 	Port         int    `json:"port"`
 	TLS          bool   `json:"tls"`
-	ClientIP     string `json:"client_ip"` // Real client IP for audit
+	ClientIP     string `json:"client_ip"`   // Real client IP for audit
+	StreamMode   bool   `json:"stream_mode"` // If true, switch to zero-copy stream mode
 }
 
 // ProxyConnectAckPayload is sent by endpoint to acknowledge proxy connection
@@ -106,6 +108,11 @@ type ProxyConnectAckPayload struct {
 	ConnectionID string `json:"connection_id"`
 	Success      bool   `json:"success"`
 	Error        string `json:"error,omitempty"`
+}
+
+// ProxyStreamModePayload is sent by APS to signal switch to stream mode
+type ProxyStreamModePayload struct {
+	ConnectionID string `json:"connection_id"`
 }
 
 // ProxyDataPayload removed (legacy JSON format)
