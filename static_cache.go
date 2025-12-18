@@ -1,7 +1,6 @@
 package main
 
 import (
-	"container/list"
 	"crypto/md5"
 	"encoding/hex"
 	"encoding/json"
@@ -10,9 +9,9 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/andybalholm/brotli"
@@ -27,8 +26,6 @@ type CacheMetadata struct {
 	ETag            string              `json:"etag,omitempty"`             // ETag缓存标识
 	LastModified    string              `json:"last_modified,omitempty"`    // 最后修改时间
 	ContentType     string              `json:"content_type,omitempty"`     // Content-Type
-	LastAccess      int64               `json:"last_access,omitempty"`      // 最后访问时间 (Unix timestamp)
-	CreatedAt       int64               `json:"created_at,omitempty"`       // 创建时间 (Unix timestamp)
 }
 
 // CacheEntry 缓存条目，包含响应头和body（用于内存缓存）
@@ -39,111 +36,21 @@ type CacheEntry struct {
 
 // StaticCacheManager 管理静态文件缓存
 type StaticCacheManager struct {
-	cacheDir   string
-	extensions map[string]bool
-	mu         sync.RWMutex
-	enabled    bool
-	stopChan   chan struct{}
-
-	// Policies
-	memPolicy  ParsedCachePolicy
-	diskPolicy ParsedCachePolicy
-
-	// Memory Cache
-	memCache *LRUCache
+	cacheDir      string
+	ttl           time.Duration
+	extensions    map[string]bool
+	mu            sync.RWMutex
+	enabled       bool
+	stopChan      chan struct{}
+	memCache      sync.Map // 内存热缓存: URL -> *memCacheEntry
+	memEntryCount int64    // 当前内存缓存条目数（原子操作）
+	maxMemEntries int      // 内存缓存最大条目数
 }
 
-// ParsedCachePolicy 解析后的缓存策略
-type ParsedCachePolicy struct {
-	Alloc int64         // Max size in bytes
-	File  int64         // Max single file size in bytes
-	Count int           // Max count
-	TTL   time.Duration // Idle timeout
-	Life  time.Duration // Absolute lifetime
-}
-
-// LRUCache 简单的LRU缓存实现
-type LRUCache struct {
-	capacity  int
-	maxSize   int64
-	size      int64
-	mu        sync.Mutex
-	items     map[string]*list.Element
-	evictList *list.List
-}
-
-type lruItem struct {
-	key   string
-	value *CacheEntry
-	size  int64
-}
-
-func NewLRUCache(capacity int, maxSize int64) *LRUCache {
-	return &LRUCache{
-		capacity:  capacity,
-		maxSize:   maxSize,
-		items:     make(map[string]*list.Element),
-		evictList: list.New(),
-	}
-}
-
-func (c *LRUCache) Get(key string) (*CacheEntry, bool) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if ent, ok := c.items[key]; ok {
-		c.evictList.MoveToFront(ent)
-		return ent.Value.(*lruItem).value, true
-	}
-	return nil, false
-}
-
-func (c *LRUCache) Add(key string, value *CacheEntry) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	// Calculate size
-	itemSize := int64(len(value.Body))
-
-	// Check if update
-	if ent, ok := c.items[key]; ok {
-		c.evictList.MoveToFront(ent)
-		oldItem := ent.Value.(*lruItem)
-		c.size -= oldItem.size
-		oldItem.value = value
-		oldItem.size = itemSize
-		c.size += itemSize
-	} else {
-		ent := c.evictList.PushFront(&lruItem{key, value, itemSize})
-		c.items[key] = ent
-		c.size += itemSize
-	}
-
-	// Evict if needed (count or size)
-	for (c.capacity > 0 && c.evictList.Len() > c.capacity) || (c.maxSize > 0 && c.size > c.maxSize) {
-		c.removeOldest()
-	}
-}
-
-func (c *LRUCache) Remove(key string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if ent, ok := c.items[key]; ok {
-		c.removeElement(ent)
-	}
-}
-
-func (c *LRUCache) removeOldest() {
-	ent := c.evictList.Back()
-	if ent != nil {
-		c.removeElement(ent)
-	}
-}
-
-func (c *LRUCache) removeElement(e *list.Element) {
-	c.evictList.Remove(e)
-	kv := e.Value.(*lruItem)
-	delete(c.items, kv.key)
-	c.size -= kv.size
+// memCacheEntry 内存缓存条目（包含过期时间）
+type memCacheEntry struct {
+	entry     *CacheEntry
+	expiresAt time.Time
 }
 
 // 支持缓存的静态文件扩展名
@@ -167,10 +74,6 @@ func NewStaticCacheManager(config *StaticCacheConfig) *StaticCacheManager {
 		cacheDir = ".cache"
 	}
 
-	// Parse Policies
-	memPolicy := parsePolicy(config.Mem, true)
-	diskPolicy := parsePolicy(config.Disk, false)
-
 	// 创建缓存目录
 	if err := os.MkdirAll(cacheDir, 0755); err != nil {
 		log.Printf("[CACHE] Failed to create cache directory %s: %v", cacheDir, err)
@@ -178,6 +81,7 @@ func NewStaticCacheManager(config *StaticCacheConfig) *StaticCacheManager {
 	}
 
 	// 构建扩展名映射
+	// 如果配置了 FileType，使用配置的；否则使用默认值
 	extensions := make(map[string]bool)
 	var extList []string
 	if len(config.FileType) > 0 {
@@ -188,6 +92,7 @@ func NewStaticCacheManager(config *StaticCacheConfig) *StaticCacheManager {
 		log.Printf("[CACHE] Using default file types (%d extensions)", len(extList))
 	}
 	for _, ext := range extList {
+		// 确保扩展名以点开头
 		if !strings.HasPrefix(ext, ".") {
 			extensions["."+ext] = true
 		} else {
@@ -196,102 +101,19 @@ func NewStaticCacheManager(config *StaticCacheConfig) *StaticCacheManager {
 	}
 
 	manager := &StaticCacheManager{
-		cacheDir:   cacheDir,
-		extensions: extensions,
-		enabled:    true,
-		stopChan:   make(chan struct{}),
-		memPolicy:  memPolicy,
-		diskPolicy: diskPolicy,
-		memCache:   NewLRUCache(memPolicy.Count, memPolicy.Alloc),
+		cacheDir:      cacheDir,
+		ttl:           24 * time.Hour,
+		extensions:    extensions,
+		enabled:       true,
+		stopChan:      make(chan struct{}),
+		maxMemEntries: 1000, // 默认最多 1000 个内存缓存条目
 	}
 
 	// 启动定期清理协程
 	go manager.startCleanupRoutine()
 
-	log.Printf("[CACHE] Initialized. Dir: %s. Mem: %+v. Disk: %+v", cacheDir, memPolicy, diskPolicy)
+	log.Printf("[CACHE] Static cache manager initialized: dir=%s, ttl=%v", cacheDir, manager.ttl)
 	return manager
-}
-
-func parsePolicy(p *CachePolicy, isMem bool) ParsedCachePolicy {
-	pp := ParsedCachePolicy{}
-	if p == nil {
-		// Defaults
-		if isMem {
-			pp.TTL = 1 * time.Minute
-			pp.Life = 5 * time.Minute
-		} else {
-			pp.TTL = 24 * time.Hour
-			pp.Life = 3 * 24 * time.Hour
-		}
-		return pp
-	}
-
-	pp.Alloc, _ = parseCacheSize(p.Alloc)
-	pp.File, _ = parseCacheSize(p.File)
-	pp.Count = p.Count
-
-	var err error
-	pp.TTL, err = parseDuration(p.TTL)
-	if err != nil {
-		if isMem {
-			pp.TTL = 1 * time.Minute
-		} else {
-			pp.TTL = 24 * time.Hour
-		}
-	}
-
-	pp.Life, err = parseDuration(p.Life)
-	if err != nil {
-		if isMem {
-			pp.Life = 5 * time.Minute
-		} else {
-			pp.Life = 3 * 24 * time.Hour
-		}
-	}
-
-	return pp
-}
-
-func parseCacheSize(s string) (int64, error) {
-	s = strings.TrimSpace(strings.ToLower(s))
-	if s == "" || s == "0" {
-		return 0, nil
-	}
-
-	multiplier := int64(1)
-	if strings.HasSuffix(s, "g") || strings.HasSuffix(s, "gb") {
-		multiplier = 1024 * 1024 * 1024
-		s = strings.TrimRight(s, "gb")
-	} else if strings.HasSuffix(s, "m") || strings.HasSuffix(s, "mb") {
-		multiplier = 1024 * 1024
-		s = strings.TrimRight(s, "mb")
-	} else if strings.HasSuffix(s, "k") || strings.HasSuffix(s, "kb") {
-		multiplier = 1024
-		s = strings.TrimRight(s, "kb")
-	}
-
-	val, err := strconv.ParseInt(s, 10, 64)
-	if err != nil {
-		return 0, err
-	}
-	return val * multiplier, nil
-}
-
-func parseDuration(s string) (time.Duration, error) {
-	s = strings.TrimSpace(s)
-	if s == "" {
-		return 0, fmt.Errorf("empty duration")
-	}
-	// Support simple days 'd'
-	if strings.HasSuffix(s, "d") {
-		daysStr := strings.TrimSuffix(s, "d")
-		days, err := strconv.Atoi(daysStr)
-		if err != nil {
-			return 0, err
-		}
-		return time.Duration(days) * 24 * time.Hour, nil
-	}
-	return time.ParseDuration(s)
 }
 
 // IsEnabled 返回缓存是否启用
@@ -335,104 +157,65 @@ func (m *StaticCacheManager) Get(fullURL string) (*CacheEntry, bool) {
 		return nil, false
 	}
 
-	now := time.Now()
-
-	// 1. Check Memory Cache
-	if entry, ok := m.memCache.Get(fullURL); ok {
-		// Check TTL (Idle timeout)
-		if m.memPolicy.TTL > 0 && now.Sub(time.Unix(entry.LastAccess, 0)) > m.memPolicy.TTL {
-			m.memCache.Remove(fullURL)
-			return nil, false
+	// 优先检查内存热缓存
+	if cached, ok := m.memCache.Load(fullURL); ok {
+		memEntry := cached.(*memCacheEntry)
+		if time.Now().Before(memEntry.expiresAt) {
+			return memEntry.entry, true
 		}
-		// Check Life (Absolute timeout)
-		if m.memPolicy.Life > 0 && now.Sub(time.Unix(entry.CreatedAt, 0)) > m.memPolicy.Life {
-			m.memCache.Remove(fullURL)
-			return nil, false
-		}
-
-		// Update LastAccess
-		entry.LastAccess = now.Unix()
-		return entry, true
+		// 过期则从内存中删除
+		m.memCache.Delete(fullURL)
+		atomic.AddInt64(&m.memEntryCount, -1)
 	}
 
-	// 2. Check Disk Cache
+	// 内存未命中，从磁盘读取
 	cacheKey := m.GetCacheKey(fullURL)
 	metaPath := m.GetCacheMetaPath(cacheKey)
 	binPath := m.GetCacheBinPath(cacheKey)
 
-	// Read metadata
-	metaData, err := os.ReadFile(metaPath)
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	// 检查元数据文件是否存在
+	metaInfo, err := os.Stat(metaPath)
 	if err != nil {
 		return nil, false
 	}
 
+	// 检查是否过期
+	if time.Since(metaInfo.ModTime()) > m.ttl {
+		return nil, false
+	}
+
+	// 读取元数据
+	metaData, err := os.ReadFile(metaPath)
+	if err != nil {
+		log.Printf("[CACHE] Failed to read cache meta file %s: %v", metaPath, err)
+		return nil, false
+	}
+
+	// 反序列化元数据
 	var metadata CacheMetadata
 	if err := json.Unmarshal(metaData, &metadata); err != nil {
 		log.Printf("[CACHE] Failed to unmarshal cache metadata: %v", err)
 		return nil, false
 	}
 
-	// Check Disk Expiration
-	createdAt := time.Unix(metadata.CreatedAt, 0)
-	lastAccess := time.Unix(metadata.LastAccess, 0)
-
-	// Fallback for old cache files without CreatedAt/LastAccess
-	if metadata.CreatedAt == 0 {
-		info, err := os.Stat(metaPath)
-		if err == nil {
-			createdAt = info.ModTime()
-			lastAccess = info.ModTime()
-		}
-	}
-
-	// Check TTL
-	if m.diskPolicy.TTL > 0 && now.Sub(lastAccess) > m.diskPolicy.TTL {
-		// Lazy cleanup
-		go func() {
-			os.Remove(metaPath)
-			os.Remove(binPath)
-		}()
-		return nil, false
-	}
-
-	// Check Life
-	if m.diskPolicy.Life > 0 && now.Sub(createdAt) > m.diskPolicy.Life {
-		go func() {
-			os.Remove(metaPath)
-			os.Remove(binPath)
-		}()
-		return nil, false
-	}
-
-	// Read body
+	// 读取body内容
 	body, err := os.ReadFile(binPath)
 	if err != nil {
+		log.Printf("[CACHE] Failed to read cache bin file %s: %v", binPath, err)
 		return nil, false
 	}
 
-	// Update LastAccess on disk (throttled)
-	// Only update if more than 1 minute has passed to avoid excessive writes
-	if now.Sub(lastAccess) > 1*time.Minute {
-		metadata.LastAccess = now.Unix()
-		go func() {
-			newMeta, _ := json.Marshal(metadata)
-			os.WriteFile(metaPath, newMeta, 0644)
-		}()
-	}
-
+	// 创建完整的缓存条目
 	entry := &CacheEntry{
 		CacheMetadata: metadata,
 		Body:          body,
 	}
 
-	// Add to Memory Cache
-	// Check file size limit for memory
-	if m.memPolicy.File == 0 || int64(len(body)) <= m.memPolicy.File {
-		// Update memory specific timestamps
-		entry.LastAccess = now.Unix()
-		// Keep original CreatedAt
-		m.memCache.Add(fullURL, entry)
-	}
+	// 磁盘命中后写入内存热缓存
+	m.addToMemCache(fullURL, entry)
 
 	return entry, true
 }
@@ -598,10 +381,23 @@ func compressWithBrotli(data []byte) ([]byte, error) {
 
 // addToMemCache 添加条目到内存热缓存
 func (m *StaticCacheManager) addToMemCache(fullURL string, entry *CacheEntry) {
-	// Check file size limit for memory
-	if m.memPolicy.File == 0 || int64(len(entry.Body)) <= m.memPolicy.File {
-		m.memCache.Add(fullURL, entry)
+	// 检查是否超过最大条目数限制
+	currentCount := atomic.LoadInt64(&m.memEntryCount)
+	if currentCount >= int64(m.maxMemEntries) {
+		// 简单随机淘汰策略：删除遇到的第一个条目
+		m.memCache.Range(func(key, value interface{}) bool {
+			m.memCache.Delete(key)
+			atomic.AddInt64(&m.memEntryCount, -1)
+			return false // 只删除一个
+		})
 	}
+
+	// 存储新条目
+	m.memCache.Store(fullURL, &memCacheEntry{
+		entry:     entry,
+		expiresAt: time.Now().Add(m.ttl),
+	})
+	atomic.AddInt64(&m.memEntryCount, 1)
 }
 
 // startCleanupRoutine 启动定期清理过期缓存的协程
@@ -646,43 +442,13 @@ func (m *StaticCacheManager) cleanupExpiredFiles() {
 		}
 
 		metaPath := filepath.Join(m.cacheDir, fileName)
-
-		// Read metadata to check expiration
-		metaData, err := os.ReadFile(metaPath)
+		info, err := entry.Info()
 		if err != nil {
 			continue
 		}
 
-		var metadata CacheMetadata
-		if err := json.Unmarshal(metaData, &metadata); err != nil {
-			continue
-		}
-
-		createdAt := time.Unix(metadata.CreatedAt, 0)
-		lastAccess := time.Unix(metadata.LastAccess, 0)
-
-		// Fallback
-		if metadata.CreatedAt == 0 {
-			info, err := entry.Info()
-			if err == nil {
-				createdAt = info.ModTime()
-				lastAccess = info.ModTime()
-			}
-		}
-
-		shouldDelete := false
-
-		// Check TTL
-		if m.diskPolicy.TTL > 0 && now.Sub(lastAccess) > m.diskPolicy.TTL {
-			shouldDelete = true
-		}
-
-		// Check Life
-		if !shouldDelete && m.diskPolicy.Life > 0 && now.Sub(createdAt) > m.diskPolicy.Life {
-			shouldDelete = true
-		}
-
-		if shouldDelete {
+		// 检查文件是否过期
+		if now.Sub(info.ModTime()) > m.ttl {
 			// 删除.meta文件
 			if err := os.Remove(metaPath); err != nil {
 				log.Printf("[CACHE] Failed to delete expired meta file %s: %v", metaPath, err)
@@ -693,6 +459,7 @@ func (m *StaticCacheManager) cleanupExpiredFiles() {
 			// 删除对应的.bin文件
 			binPath := strings.TrimSuffix(metaPath, ".meta") + ".bin"
 			if err := os.Remove(binPath); err != nil {
+				// bin文件可能已经不存在，不记录错误
 				DebugLog("[CACHE] Failed to delete corresponding bin file %s: %v", binPath, err)
 			}
 		}
@@ -710,37 +477,6 @@ func (m *StaticCacheManager) Stop() {
 	}
 }
 
-// Refresh 刷新指定URL的缓存（删除）
-func (m *StaticCacheManager) Refresh(fullURL string) error {
-	if !m.enabled {
-		return nil
-	}
-
-	// 1. Remove from Memory Cache
-	m.memCache.Remove(fullURL)
-
-	// 2. Remove from Disk Cache
-	cacheKey := m.GetCacheKey(fullURL)
-	metaPath := m.GetCacheMetaPath(cacheKey)
-	binPath := m.GetCacheBinPath(cacheKey)
-
-	var errs []string
-
-	if err := os.Remove(metaPath); err != nil && !os.IsNotExist(err) {
-		errs = append(errs, fmt.Sprintf("failed to remove meta: %v", err))
-	}
-	if err := os.Remove(binPath); err != nil && !os.IsNotExist(err) {
-		errs = append(errs, fmt.Sprintf("failed to remove bin: %v", err))
-	}
-
-	if len(errs) > 0 {
-		return fmt.Errorf("cache refresh errors: %s", strings.Join(errs, "; "))
-	}
-
-	DebugLog("[CACHE] Refreshed: %s", fullURL)
-	return nil
-}
-
 // GetStats 获取缓存统计信息
 func (m *StaticCacheManager) GetStats() map[string]interface{} {
 	stats := make(map[string]interface{})
@@ -751,8 +487,7 @@ func (m *StaticCacheManager) GetStats() map[string]interface{} {
 	}
 
 	stats["cache_dir"] = m.cacheDir
-	stats["mem_policy"] = m.memPolicy
-	stats["disk_policy"] = m.diskPolicy
+	stats["ttl_seconds"] = m.ttl.Seconds()
 
 	// 统计缓存文件数量和大小
 	var totalSize int64

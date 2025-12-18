@@ -227,36 +227,49 @@ func (sc *StatsCollector) Close() {
 
 // IPStatsData holds per-IP statistics including timestamps and traffic by protocol
 type IPStatsData struct {
-	Timestamps      []time.Time
+	// Timestamps      []time.Time // Removed to save memory
+	RequestCounts   map[int64]uint32 // Key: Unix timestamp / 60 (minute bucket), Value: Request count
+	FirstSeen       time.Time
+	LastSeen        time.Time
 	TotalRequests   uint64 // Total accumulated requests
 	HTTPBytesSent   uint64
 	HTTPBytesRecv   uint64
 	RawTCPBytesSent uint64
 	RawTCPBytesRecv uint64
-	mutex           sync.Mutex // Protects Timestamps slice
+	mutex           sync.Mutex // Protects RequestCounts map
 }
 
 // recordIPRequest records a request from a specific IP address with traffic data.
-// It appends the timestamp without filtering (filtering is done periodically).
+// It increments the count in the current minute bucket.
 func (sc *StatsCollector) recordIPRequest(ip string, protocol string, bytesSent, bytesRecv uint64) {
 	if ip == "" {
 		return
 	}
 
 	now := time.Now()
+	minuteBucket := now.Unix() / 60
 
 	// Load or create the stats data for this IP
-	value, _ := sc.IPStats.LoadOrStore(ip, &IPStatsData{
-		Timestamps: make([]time.Time, 0, 100),
-	})
+	value, ok := sc.IPStats.Load(ip)
+	if !ok {
+		value, _ = sc.IPStats.LoadOrStore(ip, &IPStatsData{
+			RequestCounts: make(map[int64]uint32),
+			FirstSeen:     now,
+			LastSeen:      now,
+		})
+	}
 	data := value.(*IPStatsData)
 
 	// Increment total requests
 	atomic.AddUint64(&data.TotalRequests, 1)
 
-	// Append timestamp with mutex protection (no filtering here)
+	// Update minute bucket with mutex protection
 	data.mutex.Lock()
-	data.Timestamps = append(data.Timestamps, now)
+	data.RequestCounts[minuteBucket]++
+	data.LastSeen = now
+	if data.FirstSeen.IsZero() {
+		data.FirstSeen = now
+	}
 	data.mutex.Unlock()
 
 	// Update traffic stats by protocol
@@ -289,9 +302,9 @@ func (sc *StatsCollector) ipStatsCleanupWorker() {
 	}
 }
 
-// cleanupOldIPTimestamps removes timestamps older than 24 hours from all IP stats.
+// cleanupOldIPTimestamps removes buckets older than 24 hours from all IP stats.
 func (sc *StatsCollector) cleanupOldIPTimestamps() {
-	cutoff := time.Now().Add(-24 * time.Hour)
+	cutoffBucket := time.Now().Add(-24*time.Hour).Unix() / 60
 
 	sc.IPStats.Range(func(key, value interface{}) bool {
 		data := value.(*IPStatsData)
@@ -299,16 +312,15 @@ func (sc *StatsCollector) cleanupOldIPTimestamps() {
 		data.mutex.Lock()
 		defer data.mutex.Unlock()
 
-		// Filter out old timestamps
-		if len(data.Timestamps) > 0 {
-			filtered := make([]time.Time, 0, len(data.Timestamps))
-			for _, t := range data.Timestamps {
-				if t.After(cutoff) {
-					filtered = append(filtered, t)
-				}
+		// Filter out old buckets
+		for bucket := range data.RequestCounts {
+			if bucket < cutoffBucket {
+				delete(data.RequestCounts, bucket)
 			}
-			data.Timestamps = filtered
 		}
+
+		// If no recent activity and older than 24h, we could potentially remove the IP entry entirely
+		// But for now, just cleaning buckets is enough to save memory
 
 		return true
 	})
@@ -318,23 +330,28 @@ func (sc *StatsCollector) cleanupOldIPTimestamps() {
 func (sc *StatsCollector) GetTopIPsAsDimensionStats(limit int) map[string]*DimensionStats {
 	type ipItem struct {
 		IP   string
-		Reqs int
+		Reqs uint64
 		Data *IPStatsData
 	}
 
 	items := make([]ipItem, 0)
-	cutoff := time.Now().Add(-24 * time.Hour)
+	cutoffBucket := time.Now().Add(-24*time.Hour).Unix() / 60
 
 	sc.IPStats.Range(func(key, value interface{}) bool {
 		ip := key.(string)
 		data := value.(*IPStatsData)
 
-		// Quick check for activity in last 24h
-		if len(data.Timestamps) > 0 {
-			last := data.Timestamps[len(data.Timestamps)-1]
-			if last.After(cutoff) {
-				items = append(items, ipItem{IP: ip, Reqs: len(data.Timestamps), Data: data})
+		data.mutex.Lock()
+		var recentReqs uint64
+		for bucket, count := range data.RequestCounts {
+			if bucket >= cutoffBucket {
+				recentReqs += uint64(count)
 			}
+		}
+		data.mutex.Unlock()
+
+		if recentReqs > 0 {
+			items = append(items, ipItem{IP: ip, Reqs: recentReqs, Data: data})
 		}
 		return true
 	})
@@ -353,7 +370,7 @@ func (sc *StatsCollector) GetTopIPsAsDimensionStats(limit int) map[string]*Dimen
 	for _, item := range items {
 		d := item.Data
 		result[item.IP] = &DimensionStats{
-			Requests:        atomic.LoadUint64(&d.TotalRequests),
+			Requests:        item.Reqs, // Use calculated recent requests
 			HTTPBytesSent:   atomic.LoadUint64(&d.HTTPBytesSent),
 			HTTPBytesRecv:   atomic.LoadUint64(&d.HTTPBytesRecv),
 			RawTCPBytesSent: atomic.LoadUint64(&d.RawTCPBytesSent),
@@ -380,34 +397,35 @@ type IPRequestStats struct {
 
 // GetIPStats returns IP request statistics for the past 24 hours, sorted by request count (descending).
 func (sc *StatsCollector) GetIPStats() []IPRequestStats {
-	cutoff := time.Now().Add(-24 * time.Hour)
+	cutoffBucket := time.Now().Add(-24*time.Hour).Unix() / 60
 	stats := make([]IPRequestStats, 0)
 
 	sc.IPStats.Range(func(key, value interface{}) bool {
 		ip := key.(string)
 		ipData := value.(*IPStatsData)
 
-		// Filter timestamps within 24 hours
 		ipData.mutex.Lock()
-		recent := make([]time.Time, 0)
-		for _, t := range ipData.Timestamps {
-			if t.After(cutoff) {
-				recent = append(recent, t)
+		var recentReqs int
+		for bucket, count := range ipData.RequestCounts {
+			if bucket >= cutoffBucket {
+				recentReqs += int(count)
 			}
 		}
+		firstSeen := ipData.FirstSeen
+		lastSeen := ipData.LastSeen
 		ipData.mutex.Unlock()
 
 		// Only include IPs with requests in the past 24 hours
-		if len(recent) > 0 {
+		if recentReqs > 0 {
 			stats = append(stats, IPRequestStats{
 				IP:              ip,
-				Requests:        len(recent),
+				Requests:        recentReqs,
 				HTTPBytesSent:   atomic.LoadUint64(&ipData.HTTPBytesSent),
 				HTTPBytesRecv:   atomic.LoadUint64(&ipData.HTTPBytesRecv),
 				RawTCPBytesSent: atomic.LoadUint64(&ipData.RawTCPBytesSent),
 				RawTCPBytesRecv: atomic.LoadUint64(&ipData.RawTCPBytesRecv),
-				FirstSeen:       recent[0],
-				LastSeen:        recent[len(recent)-1],
+				FirstSeen:       firstSeen,
+				LastSeen:        lastSeen,
 			})
 		}
 

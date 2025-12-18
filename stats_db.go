@@ -186,19 +186,18 @@ func (s *StatsDB) AddSnapshot(snapshot TimeSeriesSnapshot) error {
 	return tx.Commit()
 }
 
-// GetGlobalTimeSeries retrieves global stats for the last 24 hours.
-func (s *StatsDB) GetGlobalTimeSeries() ([]map[string]interface{}, error) {
+// IterateGlobalTimeSeries iterates over global stats for the last 24 hours.
+func (s *StatsDB) IterateGlobalTimeSeries(callback func(map[string]interface{}) error) error {
 	rows, err := s.db.Query(`
 		SELECT timestamp, total_requests, active_connections, requests_per_second, bytes_received, bytes_sent
 		FROM snapshots
 		ORDER BY timestamp ASC
 	`)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer rows.Close()
 
-	var result []map[string]interface{}
 	for rows.Next() {
 		var ts int64
 		var totalReq uint64
@@ -206,22 +205,36 @@ func (s *StatsDB) GetGlobalTimeSeries() ([]map[string]interface{}, error) {
 		var qps float64
 		var bytesRecv, bytesSent uint64
 		if err := rows.Scan(&ts, &totalReq, &activeConn, &qps, &bytesRecv, &bytesSent); err != nil {
-			return nil, err
+			return err
 		}
-		result = append(result, map[string]interface{}{
+		record := map[string]interface{}{
 			"timestamp":         ts,
 			"totalRequests":     totalReq,
 			"activeConnections": activeConn,
 			"requestsPerSecond": qps,
 			"bytesReceived":     bytesRecv,
 			"bytesSent":         bytesSent,
-		})
+		}
+		if err := callback(record); err != nil {
+			return err
+		}
 	}
-	return result, nil
+	return nil
 }
 
-// GetDimensionTimeSeries retrieves stats for a specific dimension key.
-func (s *StatsDB) GetDimensionTimeSeries(dimType, key string) ([]map[string]interface{}, error) {
+// GetGlobalTimeSeries retrieves global stats for the last 24 hours.
+// Deprecated: Use IterateGlobalTimeSeries for large datasets.
+func (s *StatsDB) GetGlobalTimeSeries() ([]map[string]interface{}, error) {
+	var result []map[string]interface{}
+	err := s.IterateGlobalTimeSeries(func(record map[string]interface{}) error {
+		result = append(result, record)
+		return nil
+	})
+	return result, err
+}
+
+// IterateDimensionTimeSeries iterates over stats for a specific dimension key.
+func (s *StatsDB) IterateDimensionTimeSeries(dimType, key string, callback func(map[string]interface{}) error) error {
 	rows, err := s.db.Query(`
 		SELECT s.timestamp, d.requests, d.bytes_recv, d.bytes_sent, d.errors, d.avg_resp_time,
 		       d.http_bytes_sent, d.http_bytes_recv, d.raw_tcp_bytes_sent, d.raw_tcp_bytes_recv
@@ -231,11 +244,10 @@ func (s *StatsDB) GetDimensionTimeSeries(dimType, key string) ([]map[string]inte
 		ORDER BY s.timestamp ASC
 	`, dimType, key)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer rows.Close()
 
-	var result []map[string]interface{}
 	for rows.Next() {
 		var ts int64
 		var reqs, bRecv, bSent, errs uint64
@@ -243,9 +255,9 @@ func (s *StatsDB) GetDimensionTimeSeries(dimType, key string) ([]map[string]inte
 		var hBSent, hBRecv, rBSent, rBRecv uint64
 
 		if err := rows.Scan(&ts, &reqs, &bRecv, &bSent, &errs, &avgResp, &hBSent, &hBRecv, &rBSent, &rBRecv); err != nil {
-			return nil, err
+			return err
 		}
-		result = append(result, map[string]interface{}{
+		record := map[string]interface{}{
 			"timestamp":       ts,
 			"requests":        reqs,
 			"bytesRecv":       bRecv,
@@ -256,9 +268,23 @@ func (s *StatsDB) GetDimensionTimeSeries(dimType, key string) ([]map[string]inte
 			"httpBytesRecv":   hBRecv,
 			"rawTcpBytesSent": rBSent,
 			"rawTcpBytesRecv": rBRecv,
-		})
+		}
+		if err := callback(record); err != nil {
+			return err
+		}
 	}
-	return result, nil
+	return nil
+}
+
+// GetDimensionTimeSeries retrieves stats for a specific dimension key.
+// Deprecated: Use IterateDimensionTimeSeries for large datasets.
+func (s *StatsDB) GetDimensionTimeSeries(dimType, key string) ([]map[string]interface{}, error) {
+	var result []map[string]interface{}
+	err := s.IterateDimensionTimeSeries(dimType, key, func(record map[string]interface{}) error {
+		result = append(result, record)
+		return nil
+	})
+	return result, err
 }
 
 // SaveQuotaUsage saves or updates a quota usage entry in the database.

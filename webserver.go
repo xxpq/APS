@@ -115,11 +115,10 @@ type AdminHandlers struct {
 	statsDB        *StatsDB
 	loggingDB      *LoggingDB
 	logBroadcaster *LogBroadcaster
-	staticCache    *StaticCacheManager
 }
 
 // NewAdminHandlers creates a new AdminHandlers instance.
-func NewAdminHandlers(config *Config, configPath string, statsCollector *StatsCollector, statsDB *StatsDB, loggingDB *LoggingDB, logBroadcaster *LogBroadcaster, staticCache *StaticCacheManager) *AdminHandlers {
+func NewAdminHandlers(config *Config, configPath string, statsCollector *StatsCollector, statsDB *StatsDB, loggingDB *LoggingDB, logBroadcaster *LogBroadcaster) *AdminHandlers {
 	return &AdminHandlers{
 		config:         config,
 		configPath:     configPath,
@@ -128,7 +127,6 @@ func NewAdminHandlers(config *Config, configPath string, statsCollector *StatsCo
 		statsDB:        statsDB,
 		loggingDB:      loggingDB,
 		logBroadcaster: logBroadcaster,
-		staticCache:    staticCache,
 	}
 }
 
@@ -155,8 +153,6 @@ func (h *AdminHandlers) RegisterHandlers(mux *http.ServeMux) {
 	mux.HandleFunc("/.api/auth_providers", h.handleAuthProviders)
 	mux.HandleFunc("/.api/log", h.handleLogs)
 	mux.HandleFunc("/.api/act", h.handleAct)
-	mux.HandleFunc("/.api/cache/config", h.handleCacheConfig)
-	mux.HandleFunc("/.api/cache/refresh", h.handleCacheRefresh)
 	mux.HandleFunc("/.api/stats/timeseries", h.handleTimeSeriesStats)
 	mux.HandleFunc("/.api/stats/ip", func(w http.ResponseWriter, r *http.Request) {
 		// Admin authentication check

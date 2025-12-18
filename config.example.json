@@ -105,21 +105,7 @@
     }
   },
   "static_cache": {
-    "enabled": true,
-    "mem": {
-      "alloc": "2g",
-      "file": "10m",
-      "count": 100,
-      "ttl": "1m",
-      "life": "5m"
-    },
-    "disk": {
-      "alloc": "2g",
-      "file": "10m",
-      "count": 100,
-      "ttl": "24h",
-      "life": "3d"
-    }
+    "enabled": true
   },
   "firewalls": {
     "allow_specific_regions": {

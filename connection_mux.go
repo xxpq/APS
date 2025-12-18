@@ -34,7 +34,7 @@ func NewPeekConn(conn net.Conn) *PeekConn {
 
 // Close returns the bufio.Reader to the pool and closes the underlying connection
 func (c *PeekConn) Close() error {
-	// PutBufioReader(c.reader) // Unsafe to recycle as Read might be concurrent
+	PutBufioReader(c.reader)
 	return c.Conn.Close()
 }
 
