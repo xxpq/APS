@@ -34,17 +34,26 @@ func NewPeekConn(conn net.Conn) *PeekConn {
 
 // Close returns the bufio.Reader to the pool and closes the underlying connection
 func (c *PeekConn) Close() error {
-	PutBufioReader(c.reader)
+	if c.reader != nil {
+		PutBufioReader(c.reader)
+		c.reader = nil
+	}
 	return c.Conn.Close()
 }
 
 // Read reads from the buffered reader
 func (c *PeekConn) Read(b []byte) (int, error) {
+	if c.reader == nil {
+		return 0, io.EOF
+	}
 	return c.reader.Read(b)
 }
 
 // Peek returns the next n bytes without advancing the reader
 func (c *PeekConn) Peek(n int) ([]byte, error) {
+	if c.reader == nil {
+		return nil, io.EOF
+	}
 	return c.reader.Peek(n)
 }
 

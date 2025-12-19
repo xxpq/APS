@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -34,7 +35,17 @@ func (p *MapRemoteProxy) handleWebSocket(w http.ResponseWriter, r *http.Request)
 	)
 
 	originalURL := p.buildOriginalURL(r)
-	DebugLog("[WS] Handling WebSocket request for %s", originalURL)
+
+	// Calculate log prefix with IP and location
+	clientIP := r.RemoteAddr
+	host, _, err := net.SplitHostPort(clientIP)
+	if err != nil {
+		host = clientIP
+	}
+	locationTag := formatLocationTagHTTP(clientIP)
+	logPrefix := fmt.Sprintf("[%s]%s", host, locationTag)
+
+	// log.Printf("%s[WS] Starting WebSocket request for %s", logPrefix, originalURL)
 
 	// Defer the consolidated stats recording
 	defer func() {
@@ -55,6 +66,8 @@ func (p *MapRemoteProxy) handleWebSocket(w http.ResponseWriter, r *http.Request)
 			StatusCode:   101,    // WebSocket upgrade status code
 			ClientIP:     getClientIP(r),
 		})
+		log.Printf("%s[WS] WebSocket request finished for %s. Duration: %v, Sent: %d, Recv: %d, Error: %v",
+			logPrefix, originalURL, responseTime, bytesSent, bytesRecv, isError)
 	}()
 
 	// Auth check
@@ -67,10 +80,12 @@ func (p *MapRemoteProxy) handleWebSocket(w http.ResponseWriter, r *http.Request)
 	targetURL, matched, mapping, matchedFromURL := p.mapRequest(r)
 	if !matched {
 		isError = true
-		log.Printf("[WS] No mapping found for %s", originalURL)
+		log.Printf("%s[WS] No mapping found for %s", logPrefix, originalURL)
 		http.Error(w, "No mapping found for WebSocket request", http.StatusBadGateway)
 		return
 	}
+	// Log in the requested format: [IP][Location][WS] Source -> Target (MAPPED)
+	log.Printf("%s[WS] %s -> %s (MAPPED)", logPrefix, originalURL, targetURL)
 
 	// Populate keys for stats
 	if mapping != nil {
@@ -96,17 +111,7 @@ func (p *MapRemoteProxy) handleWebSocket(w http.ResponseWriter, r *http.Request)
 	} else if targetWsURL.Scheme == "http" {
 		targetWsURL.Scheme = "ws"
 	}
-
-	// Upgrade the client connection using the global upgrader from utils.go
-	clientConn, err := upgrader.Upgrade(w, r, nil)
-	if err != nil {
-		isError = true
-		log.Printf("[WS] Failed to upgrade client connection: %v", err)
-		return
-	}
-	defer clientConn.Close()
-
-	DebugLog("[WS] Client connection upgraded for %s", originalURL)
+	DebugLog("%s[WS] Target WebSocket URL: %s", logPrefix, targetWsURL.String())
 
 	// Check if we need to route through tunnel
 	var tunnelName, endpointName string
@@ -123,32 +128,34 @@ func (p *MapRemoteProxy) handleWebSocket(w http.ResponseWriter, r *http.Request)
 		if !ok {
 			isError = true
 			log.Printf("[WS] Endpoint '%s' not found in any active tunnel", randomEndpoint)
+			http.Error(w, "Endpoint not found", http.StatusBadGateway)
 			return
 		}
 		tunnelName = foundTunnel
 		endpointName = randomEndpoint
 		tunnelKey = tunnelName
-		DebugLog("[WS] Will route WebSocket through tunnel '%s' to endpoint '%s'", tunnelName, endpointName)
+		DebugLog("%s[WS] Will route WebSocket through tunnel '%s' to endpoint '%s'", logPrefix, tunnelName, endpointName)
 	} else if mapping != nil && len(mapping.tunnelNames) > 0 {
 		isTunnelRequest = true
 		foundTunnel, foundEndpoint, err := p.tunnelManager.GetRandomEndpointFromTunnels(mapping.tunnelNames)
 		if err != nil {
 			isError = true
-			log.Printf("[WS] %v", err)
+			log.Printf("%s[WS] %v", logPrefix, err)
+			http.Error(w, "Tunnel error", http.StatusBadGateway)
 			return
 		}
 
 		tunnelName = foundTunnel
 		endpointName = foundEndpoint
 		tunnelKey = tunnelName
-		DebugLog("[WS] Will route WebSocket through tunnel '%s' to endpoint '%s'", tunnelName, endpointName)
+		DebugLog("%s[WS] Will route WebSocket through tunnel '%s' to endpoint '%s'", logPrefix, tunnelName, endpointName)
 	}
 
 	var serverConn *websocket.Conn
 
 	if isTunnelRequest {
 		// Route WebSocket through tunnel using TCP proxy
-		DebugLog("[WS] Routing WebSocket to %s through tunnel", targetWsURL.String())
+		DebugLog("%s[WS] Routing WebSocket to %s through tunnel", logPrefix, targetWsURL.String())
 
 		// Determine host and port
 		host := targetWsURL.Hostname()
@@ -169,22 +176,27 @@ func (p *MapRemoteProxy) handleWebSocket(w http.ResponseWriter, r *http.Request)
 		// We need to use net.Pipe() to create an in-memory connection
 		clientSide, serverSide := newWebSocketProxyPipe()
 
+		// Wrap clientSide with logging to debug handshake issues
+		clientSide = loggingConn{Conn: clientSide, name: "ClientSide"}
+
 		// Start the proxy connection through tunnel
 		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 		defer cancel()
 
 		// Get client IP for security audit logging
 		clientIP := r.RemoteAddr
+		DebugLog("%s[WS] Sending ProxyConnect to tunnel %s for %s:%d (TLS=%v)", logPrefix, tunnelName, host, port, useTLS)
 		_, err = p.tunnelManager.SendProxyConnect(ctx, tunnelName, endpointName, host, port, useTLS, serverSide, clientIP)
 		if err != nil {
 			isError = true
-			log.Printf("[WS] Failed to establish proxy connection through tunnel: %v", err)
+			log.Printf("%s[WS] Failed to establish proxy connection through tunnel: %v", logPrefix, err)
 			clientSide.Close()
 			serverSide.Close()
+			http.Error(w, "Failed to establish tunnel connection", http.StatusBadGateway)
 			return
 		}
 
-		DebugLog("[WS] Proxy connection established through tunnel to %s:%d (APS handles TLS: %v)", host, port, useTLS)
+		DebugLog("%s[WS] Proxy connection established through tunnel to %s:%d", logPrefix, host, port)
 
 		// Now we need to perform WebSocket handshake over the proxy connection
 		// Build the WebSocket handshake request
@@ -201,6 +213,7 @@ func (p *MapRemoteProxy) handleWebSocket(w http.ResponseWriter, r *http.Request)
 			NetDial: func(network, addr string) (net.Conn, error) {
 				return clientSide, nil
 			},
+			HandshakeTimeout: 15 * time.Second, // Add timeout
 		}
 		// Only add TLSClientConfig for wss:// connections
 		// IMPORTANT: ServerName strategy:
@@ -235,42 +248,72 @@ func (p *MapRemoteProxy) handleWebSocket(w http.ResponseWriter, r *http.Request)
 				InsecureSkipVerify: insecureMode,
 				ServerName:         serverName,
 			}
-			DebugLog("[WS] TLS config: ServerName=%s, InsecureSkipVerify=%v (original: %s, target: %s)",
-				serverName, insecureMode, r.Host, host)
+			DebugLog("%s[WS] TLS config: ServerName=%s, InsecureSkipVerify=%v", logPrefix, serverName, insecureMode)
 		}
 
-		// DON'T copy all headers from original request - especially NOT the Host header!
-		// The original Host is for the proxy (vps.sucdri.p-q.co) but target is different (10.1.105.33)
-		// Only copy relevant headers like Authorization, Cookie, etc.
+		// Copy relevant headers from original request
 		serverHeader := http.Header{}
-		// Only copy headers that should be forwarded
-		if auth := r.Header.Get("Authorization"); auth != "" {
-			serverHeader.Set("Authorization", auth)
-		}
-		if cookie := r.Header.Get("Cookie"); cookie != "" {
-			serverHeader.Set("Cookie", cookie)
-		}
-		// Set Origin header to match target - ESXi may check this for CSRF protection
-		targetOrigin := fmt.Sprintf("%s://%s", targetWsURL.Scheme, targetWsURL.Host)
-		// Convert wss to https for Origin header
-		if targetWsURL.Scheme == "wss" {
-			targetOrigin = fmt.Sprintf("https://%s", targetWsURL.Host)
-		} else if targetWsURL.Scheme == "ws" {
-			targetOrigin = fmt.Sprintf("http://%s", targetWsURL.Host)
-		}
-		serverHeader.Set("Origin", targetOrigin)
 
-		DebugLog("[WS] Dialing target with URL: %s, Origin: %s (original Host: %s)", targetWsURL.String(), targetOrigin, r.Host)
+		// Headers to forward
+		headersToForward := []string{
+			"Authorization",
+			"Cookie",
+			"Origin",
+			"Sec-WebSocket-Protocol",
+			// "Sec-WebSocket-Extensions", // Handled by Dialer, duplicate not allowed
+			"User-Agent",
+			"Accept-Language",
+			"Accept-Encoding",
+			"Cache-Control",
+			"Pragma",
+		}
+
+		for _, h := range headersToForward {
+			if val := r.Header.Get(h); val != "" {
+				serverHeader.Set(h, val)
+			}
+		}
+
+		// If Origin is missing (e.g. non-browser client), construct one or leave empty?
+		// Browser always sends Origin. Postman might not?
+		// If we don't have Origin, we might want to synthesize it like before,
+		// but if we have it, we should definitely use the original one to pass CORS checks if they check against the public domain.
+		if serverHeader.Get("Origin") == "" {
+			targetOrigin := fmt.Sprintf("%s://%s", targetWsURL.Scheme, targetWsURL.Host)
+			if targetWsURL.Scheme == "wss" {
+				targetOrigin = fmt.Sprintf("https://%s", targetWsURL.Host)
+			} else if targetWsURL.Scheme == "ws" {
+				targetOrigin = fmt.Sprintf("http://%s", targetWsURL.Host)
+			}
+			serverHeader.Set("Origin", targetOrigin)
+		}
+
+		// IMPORTANT: Set Host header to original host if available
+		// This preserves the SNI/VirtualHost expectation of the backend
+		if r.Host != "" {
+			serverHeader.Set("Host", r.Host)
+		}
+
+		DebugLog("%s[WS] Dialing backend WebSocket: %s", logPrefix, targetWsURL.String())
+		for k, v := range serverHeader {
+			DebugLog("%s[WS] Header %s: %s", logPrefix, k, v)
+		}
 
 		serverConn, _, err = dialer.Dial(targetWsURL.String(), serverHeader)
 		if err != nil {
 			isError = true
-			log.Printf("[WS] Failed to complete WebSocket handshake through tunnel: %v", err)
+			log.Printf("%s[WS] Failed to complete WebSocket handshake through tunnel: %v", logPrefix, err)
 			clientSide.Close()
+			http.Error(w, "Failed to connect to backend", http.StatusBadGateway)
 			return
 		}
 
-		DebugLog("[WS] WebSocket connection established through tunnel to %s", targetWsURL.String())
+		DebugLog("%s[WS] WebSocket handshake with backend successful", logPrefix)
+
+		// Capture negotiated subprotocol
+		negotiatedProtocol := serverConn.Subprotocol()
+		DebugLog("%s[WS] Negotiated subprotocol: %s", logPrefix, negotiatedProtocol)
+
 	} else {
 		// Direct connection (original behavior)
 		serverHeader := http.Header{}
@@ -287,16 +330,43 @@ func (p *MapRemoteProxy) handleWebSocket(w http.ResponseWriter, r *http.Request)
 			}
 		}
 
+		DebugLog("%s[WS] Dialing backend WebSocket directly: %s", logPrefix, targetWsURL.String())
 		serverConn, _, err = dialer.Dial(targetWsURL.String(), serverHeader)
 		if err != nil {
 			isError = true
-			log.Printf("[WS] Failed to dial server %s: %v", targetWsURL.String(), err)
+			log.Printf("%s[WS] Failed to dial server %s: %v", logPrefix, targetWsURL.String(), err)
+			http.Error(w, "Failed to connect to backend", http.StatusBadGateway)
 			return
 		}
+
+		// Capture negotiated subprotocol for direct connection too
+		negotiatedProtocol := serverConn.Subprotocol()
+		DebugLog("%s[WS] Negotiated subprotocol (direct): %s", logPrefix, negotiatedProtocol)
+
+		// We need to pass this to upgrader, but we need a variable accessible outside if/else
+		// Refactoring to declare upgradeHeader outside
 	}
 	defer serverConn.Close()
 
-	DebugLog("[WS] Connection established to backend %s", targetWsURL.String())
+	DebugLog("%s[WS] Backend connection established. Upgrading client connection...", logPrefix)
+
+	// Prepare upgrade headers
+	upgradeHeader := http.Header{}
+	if serverConn.Subprotocol() != "" {
+		upgradeHeader.Set("Sec-WebSocket-Protocol", serverConn.Subprotocol())
+	}
+
+	// Upgrade the client connection using the global upgrader from utils.go
+	// We do this AFTER establishing the backend connection to ensure we don't upgrade if backend is unavailable
+	clientConn, err := upgrader.Upgrade(w, r, upgradeHeader)
+	if err != nil {
+		isError = true
+		log.Printf("%s[WS] Failed to upgrade client connection: %v", logPrefix, err)
+		return
+	}
+	defer clientConn.Close()
+
+	DebugLog("%s[WS] Client connection upgraded. Starting proxy loops...", logPrefix)
 
 	var wsConfig *WebSocketConfig
 	if mapping != nil {
@@ -316,7 +386,9 @@ func (p *MapRemoteProxy) handleWebSocket(w http.ResponseWriter, r *http.Request)
 		if wsConfig != nil {
 			rules = wsConfig.InterceptClientMessages
 		}
+		DebugLog("%s[WS] Starting Client->Server loop", logPrefix)
 		n := proxyWebSocketMessages(clientConn, serverConn, "C->S", rules)
+		DebugLog("%s[WS] Client->Server loop finished. Bytes: %d", logPrefix, n)
 		atomic.AddUint64(&bytesRecv, n)
 	}()
 
@@ -327,12 +399,14 @@ func (p *MapRemoteProxy) handleWebSocket(w http.ResponseWriter, r *http.Request)
 		if wsConfig != nil {
 			rules = wsConfig.InterceptServerMessages
 		}
+		DebugLog("%s[WS] Starting Server->Client loop", logPrefix)
 		n := proxyWebSocketMessages(serverConn, clientConn, "S->C", rules)
+		DebugLog("%s[WS] Server->Client loop finished. Bytes: %d", logPrefix, n)
 		atomic.AddUint64(&bytesSent, n)
 	}()
 
 	wg.Wait()
-	DebugLog("[WS] Connection closed for %s", originalURL)
+	DebugLog("%s[WS] Connection closed for %s", logPrefix, originalURL)
 }
 
 // proxyWebSocketMessages reads messages from the source, processes them, and writes to the destination.
@@ -342,9 +416,8 @@ func proxyWebSocketMessages(src, dest *websocket.Conn, direction string, rules [
 	for {
 		msgType, msg, err := src.ReadMessage()
 		if err != nil {
-			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-				log.Printf("[WS] %s: Error reading message: %v", direction, err)
-			}
+			// Log ALL errors for debugging
+			DebugLog("[WS] %s: Error reading message: %v", direction, err)
 			break
 		}
 
@@ -355,7 +428,7 @@ func proxyWebSocketMessages(src, dest *websocket.Conn, direction string, rules [
 
 		err = dest.WriteMessage(msgType, processedMsg)
 		if err != nil {
-			log.Printf("[WS] %s: Error writing message: %v", direction, err)
+			DebugLog("[WS] %s: Error writing message: %v", direction, err)
 			break
 		}
 		bytesTransferred += uint64(len(processedMsg))
@@ -410,8 +483,69 @@ func processWebSocketMessage(msg []byte, direction string, rules []WebSocketMess
 	return modifiedMsg, drop
 }
 
-// newWebSocketProxyPipe creates a bidirectional in-memory connection pair
+// loggingConn wraps a net.Conn to log Read/Write operations
+type loggingConn struct {
+	net.Conn
+	name string
+}
+
+func (c loggingConn) Read(b []byte) (int, error) {
+	n, err := c.Conn.Read(b)
+	if n > 0 {
+		// Log first few bytes to identify packet type (TLS record, HTTP, etc)
+		prefix := ""
+		if n > 0 {
+			prefix = fmt.Sprintf("[%x]", b[0])
+		}
+		DebugLog("[WS] %s: Read %d bytes %s", c.name, n, prefix)
+	}
+	if err != nil && err != io.EOF {
+		DebugLog("[WS] %s: Read error: %v", c.name, err)
+	}
+	return n, err
+}
+
+func (c loggingConn) Write(b []byte) (int, error) {
+	DebugLog("[WS] %s: Writing %d bytes", c.name, len(b))
+	return c.Conn.Write(b)
+}
+
+// newWebSocketProxyPipe creates a bidirectional connection pair
 // for WebSocket proxy through tunnel. Returns clientSide and serverSide connections.
+// We use a local TCP loopback instead of net.Pipe() because net.Pipe() is synchronous
+// and unbuffered, which causes deadlocks with crypto/tls handshakes that expect buffering.
 func newWebSocketProxyPipe() (net.Conn, net.Conn) {
-	return net.Pipe()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		log.Printf("[WS] Failed to create loopback listener: %v", err)
+		return net.Pipe() // Fallback
+	}
+
+	type connRes struct {
+		c net.Conn
+		e error
+	}
+	ch := make(chan connRes)
+
+	go func() {
+		c, e := listener.Accept()
+		ch <- connRes{c, e}
+	}()
+
+	client, err := net.Dial("tcp", listener.Addr().String())
+	if err != nil {
+		listener.Close()
+		log.Printf("[WS] Failed to dial loopback: %v", err)
+		return net.Pipe()
+	}
+
+	res := <-ch
+	listener.Close()
+	if res.e != nil {
+		client.Close()
+		log.Printf("[WS] Failed to accept loopback: %v", res.e)
+		return net.Pipe()
+	}
+
+	return client, res.c
 }
