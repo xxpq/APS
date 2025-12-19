@@ -24,20 +24,16 @@ type PeekConn struct {
 	reader *bufio.Reader
 }
 
-// NewPeekConn wraps a connection with peek capability using pooled bufio.Reader
+// NewPeekConn wraps a connection with peek capability
 func NewPeekConn(conn net.Conn) *PeekConn {
 	return &PeekConn{
 		Conn:   conn,
-		reader: GetBufioReader(conn),
+		reader: bufio.NewReader(conn),
 	}
 }
 
-// Close returns the bufio.Reader to the pool and closes the underlying connection
+// Close closes the underlying connection
 func (c *PeekConn) Close() error {
-	if c.reader != nil {
-		PutBufioReader(c.reader)
-		c.reader = nil
-	}
 	return c.Conn.Close()
 }
 
