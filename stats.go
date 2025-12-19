@@ -236,6 +236,8 @@ type IPStatsData struct {
 	HTTPBytesRecv   uint64
 	RawTCPBytesSent uint64
 	RawTCPBytesRecv uint64
+	RawUDPBytesSent uint64
+	RawUDPBytesRecv uint64
 	mutex           sync.Mutex // Protects RequestCounts map
 }
 
@@ -279,6 +281,9 @@ func (sc *StatsCollector) recordIPRequest(ip string, protocol string, bytesSent,
 	} else if protocol == "rawtcp" {
 		atomic.AddUint64(&data.RawTCPBytesSent, bytesSent)
 		atomic.AddUint64(&data.RawTCPBytesRecv, bytesRecv)
+	} else if protocol == "rawudp" {
+		atomic.AddUint64(&data.RawUDPBytesSent, bytesSent)
+		atomic.AddUint64(&data.RawUDPBytesRecv, bytesRecv)
 	}
 }
 
@@ -391,6 +396,8 @@ type IPRequestStats struct {
 	HTTPBytesRecv   uint64    `json:"httpBytesRecv"`
 	RawTCPBytesSent uint64    `json:"rawTcpBytesSent"`
 	RawTCPBytesRecv uint64    `json:"rawTcpBytesRecv"`
+	RawUDPBytesSent uint64    `json:"rawUdpBytesSent"`
+	RawUDPBytesRecv uint64    `json:"rawUdpBytesRecv"`
 	FirstSeen       time.Time `json:"firstSeen"`
 	LastSeen        time.Time `json:"lastSeen"`
 }
@@ -424,6 +431,8 @@ func (sc *StatsCollector) GetIPStats() []IPRequestStats {
 				HTTPBytesRecv:   atomic.LoadUint64(&ipData.HTTPBytesRecv),
 				RawTCPBytesSent: atomic.LoadUint64(&ipData.RawTCPBytesSent),
 				RawTCPBytesRecv: atomic.LoadUint64(&ipData.RawTCPBytesRecv),
+				RawUDPBytesSent: atomic.LoadUint64(&ipData.RawUDPBytesSent),
+				RawUDPBytesRecv: atomic.LoadUint64(&ipData.RawUDPBytesRecv),
 				FirstSeen:       firstSeen,
 				LastSeen:        lastSeen,
 			})
@@ -604,6 +613,8 @@ type PublicMetrics struct {
 	HTTPBytesRecv   uint64 `json:"httpBytesRecv"`
 	RawTCPBytesSent uint64 `json:"rawTcpBytesSent"`
 	RawTCPBytesRecv uint64 `json:"rawTcpBytesRecv"`
+	RawUDPBytesSent uint64 `json:"rawUdpBytesSent"`
+	RawUDPBytesRecv uint64 `json:"rawUdpBytesRecv"`
 
 	ResponseTime PublicTimeMetric `json:"responseTime"`
 	QPS          PublicQPSMetric  `json:"qps"`

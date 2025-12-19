@@ -149,9 +149,36 @@ func (p *MapRemoteProxy) calculateMatchScore(mapping *Mapping, r *http.Request, 
 		return -1, "", ""
 	}
 
-	for _, fromURL := range fromConfig.URLs {
-		// Base URL match
-		matched, newURL := p.matchAndReplace(originalURL, fromURL, mapping.GetToURL())
+	// Pre-parse original URL once
+	parsedOriginalURL, err := url.Parse(originalURL)
+	if err != nil {
+		return -1, "", ""
+	}
+
+	for i, fromURL := range fromConfig.URLs {
+		var parsedFromURL *url.URL
+		if i < len(fromConfig.ParsedURLs) {
+			parsedFromURL = fromConfig.ParsedURLs[i]
+		} else {
+			// Fallback if not pre-parsed (shouldn't happen if config loaded correctly)
+			parsedFromURL, _ = url.Parse(fromURL)
+		}
+
+		toURL := mapping.GetToURL()
+
+		// Fast path: Skip matchAndReplace if from and to URLs are identical
+		// This is common for simple proxying where no URL transformation is needed
+		var matched bool
+		var newURL string
+
+		if fromURL == toURL {
+			// No URL transformation needed, just check if the URL matches the pattern
+			matched, newURL = p.simpleMatch(parsedOriginalURL, parsedFromURL, originalURL, fromURL)
+		} else {
+			// Full match and replace logic
+			matched, newURL = p.matchAndReplace(parsedOriginalURL, parsedFromURL, originalURL, fromURL, toURL)
+		}
+
 		if !matched {
 			continue
 		}
@@ -160,9 +187,8 @@ func (p *MapRemoteProxy) calculateMatchScore(mapping *Mapping, r *http.Request, 
 
 		// Path specificity scoring: longer path prefixes get higher priority
 		// This ensures /shlq/* matches before /* for the same URL
-		parsedFrom, err := url.Parse(fromURL)
-		if err == nil && strings.HasSuffix(parsedFrom.Path, "*") {
-			fromPathPrefix := strings.TrimSuffix(parsedFrom.Path, "*")
+		if parsedFromURL != nil && strings.HasSuffix(parsedFromURL.Path, "*") {
+			fromPathPrefix := strings.TrimSuffix(parsedFromURL.Path, "*")
 			if fromPathPrefix != "" && fromPathPrefix != "/" {
 				// Award points based on the length of the path prefix
 				// Longer prefixes = more specific matches (e.g., /shlq/ vs /)
@@ -246,23 +272,29 @@ func (p *MapRemoteProxy) calculateMatchScore(mapping *Mapping, r *http.Request, 
 	return -1, "", ""
 }
 
-func (p *MapRemoteProxy) matchAndReplace(originalURL, fromPattern, toPattern string) (bool, string) {
+func (p *MapRemoteProxy) matchAndReplace(parsedOriginal *url.URL, parsedFrom *url.URL, originalURL, fromPattern, toPattern string) (bool, string) {
 	DebugLog("[DEBUG] Trying to match: %s with pattern: %s", originalURL, fromPattern)
 
 	if matched, newURL := p.tryRegexMatch(originalURL, fromPattern, toPattern); matched {
 		return true, newURL
 	}
 
-	parsedOriginal, err := url.Parse(originalURL)
-	if err != nil {
-		DebugLog("[DEBUG] Failed to parse original URL: %v", err)
-		return false, originalURL
+	if parsedOriginal == nil {
+		var err error
+		parsedOriginal, err = url.Parse(originalURL)
+		if err != nil {
+			DebugLog("[DEBUG] Failed to parse original URL: %v", err)
+			return false, originalURL
+		}
 	}
 
-	parsedFrom, err := url.Parse(fromPattern)
-	if err != nil {
-		DebugLog("[DEBUG] Failed to parse from pattern: %v", err)
-		return false, originalURL
+	if parsedFrom == nil {
+		var err error
+		parsedFrom, err = url.Parse(fromPattern)
+		if err != nil {
+			DebugLog("[DEBUG] Failed to parse from pattern: %v", err)
+			return false, originalURL
+		}
 	}
 
 	DebugLog("[DEBUG] Original - Scheme: %s, Host: %s, Path: %s",
@@ -367,6 +399,74 @@ func (p *MapRemoteProxy) matchAndReplace(originalURL, fromPattern, toPattern str
 	}
 
 	DebugLog("[DEBUG] ✗ No match")
+	return false, originalURL
+}
+
+// simpleMatch checks if a URL matches a pattern without performing any transformation.
+// This is used when fromURL == toURL (simple proxying case) to avoid expensive parsing and rebuilding.
+func (p *MapRemoteProxy) simpleMatch(parsedOriginal *url.URL, parsedPattern *url.URL, originalURL, pattern string) (bool, string) {
+	// Quick regex check
+	if strings.Contains(pattern, "(") || strings.Contains(pattern, "[") {
+		re, err := regexp.Compile(pattern)
+		if err == nil && re.MatchString(originalURL) {
+			return true, originalURL
+		}
+		return false, originalURL
+	}
+
+	if parsedOriginal == nil {
+		var err error
+		parsedOriginal, err = url.Parse(originalURL)
+		if err != nil {
+			return false, originalURL
+		}
+	}
+
+	if parsedPattern == nil {
+		var err error
+		parsedPattern, err = url.Parse(pattern)
+		if err != nil {
+			return false, originalURL
+		}
+	}
+
+	// Scheme match
+	schemeMatch := false
+	switch parsedPattern.Scheme {
+	case "*":
+		schemeMatch = true
+	case "ws":
+		schemeMatch = (parsedOriginal.Scheme == "http")
+	case "wss":
+		schemeMatch = (parsedOriginal.Scheme == "https")
+	default:
+		schemeMatch = (parsedOriginal.Scheme == parsedPattern.Scheme)
+	}
+
+	if !schemeMatch || parsedOriginal.Host != parsedPattern.Host {
+		return false, originalURL
+	}
+
+	// Path matching
+	originalPath := parsedOriginal.Path
+	if originalPath == "" {
+		originalPath = "/"
+	}
+
+	patternPath := parsedPattern.Path
+	if strings.HasSuffix(patternPath, "*") {
+		// Wildcard match
+		pathPrefix := strings.TrimSuffix(patternPath, "*")
+		if pathPrefix == "" || pathPrefix == "/" || strings.HasPrefix(originalPath, pathPrefix) {
+			return true, originalURL
+		}
+	} else {
+		// Exact match
+		if originalPath == patternPath || (originalPath == "/" && patternPath == "") || (originalPath == "" && patternPath == "/") {
+			return true, originalURL
+		}
+	}
+
 	return false, originalURL
 }
 

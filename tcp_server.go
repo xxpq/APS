@@ -174,7 +174,7 @@ func (s *RawTCPServer) handleConnection(clientConn net.Conn) {
 			Intercepted:  isIntercepted,
 			Protocol:     "rawtcp",
 			StatusCode:   0, // TCP has no status code
-			ClientIP:     clientConn.RemoteAddr().String(),
+			ClientIP:     extractIPFromAddr(clientConn.RemoteAddr().String()),
 		})
 
 		// Request logging (async)
@@ -213,7 +213,7 @@ func (s *RawTCPServer) handleConnection(clientConn net.Conn) {
 					ServerName:   s.name,
 					TunnelName:   tunnelKey,
 					EndpointName: endpointKey,
-					ClientIP:     clientConn.RemoteAddr().String(),
+					ClientIP:     extractIPFromAddr(clientConn.RemoteAddr().String()),
 				}
 				// If we have a mapping, use its ToURL as destination
 				if m := s.findMapping(); m != nil {

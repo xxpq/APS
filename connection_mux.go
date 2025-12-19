@@ -14,6 +14,7 @@ type ConnectionMux struct {
 	listener      net.Listener
 	httpHandler   func(net.Conn) // Handler for HTTP connections
 	tunnelHandler func(net.Conn) // Handler for TCP tunnel connections
+	rateLimiter   *IPRateLimiter // Rate limiter for IP banning
 	mu            sync.RWMutex
 	running       bool
 }
@@ -74,6 +75,13 @@ func (m *ConnectionMux) SetTunnelHandler(handler func(net.Conn)) {
 	m.tunnelHandler = handler
 }
 
+// SetRateLimiter sets the rate limiter for connection tracking
+func (m *ConnectionMux) SetRateLimiter(limiter *IPRateLimiter) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.rateLimiter = limiter
+}
+
 // Start starts accepting and routing connections
 func (m *ConnectionMux) Start() {
 	m.mu.Lock()
@@ -106,6 +114,26 @@ func (m *ConnectionMux) Stop() {
 
 // handleConnection detects protocol and routes connection
 func (m *ConnectionMux) handleConnection(conn net.Conn) {
+	// Extract IP from connection
+	ip := extractIPFromAddr(conn.RemoteAddr().String())
+
+	// Check if IP is banned
+	m.mu.RLock()
+	rateLimiter := m.rateLimiter
+	m.mu.RUnlock()
+
+	if rateLimiter != nil {
+		if rateLimiter.IsBanned(ip) {
+			DebugLog("[RATE LIMIT] Blocked connection from banned IP: %s", ip)
+			conn.Close()
+			return
+		}
+
+		// Register connection for tracking
+		rateLimiter.RegisterConnection(ip, conn)
+		defer rateLimiter.UnregisterConnection(ip, conn)
+	}
+
 	peekConn := NewPeekConn(conn)
 
 	// Peek first 5 bytes (our tunnel header size)

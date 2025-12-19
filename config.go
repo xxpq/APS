@@ -7,6 +7,7 @@ import (
 	"log"
 	"math"
 	"math/rand"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -16,18 +17,6 @@ import (
 
 // IsDebugMode 全局debug模式标志
 var IsDebugMode bool = false
-
-// DebugLog 只在debug模式下输出日志
-func DebugLog(format string, args ...interface{}) {
-	if IsDebugMode {
-		log.Printf(format, args...)
-	}
-}
-
-func init() {
-	// 初始化随机数生成器
-	// rand.Seed(time.Now().UnixNano())
-}
 
 // Server Types
 const (
@@ -154,6 +143,8 @@ type DimensionStats struct {
 	HTTPBytesRecv   uint64 `json:"httpBytesRecv"`
 	RawTCPBytesSent uint64 `json:"rawTcpBytesSent"`
 	RawTCPBytesRecv uint64 `json:"rawTcpBytesRecv"`
+	RawUDPBytesSent uint64 `json:"rawUdpBytesSent"`
+	RawUDPBytesRecv uint64 `json:"rawUdpBytesRecv"`
 }
 
 type ProxyConfig struct {
@@ -299,6 +290,9 @@ type EndpointConfig struct {
 	Script      string                 `json:"script,omitempty"`
 	IPs         interface{}            `json:"ips,omitempty"` // 支持 string 或 []string，指定目标IP地址
 	Insecure    *bool                  `json:"insecure,omitempty"`
+
+	// Internal fields
+	ParsedURLs []*url.URL `json:"-"` // Pre-parsed URLs for performance
 }
 
 // GetHeader 获取 header 值，如果是数组则随机选择一个
@@ -628,9 +622,14 @@ func parseEndpointConfig(data interface{}) (*EndpointConfig, error) {
 	if str, ok := data.(string); ok {
 		str = strings.TrimSpace(str)
 		str = strings.Trim(str, "`")
-		return &EndpointConfig{
+		config := &EndpointConfig{
 			URLs: []string{str},
-		}, nil
+		}
+		// Pre-parse URL
+		if u, err := url.Parse(str); err == nil {
+			config.ParsedURLs = append(config.ParsedURLs, u)
+		}
+		return config, nil
 	}
 
 	// 如果是字符串数组
@@ -642,11 +641,25 @@ func parseEndpointConfig(data interface{}) (*EndpointConfig, error) {
 			}
 		}
 		if len(urls) > 0 {
-			return &EndpointConfig{URLs: urls}, nil
+			config := &EndpointConfig{URLs: urls}
+			// Pre-parse URLs
+			for _, uStr := range urls {
+				if u, err := url.Parse(uStr); err == nil {
+					config.ParsedURLs = append(config.ParsedURLs, u)
+				}
+			}
+			return config, nil
 		}
 	}
 	if arr, ok := data.([]string); ok {
-		return &EndpointConfig{URLs: arr}, nil
+		config := &EndpointConfig{URLs: arr}
+		// Pre-parse URLs
+		for _, uStr := range arr {
+			if u, err := url.Parse(uStr); err == nil {
+				config.ParsedURLs = append(config.ParsedURLs, u)
+			}
+		}
+		return config, nil
 	}
 
 	// 如果是 map，解析为完整配置
@@ -689,6 +702,15 @@ func parseEndpointConfig(data interface{}) (*EndpointConfig, error) {
 		}
 		config.URLs = list
 		config.URL = "" // Clear single URL field
+
+		config.URL = "" // Clear single URL field
+
+		// Pre-parse URLs
+		for _, uStr := range config.URLs {
+			if u, err := url.Parse(uStr); err == nil {
+				config.ParsedURLs = append(config.ParsedURLs, u)
+			}
+		}
 
 		return &config, nil
 	}

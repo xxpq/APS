@@ -20,12 +20,13 @@ type MapRemoteProxy struct {
 	staticCache        *StaticCacheManager // 静态文件缓存管理器
 	loggingDB          *LoggingDB          // 请求日志数据库
 	serverName         string
+	rateLimiter        *IPRateLimiter
 	client             *http.Client
 	concurrencyLimiter chan struct{}
 	endpointTunnelMap  map[string]string // endpointName -> tunnelName
 }
 
-func NewMapRemoteProxy(config *Config, harManager *HarLoggerManager, tunnelManager TunnelManagerInterface, scriptRunner *ScriptRunner, trafficShaper *TrafficShaper, stats *StatsCollector, staticCache *StaticCacheManager, loggingDB *LoggingDB, serverName string) *MapRemoteProxy {
+func NewMapRemoteProxy(config *Config, harManager *HarLoggerManager, tunnelManager TunnelManagerInterface, scriptRunner *ScriptRunner, trafficShaper *TrafficShaper, stats *StatsCollector, staticCache *StaticCacheManager, loggingDB *LoggingDB, serverName string, rateLimiter *IPRateLimiter) *MapRemoteProxy {
 	// Default policies from the server config, if they exist
 	serverConfig := config.Servers[serverName]
 	policies := config.ResolvePolicies(serverConfig, &Mapping{}, nil, "") // Get server-level or default policies
@@ -54,6 +55,7 @@ func NewMapRemoteProxy(config *Config, harManager *HarLoggerManager, tunnelManag
 		staticCache:       staticCache,
 		loggingDB:         loggingDB,
 		serverName:        serverName,
+		rateLimiter:       rateLimiter,
 		endpointTunnelMap: make(map[string]string),
 		client: &http.Client{
 			Transport: tunnelTransport,
@@ -140,6 +142,17 @@ func (p *MapRemoteProxy) createProxyClient(proxyURL string) (*http.Client, error
 }
 
 func (p *MapRemoteProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Check rate limit
+	if p.rateLimiter != nil {
+		clientIP := getClientIP(r)
+		allowed, banned := p.rateLimiter.CheckAndIncrement(clientIP)
+		if banned || !allowed {
+			// If banned or just exceeded limit (which triggers ban)
+			http.Error(w, "Too Many Requests", http.StatusTooManyRequests)
+			return
+		}
+	}
+
 	if r.Method == http.MethodOptions {
 		setCorsHeaders(w.Header())
 		w.WriteHeader(http.StatusOK)

@@ -11,6 +11,7 @@ import (
 	"errors"
 	"io"
 	mrand "math/rand"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -112,6 +113,15 @@ func getClientIP(r *http.Request) string {
 		return ip
 	}
 	return strings.Split(r.RemoteAddr, ":")[0]
+}
+
+// extractIPFromAddr extracts IP from a RemoteAddr string (e.g., "1.2.3.4:1234" -> "1.2.3.4")
+func extractIPFromAddr(addr string) string {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return addr // Fallback to full string if split fails
+	}
+	return host
 }
 
 func getScheme(r *http.Request) string {

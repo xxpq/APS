@@ -46,9 +46,13 @@ type ServerManager struct {
 	statsDB        *StatsDB
 	loggingDB      *LoggingDB
 	logBroadcaster *LogBroadcaster
+	rateLimiter    *IPRateLimiter
 }
 
 func NewServerManager(config *Config, configFile string, harManager *HarLoggerManager, tunnelManager TunnelManagerInterface, scriptRunner *ScriptRunner, trafficShaper *TrafficShaper, stats *StatsCollector, staticCache *StaticCacheManager, replayManager *ReplayManager, statsDB *StatsDB, loggingDB *LoggingDB, logBroadcaster *LogBroadcaster) *ServerManager {
+	rateLimiter := NewIPRateLimiter()
+	go rateLimiter.CleanupExpired()
+
 	return &ServerManager{
 		servers:        make(map[string]*http.Server),
 		tcpServers:     make(map[string]*RawTCPServer),
@@ -66,6 +70,7 @@ func NewServerManager(config *Config, configFile string, harManager *HarLoggerMa
 		statsDB:        statsDB,
 		loggingDB:      loggingDB,
 		logBroadcaster: logBroadcaster,
+		rateLimiter:    rateLimiter,
 	}
 }
 
@@ -169,8 +174,8 @@ func (sm *ServerManager) Start(name string, serverConfig *ListenConfig, isACMEEn
 	// Start HTTP Server if enabled (Type 2 or 5)
 	// Note: Type 0 defaults to HTTP in config processing, but here we check explicitly
 	if serverConfig.Type == ServerTypeHTTP || serverConfig.Type == ServerTypeHTTPUDP {
-		handler := createServerHandler(name, serverMappings[name], serverConfig, sm.config, sm.configFile, sm.harManager, sm.tunnelManager, sm.scriptRunner, sm.trafficShaper, sm.stats, sm.staticCache, sm.replayManager, isACMEEnabled, sm.statsDB, sm.loggingDB, sm.logBroadcaster)
-		server, mux := startServer(name, serverConfig, handler, sm.tunnelManager)
+		handler := createServerHandler(name, serverMappings[name], serverConfig, sm.config, sm.configFile, sm.harManager, sm.tunnelManager, sm.scriptRunner, sm.trafficShaper, sm.stats, sm.staticCache, sm.replayManager, isACMEEnabled, sm.statsDB, sm.loggingDB, sm.logBroadcaster, sm.rateLimiter)
+		server, mux := startServer(name, serverConfig, handler, sm.tunnelManager, sm.rateLimiter)
 		if server != nil {
 			sm.servers[name] = server
 			if mux != nil {
@@ -554,9 +559,9 @@ func (sm *ServerManager) StartAll() {
 	}
 }
 
-func createServerHandler(serverName string, mappings []*Mapping, serverConfig *ListenConfig, config *Config, configFile string, harManager *HarLoggerManager, tunnelManager TunnelManagerInterface, scriptRunner *ScriptRunner, trafficShaper *TrafficShaper, stats *StatsCollector, staticCache *StaticCacheManager, replayManager *ReplayManager, isACMEEnabled bool, statsDB *StatsDB, loggingDB *LoggingDB, logBroadcaster *LogBroadcaster) http.Handler {
+func createServerHandler(serverName string, mappings []*Mapping, serverConfig *ListenConfig, config *Config, configFile string, harManager *HarLoggerManager, tunnelManager TunnelManagerInterface, scriptRunner *ScriptRunner, trafficShaper *TrafficShaper, stats *StatsCollector, staticCache *StaticCacheManager, replayManager *ReplayManager, isACMEEnabled bool, statsDB *StatsDB, loggingDB *LoggingDB, logBroadcaster *LogBroadcaster, rateLimiter *IPRateLimiter) http.Handler {
 	mux := http.NewServeMux()
-	proxy := NewMapRemoteProxy(config, harManager, tunnelManager, scriptRunner, trafficShaper, stats, staticCache, loggingDB, serverName)
+	proxy := NewMapRemoteProxy(config, harManager, tunnelManager, scriptRunner, trafficShaper, stats, staticCache, loggingDB, serverName, rateLimiter)
 
 	// 如果 cert 是 auto，注册证书下载处理器
 	if certStr, ok := serverConfig.Cert.(string); ok && certStr == "auto" {
@@ -607,18 +612,32 @@ func createServerHandler(serverName string, mappings []*Mapping, serverConfig *L
 		baseHandler = GetACMEHandler(baseHandler)
 	}
 
-	// 使用 h2c 包裹处理器，以支持 HTTP/2
-	return h2c.NewHandler(baseHandler, &http2.Server{})
+	// Configure HTTP/2 server with strict limits to prevent goroutine leaks
+	http2Server := &http2.Server{
+		MaxConcurrentStreams:         100,              // Limit concurrent streams per connection
+		MaxReadFrameSize:             64 << 10,         // 64kb max frame size
+		IdleTimeout:                  10 * time.Second, // Close idle connections
+		MaxUploadBufferPerConnection: 64 << 10,         // 64kb buffer per connection
+		MaxUploadBufferPerStream:     64 << 10,         // 64kb buffer per stream
+	}
+
+	// Use h2c with configured server
+	return h2c.NewHandler(baseHandler, http2Server)
 }
 
-func startServer(name string, config *ListenConfig, handler http.Handler, tunnelManager TunnelManagerInterface) (*http.Server, *ConnectionMux) {
+func startServer(name string, config *ListenConfig, handler http.Handler, tunnelManager TunnelManagerInterface, rateLimiter *IPRateLimiter) (*http.Server, *ConnectionMux) {
 	// Determine bind address based on 'public' (default: true)
 	host := "127.0.0.1"
 	if config.Public == nil || *config.Public {
 		host = "0.0.0.0"
 	}
 	addr := fmt.Sprintf("%s:%d", host, config.Port)
-	server := &http.Server{Handler: handler}
+	server := &http.Server{
+		Handler:           handler,
+		WriteTimeout:      30 * time.Second, // Kill stuck writes after 30s
+		ReadHeaderTimeout: 10 * time.Second, // Already set elsewhere, consolidating here
+		IdleTimeout:       60 * time.Second, // Close idle connections
+	}
 
 	log.Printf("Starting server '%s' on %s", name, addr)
 
@@ -631,6 +650,7 @@ func startServer(name string, config *ListenConfig, handler http.Handler, tunnel
 
 	// Create ConnectionMux
 	mux := NewConnectionMux(listener)
+	mux.SetRateLimiter(rateLimiter)
 
 	// Setup Tunnel Handler
 	mux.SetTunnelHandler(func(conn net.Conn) {
