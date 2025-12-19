@@ -29,6 +29,7 @@ import (
 type ServerManager struct {
 	servers    map[string]*http.Server
 	tcpServers map[string]*RawTCPServer  // Raw TCP servers
+	udpServers map[string]*RawUDPServer  // Raw UDP servers
 	muxes      map[string]*ConnectionMux // Connection multiplexers
 	mu         sync.Mutex
 	wg         sync.WaitGroup
@@ -51,6 +52,7 @@ func NewServerManager(config *Config, configFile string, harManager *HarLoggerMa
 	return &ServerManager{
 		servers:        make(map[string]*http.Server),
 		tcpServers:     make(map[string]*RawTCPServer),
+		udpServers:     make(map[string]*RawUDPServer),
 		muxes:          make(map[string]*ConnectionMux),
 		config:         config,
 		configFile:     configFile,
@@ -80,6 +82,10 @@ func (sm *ServerManager) Start(name string, serverConfig *ListenConfig, isACMEEn
 		log.Printf("TCP Server '%s' is already running.", name)
 		return
 	}
+	if _, exists := sm.udpServers[name]; exists {
+		log.Printf("UDP Server '%s' is already running.", name)
+		return
+	}
 
 	// Re-calculate mappings for this specific server
 	serverMappings := make(map[string][]*Mapping)
@@ -91,7 +97,7 @@ func (sm *ServerManager) Start(name string, serverConfig *ListenConfig, isACMEEn
 		}
 
 		// For rawTCP servers, also match by port if no explicit server assignment
-		if serverConfig.RawTCP && len(mapping.serverNames) == 0 {
+		if (serverConfig.Type == ServerTypeTCP || serverConfig.Type == ServerTypeTCPUDP) && len(mapping.serverNames) == 0 {
 			fromURL := mapping.GetFromURL()
 			if strings.HasPrefix(fromURL, "tcp://") {
 				// Parse the from URL to get the port
@@ -107,35 +113,76 @@ func (sm *ServerManager) Start(name string, serverConfig *ListenConfig, isACMEEn
 				}
 			}
 		}
+
+		// For rawUDP servers, also match by port if no explicit server assignment
+		if (serverConfig.Type == ServerTypeUDP || serverConfig.Type == ServerTypeTCPUDP || serverConfig.Type == ServerTypeHTTPUDP) && len(mapping.serverNames) == 0 {
+			fromURL := mapping.GetFromURL()
+			if strings.HasPrefix(fromURL, "udp://") {
+				// Parse the from URL to get the port
+				if u, err := url.Parse(fromURL); err == nil {
+					if portStr := u.Port(); portStr != "" {
+						if mappingPort, err := strconv.Atoi(portStr); err == nil {
+							if mappingPort == serverConfig.Port {
+								serverMappings[name] = append(serverMappings[name], mapping)
+								log.Printf("[RAW UDP] Auto-assigned mapping %s to server '%s' (port %d)", fromURL, name, serverConfig.Port)
+							}
+						}
+					}
+				}
+			}
+		}
 	}
 
-	// Check if this is a rawTCP server
-	if serverConfig.RawTCP {
+	// Start TCP Server if enabled (Type 1 or 4)
+	if serverConfig.Type == ServerTypeTCP || serverConfig.Type == ServerTypeTCPUDP {
 		tcpServer := NewRawTCPServer(name, serverConfig, sm.config, serverMappings[name],
 			sm.tunnelManager, sm.trafficShaper, sm.stats, sm.loggingDB)
 		if err := tcpServer.Start(); err != nil {
 			log.Printf("Failed to start TCP server '%s': %v", name, err)
-			return
+			// If TCP fails, we might still want to try UDP if it's combined?
+			// For now, let's just log and continue, or return?
+			// If it's pure TCP, we should probably return.
+			if serverConfig.Type == ServerTypeTCP {
+				return
+			}
+		} else {
+			sm.tcpServers[name] = tcpServer
+			log.Printf("[RAW TCP] Server '%s' started on port %d with %d mappings", name, serverConfig.Port, len(serverMappings[name]))
 		}
-		sm.tcpServers[name] = tcpServer
-		log.Printf("[RAW TCP] Server '%s' started on port %d with %d mappings", name, serverConfig.Port, len(serverMappings[name]))
-		return
 	}
 
-	// HTTP server
-	handler := createServerHandler(name, serverMappings[name], serverConfig, sm.config, sm.configFile, sm.harManager, sm.tunnelManager, sm.scriptRunner, sm.trafficShaper, sm.stats, sm.staticCache, sm.replayManager, isACMEEnabled, sm.statsDB, sm.loggingDB, sm.logBroadcaster)
-	server, mux := startServer(name, serverConfig, handler, sm.tunnelManager)
-	if server != nil {
-		sm.servers[name] = server
-		if mux != nil {
-			sm.muxes[name] = mux
+	// Start UDP Server if enabled (Type 3, 4, or 5)
+	if serverConfig.Type == ServerTypeUDP || serverConfig.Type == ServerTypeTCPUDP || serverConfig.Type == ServerTypeHTTPUDP {
+		udpServer := NewRawUDPServer(name, serverConfig, sm.config, serverMappings[name],
+			sm.tunnelManager, sm.trafficShaper, sm.stats, sm.loggingDB)
+		if err := udpServer.Start(); err != nil {
+			log.Printf("Failed to start UDP server '%s': %v", name, err)
+			if serverConfig.Type == ServerTypeUDP {
+				return
+			}
+		} else {
+			sm.udpServers[name] = udpServer
+			log.Printf("[RAW UDP] Server '%s' started on port %d with %d mappings", name, serverConfig.Port, len(serverMappings[name]))
 		}
-		sm.wg.Add(1)
-		go func() {
-			defer sm.wg.Done()
-			// The server's ListenAndServe/Serve method will block here.
-			// When it returns (e.g., after Shutdown), the goroutine will exit.
-		}()
+	}
+
+	// Start HTTP Server if enabled (Type 2 or 5)
+	// Note: Type 0 defaults to HTTP in config processing, but here we check explicitly
+	if serverConfig.Type == ServerTypeHTTP || serverConfig.Type == ServerTypeHTTPUDP {
+		handler := createServerHandler(name, serverMappings[name], serverConfig, sm.config, sm.configFile, sm.harManager, sm.tunnelManager, sm.scriptRunner, sm.trafficShaper, sm.stats, sm.staticCache, sm.replayManager, isACMEEnabled, sm.statsDB, sm.loggingDB, sm.logBroadcaster)
+		server, mux := startServer(name, serverConfig, handler, sm.tunnelManager)
+		if server != nil {
+			sm.servers[name] = server
+			if mux != nil {
+				sm.muxes[name] = mux
+			}
+			sm.wg.Add(1)
+			go func() {
+				defer sm.wg.Done()
+				// The server's ListenAndServe/Serve method will block here.
+				// When it returns (e.g., after Shutdown), the goroutine will exit.
+			}()
+		}
 	}
 }
 
@@ -159,8 +206,7 @@ func (sm *ServerManager) Stop(name string) {
 			delete(sm.muxes, name)
 		}
 
-		log.Printf("Server '%s' stopped.", name)
-		return
+		log.Printf("HTTP Server '%s' stopped.", name)
 	}
 
 	// Try to stop TCP server
@@ -171,6 +217,16 @@ func (sm *ServerManager) Stop(name string) {
 		}
 		delete(sm.tcpServers, name)
 		log.Printf("TCP Server '%s' stopped.", name)
+	}
+
+	// Try to stop UDP server
+	if udpServer, exists := sm.udpServers[name]; exists {
+		log.Printf("Stopping UDP server '%s'...", name)
+		if err := udpServer.Stop(); err != nil {
+			log.Printf("Error stopping UDP server '%s': %v", name, err)
+		}
+		delete(sm.udpServers, name)
+		log.Printf("UDP Server '%s' stopped.", name)
 	}
 }
 
@@ -235,6 +291,69 @@ func (sm *ServerManager) UpdateRawTCPMappings() {
 	for name, tcpServer := range sm.tcpServers {
 		tcpServer.UpdateMappings(serverMappings[name])
 	}
+
+	// Also update UDP mappings
+	sm.UpdateUDPMappings()
+}
+
+// UpdateUDPMappings updates mappings for all rawUDP servers
+func (sm *ServerManager) UpdateUDPMappings() {
+	// Re-calculate mappings for all servers using the same logic as server startup
+	serverMappings := make(map[string][]*Mapping)
+
+	// First, collect mappings that explicitly specify servers
+	for i := range sm.config.Mappings {
+		mapping := &sm.config.Mappings[i]
+		for _, serverName := range mapping.serverNames {
+			serverMappings[serverName] = append(serverMappings[serverName], mapping)
+		}
+	}
+
+	// Then, for each rawUDP server, also match UDP mappings by port
+	for name, udpServer := range sm.udpServers {
+		serverPort := udpServer.config.Port
+
+		// Look for UDP mappings without explicit server assignment that match this port
+		for i := range sm.config.Mappings {
+			mapping := &sm.config.Mappings[i]
+
+			// Skip if already assigned via serverNames
+			if len(mapping.serverNames) > 0 {
+				continue
+			}
+
+			fromURL := mapping.GetFromURL()
+			if !strings.HasPrefix(fromURL, "udp://") {
+				continue
+			}
+
+			// Parse the from URL to get the port
+			u, err := url.Parse(fromURL)
+			if err != nil {
+				continue
+			}
+
+			portStr := u.Port()
+			if portStr == "" {
+				continue
+			}
+
+			mappingPort, err := strconv.Atoi(portStr)
+			if err != nil {
+				continue
+			}
+
+			// If ports match, add this mapping
+			if mappingPort == serverPort {
+				serverMappings[name] = append(serverMappings[name], mapping)
+			}
+		}
+	}
+
+	// Update each rawUDP server's mappings
+	for name, udpServer := range sm.udpServers {
+		udpServer.UpdateMappings(serverMappings[name])
+	}
 }
 
 func (sm *ServerManager) StopAll() {
@@ -244,6 +363,9 @@ func (sm *ServerManager) StopAll() {
 		names = append(names, name)
 	}
 	for name := range sm.tcpServers {
+		names = append(names, name)
+	}
+	for name := range sm.udpServers {
 		names = append(names, name)
 	}
 	// Muxes are stopped when their corresponding server is stopped, but we should ensure cleanup

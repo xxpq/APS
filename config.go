@@ -29,6 +29,16 @@ func init() {
 	// rand.Seed(time.Now().UnixNano())
 }
 
+// Server Types
+const (
+	ServerTypeTCP     = 1
+	ServerTypeHTTP    = 2
+	ServerTypeUDP     = 3
+	ServerTypeTCPUDP  = 4
+	ServerTypeHTTPUDP = 5
+	ServerTypeHTTP3   = 6 // Reserved
+)
+
 type Config struct {
 	Debug             *bool                          `json:"debug,omitempty"`             // Debug模式开关
 	LogLevel          *int                           `json:"logLevel,omitempty"`          // 日志等级: 0=不记录, 1=基本请求, 2=完整请求(含body和header)
@@ -495,9 +505,9 @@ type RuleAuth struct {
 
 type ListenConfig struct {
 	Port              int         `json:"port"`
-	RawTCP            bool        `json:"rawTCP,omitempty"` // true: raw TCP forwarding mode, false: HTTP mode (default)
-	Proxy             *bool       `json:"proxy,omitempty"`  // true: 启用 HTTP/HTTPS 代理服务, false: 禁用 (default false)
-	Cert              interface{} `json:"cert,omitempty"`   // string ("auto") or CertFiles
+	Type              int         `json:"type,omitempty"`  // 1=TCP, 2=HTTP, 3=UDP, 4=TCP+UDP, 5=HTTP+UDP
+	Proxy             *bool       `json:"proxy,omitempty"` // true: 启用 HTTP/HTTPS 代理服务, false: 禁用 (default false)
+	Cert              interface{} `json:"cert,omitempty"`  // string ("auto") or CertFiles
 	Key               string      `json:"key,omitempty"`
 	Auth              *ServerAuth `json:"auth,omitempty"`
 	Dump              string      `json:"dump,omitempty"`
@@ -531,6 +541,8 @@ func (lc *ListenConfig) UnmarshalJSON(data []byte) error {
 		t := true
 		lc.Public = &t // public defaults to true
 		// panel defaults to false (nil)
+		// Default type depends on context, but usually HTTP (2) if not specified,
+		// but here we just leave it 0 and let logic handle it or default to HTTP later
 		return nil
 	}
 
@@ -548,6 +560,11 @@ func (lc *ListenConfig) UnmarshalJSON(data []byte) error {
 		lc.Public = &t
 	}
 	// lc.Panel: nil means default false
+
+	// Default Type to HTTP (2) if not specified
+	if lc.Type == 0 {
+		lc.Type = ServerTypeHTTP
+	}
 
 	// Check the type of Cert
 	if certStr, ok := obj.Cert.(string); ok {
@@ -781,23 +798,24 @@ func processConfig(config *Config) error {
 		// 解析 server names
 		mapping.serverNames = parseStringOrArray(mapping.Servers)
 		if len(mapping.serverNames) == 0 {
-			// For TCP mappings (tcp://), don't assign to all servers
+			// For TCP mappings (tcp://) or UDP mappings (udp://), don't assign to all servers
 			// They will be matched by port at runtime
-			isTCPMapping := false
+			isRawMapping := false
 			if len(fromConfig.URLs) > 0 {
 				firstURL := fromConfig.URLs[0]
-				if strings.HasPrefix(firstURL, "tcp://") || strings.HasPrefix(firstURL, "tcps://") {
-					isTCPMapping = true
+				if strings.HasPrefix(firstURL, "tcp://") || strings.HasPrefix(firstURL, "tcps://") ||
+					strings.HasPrefix(firstURL, "udp://") {
+					isRawMapping = true
 				}
 			}
 
-			if !isTCPMapping {
+			if !isRawMapping {
 				// For HTTP/HTTPS mappings, if no servers are specified, this mapping applies to ALL servers.
 				// This is a common use case for global rules.
 				for name := range config.Servers {
-					// Only assign to non-rawTCP servers
+					// Only assign to non-raw servers (HTTP)
 					if serverConfig, ok := config.Servers[name]; ok {
-						if !serverConfig.RawTCP {
+						if serverConfig.Type == ServerTypeHTTP || serverConfig.Type == ServerTypeHTTPUDP {
 							mapping.serverNames = append(mapping.serverNames, name)
 						}
 					}
@@ -871,6 +889,55 @@ func processConfig(config *Config) error {
 }
 
 func (c *Config) Reload(filename string) (map[string]*ListenConfig, error) {
+	// CRITICAL: Copy old servers BEFORE reading file to avoid race with API updates!
+	// If we copy after reading, API handlers may have already modified c.Servers
+	c.mu.RLock()
+	oldServers := make(map[string]*ListenConfig)
+	for name, cfg := range c.Servers {
+		// Create a proper deep copy of the config struct, including pointer fields
+		configCopy := ListenConfig{
+			Port:               cfg.Port,
+			Type:               cfg.Type,
+			Key:                cfg.Key,
+			Cert:               cfg.Cert,
+			Dump:               cfg.Dump,
+			Endpoints:          cfg.Endpoints,
+			Tunnels:            cfg.Tunnels,
+			Firewall:           cfg.Firewall,
+			ConnectionPolicies: cfg.ConnectionPolicies,
+			TrafficPolicies:    cfg.TrafficPolicies,
+		}
+		// Deep copy pointer fields
+		if cfg.Proxy != nil {
+			v := *cfg.Proxy
+			configCopy.Proxy = &v
+		}
+		if cfg.Public != nil {
+			v := *cfg.Public
+			configCopy.Public = &v
+		}
+		if cfg.Panel != nil {
+			v := *cfg.Panel
+			configCopy.Panel = &v
+		}
+		if cfg.LogLevel != nil {
+			v := *cfg.LogLevel
+			configCopy.LogLevel = &v
+		}
+		if cfg.LogRetentionHours != nil {
+			v := *cfg.LogRetentionHours
+			configCopy.LogRetentionHours = &v
+		}
+		if cfg.Auth != nil {
+			// Deep copy Auth struct
+			authCopy := *cfg.Auth
+			configCopy.Auth = &authCopy
+		}
+		oldServers[name] = &configCopy
+	}
+	c.mu.RUnlock()
+
+	// Now read the new config from file
 	file, err := os.Open(filename)
 	if err != nil {
 		return nil, err
@@ -887,8 +954,8 @@ func (c *Config) Reload(filename string) (map[string]*ListenConfig, error) {
 		return nil, err
 	}
 
+	// Update config with write lock
 	c.mu.Lock()
-	oldServers := c.Servers
 	c.Servers = newConfig.Servers
 	c.Proxies = newConfig.Proxies
 	c.Tunnels = newConfig.Tunnels

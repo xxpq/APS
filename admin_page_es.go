@@ -1238,10 +1238,23 @@ async function loadServers() {
       var certStr = "";
       if (typeof s.cert === "string") certStr = s.cert;
       else if (s.cert && s.cert.cert) certStr = "files";
+      
+      // Format type display
+      var typeStr = "";
+      var typeMap = {
+        1: "1 - TCP",
+        2: "2 - HTTP",
+        3: "3 - UDP",
+        4: "4 - TCP+UDP",
+        5: "5 - HTTP+UDP"
+      };
+      typeStr = (s.type !== undefined && s.type !== null) ? (typeMap[s.type] || s.type) : "2 - HTTP";
+      
       var tr = document.createElement("tr");
       tr.innerHTML =
         "<td>" + name + "</td>" +
         "<td>" + (s.port != null ? s.port : "") + "</td>" +
+        "<td>" + typeStr + "</td>" +
         "<td>" + certStr + "</td>" +
         "<td>" + (s.firewall || "无") + "</td>" +
         "<td><button class='bx--btn bx--btn--sm bx--btn--ghost' onclick='openEditServerModal(\"" + name.replace(/"/g, '&quot;') + "\")'>编辑</button> " +
@@ -1259,7 +1272,7 @@ function openAddServerModal() {
   document.getElementById("add-server-port").value = "";
   document.getElementById("add-server-cert").value = "";
   document.getElementById("add-server-firewall").value = "";
-  document.getElementById("add-server-rawtcp").checked = false;
+  document.getElementById("add-server-type").value = "2";  // default to HTTP (2)
   document.getElementById("add-server-public").checked = true;  // default true
   document.getElementById("add-server-panel").checked = false;
   document.getElementById("add-server-proxy").checked = false;
@@ -1287,7 +1300,7 @@ function openEditServerModal(name) {
       });
       
       // Populate boolean fields
-      document.getElementById("edit-server-rawtcp").checked = s.rawTCP || false;
+      document.getElementById("edit-server-type").value = (s.type !== undefined ? s.type : 2);  // default to HTTP (2)
       document.getElementById("edit-server-public").checked = (s.public !== undefined ? s.public : true);  // default true
       document.getElementById("edit-server-panel").checked = s.panel || false;
       document.getElementById("edit-server-proxy").checked = s.proxy || false;
@@ -1347,11 +1360,11 @@ async function confirmAddServer() {
   if (!port) { if (msg) msg.textContent = "端口必填"; return; }
   
   var payload = {
-    port: parseInt(port, 10)
+    port: parseInt(port, 10),
+    type: parseInt(document.getElementById("add-server-type").value, 10)
   };
   if (cert) payload.cert = cert;
   if (firewall) payload.firewall = firewall;
-  payload.rawTCP = document.getElementById("add-server-rawtcp").checked;
   payload.public = document.getElementById("add-server-public").checked;
   payload.panel = document.getElementById("add-server-panel").checked;
   payload.proxy = document.getElementById("add-server-proxy").checked;
@@ -1390,11 +1403,11 @@ async function confirmEditServer() {
   if (!port) { if (msg) msg.textContent = "端口必填"; return; }
   
   var payload = {
-    port: parseInt(port, 10)
+    port: parseInt(port, 10),
+    type: parseInt(document.getElementById("edit-server-type").value, 10)
   };
   if (cert) payload.cert = cert;
   if (firewall) payload.firewall = firewall;
-  payload.rawTCP = document.getElementById("edit-server-rawtcp").checked;
   payload.public = document.getElementById("edit-server-public").checked;
   payload.panel = document.getElementById("edit-server-panel").checked;
   payload.proxy = document.getElementById("edit-server-proxy").checked;
@@ -1415,7 +1428,7 @@ async function confirmEditServer() {
     if (msg) msg.textContent = "更新成功";
     var modal = document.querySelector('#server-edit-modal');
     if (modal) modal.classList.remove('is-visible');
-    loadServers();
+    setTimeout(function() { loadServers(); }, 1500);
   } catch (e) {
     if (msg) msg.textContent = "更新失败: " + (e.message || e);
   }

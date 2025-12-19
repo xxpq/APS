@@ -1,0 +1,20 @@
+{
+  "logLevel": 2,
+  "servers": {
+    "dns_proxy": {
+      "port": 10000,
+      "type": 4,
+      "public": true
+    }
+  },
+  "mappings": [
+    {
+      "from": "tcp://0.0.0.0:10000",
+      "to": "tcp://8.8.8.8:53"
+    },
+    {
+      "from": "udp://0.0.0.0:10000",
+      "to": "udp://8.8.8.8:53"
+    }
+  ]
+}

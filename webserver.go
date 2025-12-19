@@ -929,16 +929,34 @@ func (h *AdminHandlers) handleServers(w http.ResponseWriter, r *http.Request) {
 		}
 		h.configMux.Lock()
 		defer h.configMux.Unlock()
+
+		// IMPORTANT: Do NOT modify h.config.Servers here!
+		// Only modify the file and let watcher update memory.
+		// This ensures watcher can properly compare oldServers vs newServers.
+
+		// Read current config from memory to build new file content
 		if h.config.Servers == nil {
 			h.config.Servers = make(map[string]*ListenConfig)
 		}
 		s := req.Server
-		// 保持未提供字段为默认值
-		h.config.Servers[req.Name] = &s
+
+		// Create a temporary copy for saving to file
+		updatedServers := make(map[string]*ListenConfig)
+		for name, srv := range h.config.Servers {
+			updatedServers[name] = srv
+		}
+		updatedServers[req.Name] = &s
+
+		// Temporarily update config for saveConfigLocked
+		oldServers := h.config.Servers
+		h.config.Servers = updatedServers
 		if err := h.saveConfigLocked(); err != nil {
+			h.config.Servers = oldServers // Restore on error
 			http.Error(w, "Failed to persist config", http.StatusInternalServerError)
 			return
 		}
+		// Restore original - watcher will update it
+		h.config.Servers = oldServers
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"status": "upserted"})
 	case http.MethodDelete:

@@ -146,10 +146,19 @@ func (w *ConfigWatcher) syncServers(oldServers, newServers map[string]*ListenCon
 			// Server exists, check if it was modified
 			if !reflect.DeepEqual(oldConfig, newConfig) {
 				log.Printf("Server '%s' configuration changed, restarting...", name)
+				// Debug: Show what changed
+				if oldConfig.Type != newConfig.Type {
+					log.Printf("  [DEBUG] %s Type changed: %d -> %d", name, oldConfig.Type, newConfig.Type)
+				}
+				if oldConfig.Port != newConfig.Port {
+					log.Printf("  [DEBUG] %s Port changed: %d -> %d", name, oldConfig.Port, newConfig.Port)
+				}
 				w.serverManager.Stop(name)
 				// A small delay might be useful to ensure the port is released
 				time.Sleep(100 * time.Millisecond)
 				w.serverManager.Start(name, newConfig, isACMEEnabled)
+			} else {
+				log.Printf("[DEBUG] Server '%s' config unchanged (Type: %d, Port: %d)", name, newConfig.Type, newConfig.Port)
 			}
 		}
 	}

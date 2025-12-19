@@ -1,8 +1,9 @@
 {
-  "debug": false,
+  "debug": true,
   "servers": {
     "default": {
-      "port": 801,
+      "port": 80,
+      "type": 2,
       "proxy": false,
       "public": true,
       "panel": true,
@@ -10,7 +11,7 @@
     },
     "mstsc_sucdri_my_pc": {
       "port": 3388,
-      "rawTCP": true,
+      "type": 1,
       "proxy": false,
       "public": true,
       "panel": false,
@@ -18,7 +19,7 @@
     },
     "mstsc_sucdri_ssh": {
       "port": 2222,
-      "rawTCP": true,
+      "type": 1,
       "proxy": false,
       "public": true,
       "panel": false,
@@ -26,7 +27,15 @@
     },
     "mstsc_sucdri_windows": {
       "port": 3690,
-      "rawTCP": true,
+      "type": 1,
+      "proxy": false,
+      "public": true,
+      "panel": false,
+      "firewall": "china_only"
+    },
+    "mstsc_sucdri_windows_dev": {
+      "port": 3390,
+      "type": 1,
       "proxy": false,
       "public": true,
       "panel": false,
@@ -34,6 +43,7 @@
     },
     "proxy": {
       "port": 1080,
+      "type": 2,
       "proxy": true,
       "public": true,
       "panel": false,
@@ -41,6 +51,7 @@
     },
     "ssl": {
       "port": 443,
+      "type": 2,
       "proxy": false,
       "cert": "acme",
       "public": true,
@@ -49,7 +60,7 @@
     },
     "sucdri_esxi": {
       "port": 5000,
-      "rawTCP": true,
+      "type": 2,
       "proxy": false,
       "public": true,
       "panel": false,
@@ -58,7 +69,9 @@
   },
   "proxies": {
     "test": {
-      "urls": ["http://user@pass:localhost:8081"]
+      "urls": [
+        "http://user@pass:localhost:8081"
+      ]
     },
     "test1": {
       "urls": [
@@ -74,7 +87,9 @@
       "password": "sucdri"
     },
     "sucdri": {
-      "servers": ["default"],
+      "servers": [
+        "default"
+      ],
       "password": "sucdri"
     }
   },
@@ -86,6 +101,10 @@
     "my_pc": {
       "tunnelName": "sucdri",
       "endpointName": "my_pc"
+    },
+    "vps_sucdri": {
+      "tunnelName": "sucdri",
+      "endpointName": "vps_sucdri"
     }
   },
   "auth": {
@@ -105,12 +124,18 @@
     }
   },
   "static_cache": {
-    "enabled": true
+    "enabled": true,
+    "enable_encryption": false,
+    "enable_compression": false
   },
   "firewalls": {
     "allow_specific_regions": {
       "allow": {
-        "regions": ["CN-Beijing", "CN-Shanghai", "CN-Guangdong"]
+        "regions": [
+          "CN-Beijing",
+          "CN-Shanghai",
+          "CN-Guangdong"
+        ]
       }
     },
     "block_bad_actors": {
@@ -125,26 +150,43 @@
     },
     "block_sensitive_regions": {
       "block": {
-        "regions": ["CN-Xinjiang"]
+        "regions": [
+          "CN-Xinjiang"
+        ]
       }
     },
     "block_specific_countries": {
       "block": {
-        "regions": ["KP", "IR"]
+        "regions": [
+          "KP",
+          "IR"
+        ]
       }
     },
     "china_only": {
       "allow": {
-        "regions": ["CN"]
+        "regions": [
+          "CN"
+        ]
       }
     },
     "combined_geo_and_ip": {
       "allow": {
-        "regions": ["CN", "US", "JP", "SG"]
+        "regions": [
+          "CN",
+          "US",
+          "JP",
+          "SG"
+        ]
       },
       "block": {
-        "networks": ["10.0.0.0/8", "172.16.0.0/12"],
-        "regions": ["US-California"]
+        "networks": [
+          "10.0.0.0/8",
+          "172.16.0.0/12"
+        ],
+        "regions": [
+          "US-California"
+        ]
       }
     },
     "internal_only": {
@@ -159,18 +201,31 @@
     },
     "mixed_region_formats": {
       "allow": {
-        "regions": ["CN", "US-California", "US-New York", "JP-Tokyo", "SG"]
+        "regions": [
+          "CN",
+          "US-California",
+          "US-New York",
+          "JP-Tokyo",
+          "SG"
+        ]
       }
     },
     "office_access": {
       "allow": {
-        "networks": ["203.0.113.0/24", "198.51.100.50-60", "2001:db8::/32"]
+        "networks": [
+          "203.0.113.0/24",
+          "198.51.100.50-60",
+          "2001:db8::/32"
+        ]
       }
     }
   },
   "mappings": [
     {
-      "from": ["http://a.l-l.cn/*", "https://a.l-l.cn/*"],
+      "from": [
+        "http://a.l-l.cn/*",
+        "https://a.l-l.cn/*"
+      ],
       "to": "http://ip.sb/*"
     },
     {
@@ -197,7 +252,10 @@
       }
     },
     {
-      "from": ["http://shkc.p-q.co/*", "https://shkc.p-q.co/*"],
+      "from": [
+        "http://shkc.p-q.co/*",
+        "https://shkc.p-q.co/*"
+      ],
       "to": "http://127.0.0.1:7788/*"
     },
     {
@@ -208,7 +266,9 @@
       "to": "http://127.0.0.1:8080/*"
     },
     {
-      "from": ["https://bt.jy.sucdri.p-q.co/*"],
+      "from": [
+        "https://bt.jy.sucdri.p-q.co/*"
+      ],
       "to": "http://127.0.0.1:13682/*"
     },
     {
@@ -247,7 +307,9 @@
       }
     },
     {
-      "from": ["https://vps.sucdri.p-q.co/*"],
+      "from": [
+        "https://vps.sucdri.p-q.co/*"
+      ],
       "to": {
         "insecure": true,
         "url": "https://10.1.105.33/*"
@@ -257,7 +319,21 @@
       }
     },
     {
-      "from": ["https://test.sucdri.p-q.co/*"],
+      "from": [
+        "wss://vps.sucdri.p-q.co/*"
+      ],
+      "to": {
+        "insecure": true,
+        "url": "wss://10.1.105.33/*"
+      },
+      "via": {
+        "endpoints": "cjy_server"
+      }
+    },
+    {
+      "from": [
+        "https://test1.sucdri.p-q.co/*"
+      ],
       "to": "http://127.0.0.1:7788/api/open/*",
       "auth": {
         "authUrl": "http://127.0.0.1:7788/api/open/x/*",
@@ -265,7 +341,9 @@
       }
     },
     {
-      "from": ["https://test.jy.sucdri.p-q.co/*"],
+      "from": [
+        "https://test.jy.sucdri.p-q.co/*"
+      ],
       "to": "https://bt.jy.sucdri.p-q.co/*",
       "via": {
         "endpoints": "my_pc"
@@ -342,7 +420,14 @@
       "via": {
         "endpoints": "ls_server"
       }
+    },
+    {
+      "from": "tcp://0.0.0.0:3390",
+      "to": "tcp://10.1.105.123:3389",
+      "via": {
+        "endpoints": "my_pc"
+      }
     }
   ],
-  "version": 55
+  "version": 123
 }
