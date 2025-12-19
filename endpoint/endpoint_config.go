@@ -16,7 +16,6 @@ type EndpointRuntimeConfig struct {
 	EndpointName string              `json:"endpointName"`
 	Password     string              `json:"password,omitempty"`
 	PortMappings []PortMappingConfig `json:"portMappings,omitempty"`
-	P2PSettings  *P2PSettings        `json:"p2p,omitempty"`
 }
 
 // PortMappingConfig defines a port mapping from local to remote endpoint
@@ -24,13 +23,6 @@ type PortMappingConfig struct {
 	LocalPort      int    `json:"localPort"`      // Port this endpoint listens on
 	RemoteTarget   string `json:"remoteTarget"`   // IP:Port on the remote endpoint's network
 	TargetEndpoint string `json:"targetEndpoint"` // Which endpoint to forward traffic to
-}
-
-// P2PSettings holds P2P connection settings
-type P2PSettings struct {
-	StunServers        []string `json:"stunServers,omitempty"`
-	EnableLANDiscovery bool     `json:"lanDiscovery,omitempty"`
-	MaxRelayHops       int      `json:"maxRelayHops,omitempty"` // Default 3
 }
 
 // ConfigResponse is the APS response for endpoint configuration
@@ -90,38 +82,14 @@ func (c *EndpointRuntimeConfig) ValidateConfig() error {
 	return nil
 }
 
-// GetMaxRelayHops returns the maximum relay hops with default of 3
-func (c *EndpointRuntimeConfig) GetMaxRelayHops() int {
-	if c.P2PSettings != nil && c.P2PSettings.MaxRelayHops > 0 {
-		return c.P2PSettings.MaxRelayHops
-	}
-	return 3 // Default
-}
-
-// GetStunServers returns STUN servers with fallback to default
-func (c *EndpointRuntimeConfig) GetStunServers() []string {
-	if c.P2PSettings != nil && len(c.P2PSettings.StunServers) > 0 {
-		return c.P2PSettings.StunServers
-	}
-	return []string{"stun.miwifi.com:3478"}
-}
-
-// IsLANDiscoveryEnabled returns whether LAN discovery is enabled
-func (c *EndpointRuntimeConfig) IsLANDiscoveryEnabled() bool {
-	if c.P2PSettings != nil {
-		return c.P2PSettings.EnableLANDiscovery
-	}
-	return true // Default enabled
-}
-
 // initializeConfiguration sets up the endpoint configuration based on provided flags
 // Supports both new -cid mode and legacy -tunnel mode
 func initializeConfiguration() error {
 	// Check for new configuration mode: -cid with -server or -listen
 	if *configID != "" {
 		// New mode: fetch config from APS
-		if *serverAddr == "" && *listenPort == 0 {
-			return fmt.Errorf("when using -cid, you must specify either -server <addr:port> or -listen <port>")
+		if *serverAddr == "" {
+			return fmt.Errorf("when using -cid, you must specify -server <addr:port>")
 		}
 
 		if *serverAddr != "" {
@@ -140,14 +108,6 @@ func initializeConfiguration() error {
 			return nil
 		}
 
-		if *listenPort > 0 {
-			// Passive mode: start listener and wait for APS to connect
-			log.Printf("Starting passive listener on port %d, waiting for APS connection with config ID: %s", *listenPort, *configID)
-			// For now, return nil - passive mode will be implemented in a later phase
-			// The runClientSession will handle the passive connection
-			usingLegacyMode = false
-			return nil
-		}
 	}
 
 	// Legacy mode: use -tunnel, -name, -password flags (deprecated)
@@ -158,17 +118,13 @@ func initializeConfiguration() error {
 			TunnelName:   *tunnelName,
 			EndpointName: *name,
 			Password:     *tunnelPassword,
-			P2PSettings: &P2PSettings{
-				StunServers:        []string{*stunServer},
-				EnableLANDiscovery: true,
-				MaxRelayHops:       3,
-			},
+			
 		}
 		usingLegacyMode = true
 		return nil
 	}
 
-	return fmt.Errorf("configuration required: use -cid <config-id> -server <addr:port> OR -cid <config-id> -listen <port> OR -tunnel <name> (deprecated)")
+	return fmt.Errorf("configuration required: use -cid <config-id> -server <addr:port> OR -tunnel <name> (deprecated)")
 }
 
 // printDeprecationWarning displays a warning about using deprecated flags
@@ -182,7 +138,6 @@ func printDeprecationWarning() {
 ║                                                                            ║
 ║  Recommended usage:                                                        ║
 ║    endpoint -server <aps-addr:port> -cid <config-id>                       ║
-║    endpoint -listen <port> -cid <config-id>                                ║
 ║                                                                            ║
 ║  Please use APS centralized configuration management for unified control. ║
 ╚════════════════════════════════════════════════════════════════════════════╝

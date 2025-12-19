@@ -695,7 +695,6 @@ type ConfigUpdatePayload struct {
 	EndpointName string              `json:"endpointName"`
 	Password     string              `json:"password,omitempty"`
 	PortMappings []PortMappingConfig `json:"portMappings,omitempty"`
-	P2PSettings  *P2PSettings        `json:"p2pSettings,omitempty"`
 }
 
 // MirrorUpdatePayload is sent by APS to inform endpoint of mirror addresses
@@ -741,9 +740,7 @@ func handleConfigUpdate(tc *TunnelConn, msg *TunnelMessage) {
 	if payload.PortMappings != nil {
 		runtimeConfig.PortMappings = payload.PortMappings
 	}
-	if payload.P2PSettings != nil {
-		runtimeConfig.P2PSettings = payload.P2PSettings
-	}
+
 	runtimeConfigMu.Unlock()
 
 	if shouldReconnect {
@@ -754,19 +751,6 @@ func handleConfigUpdate(tc *TunnelConn, msg *TunnelMessage) {
 
 	log.Printf("[CONFIG] Updated runtime config: tunnel=%s, endpoint=%s, portMappings=%d",
 		payload.TunnelName, payload.EndpointName, len(payload.PortMappings))
-
-	// Hot reload P2P components
-	go func() {
-		log.Println("[CONFIG] Restarting P2P components with new configuration...")
-
-		// Stop existing P2P components
-		stopP2PComponents()
-
-		// Re-initialize with new config
-		initializeP2PComponents()
-
-		log.Println("[CONFIG] P2P components restarted successfully")
-	}()
 }
 
 // handleMirrorUpdate processes mirror address updates from APS
@@ -788,11 +772,11 @@ func handleMirrorUpdate(tc *TunnelConn, msg *TunnelMessage) {
 	for _, mirror := range payload.Mirrors {
 		// Parse the mirror address (could be "addr:port" or "cid@addr:port")
 		cfg := connectionManager.ParseServerAddress(mirror, false) // false = not a seed
-		
+
 		// Add as dynamic server if not already connected
 		if connectionManager.AddDynamicServer(cfg) {
 			log.Printf("[MIRROR] Starting connection to new mirror: %s (cid: %s)", cfg.Address, cfg.ConfigID)
-			
+
 			// Start connection in a new goroutine
 			go runServerConnection(context.Background(), cfg.Address)
 		} else {

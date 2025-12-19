@@ -459,7 +459,7 @@ var admin_page_content = `
         </div>
         <div class="table-wrap">
           <table class="bx--data-table carbon-table">
-            <thead><tr><th>配置ID</th><th>隧道名称</th><th>节点名称</th><th>端口映射</th><th>P2P</th><th>LAN发现</th><th>最大中继</th><th>拦截数</th><th>操作</th></tr></thead>
+            <thead><tr><th>配置ID</th><th>隧道名称</th><th>节点名称</th><th>端口映射</th><th>操作</th></tr></thead>
             <tbody id="endpoints-tbody"></tbody>
           </table>
         </div>
@@ -486,13 +486,6 @@ var admin_page_content = `
             <textarea id="add-endpoint-port-mappings" class="bx--text-input" rows="4" placeholder='[{"localPort": 8080, "targetEndpoint": "other-ep", "remoteTarget": "127.0.0.1:80"}]'></textarea>
             <div class="bx--form__helper-text">localPort: 本地监听端口, targetEndpoint: 目标节点名, remoteTarget: 目标地址</div>
           </div>
-          <div class="bx--form-item mt-1">
-            <label class="bx--label">P2P设置</label>
-            <div class="bx--checkbox-wrapper"><input id="add-endpoint-p2p-enabled" type="checkbox" class="bx--checkbox" checked><label for="add-endpoint-p2p-enabled" class="bx--checkbox-label"><span class="bx--checkbox-label-text">启用P2P</span></label></div>
-            <div class="bx--checkbox-wrapper mt-1"><input id="add-endpoint-lan-enabled" type="checkbox" class="bx--checkbox" checked><label for="add-endpoint-lan-enabled" class="bx--checkbox-label"><span class="bx--checkbox-label-text">启用LAN发现</span></label></div>
-          </div>
-          <div class="bx--form-item mt-1"><label class="bx--label">STUN服务器 (逗号分隔)</label><input id="add-endpoint-stun" type="text" class="bx--text-input" placeholder="stun.miwifi.com:3478"></div>
-          <div class="bx--form-item mt-1"><label class="bx--label">最大中继跳数</label><input id="add-endpoint-max-hops" type="number" class="bx--text-input" placeholder="3" value="3"></div>
         </div>
         <div class="bx--modal-footer">
           <button class="bx--btn bx--btn--secondary" type="button" data-modal-close>取消</button>
@@ -520,13 +513,6 @@ var admin_page_content = `
             <label class="bx--label">端口映射 (JSON数组)</label>
             <textarea id="edit-endpoint-port-mappings" class="bx--text-input" rows="4"></textarea>
           </div>
-          <div class="bx--form-item mt-1">
-            <label class="bx--label">P2P设置</label>
-            <div class="bx--checkbox-wrapper"><input id="edit-endpoint-p2p-enabled" type="checkbox" class="bx--checkbox"><label for="edit-endpoint-p2p-enabled" class="bx--checkbox-label"><span class="bx--checkbox-label-text">启用P2P</span></label></div>
-            <div class="bx--checkbox-wrapper mt-1"><input id="edit-endpoint-lan-enabled" type="checkbox" class="bx--checkbox"><label for="edit-endpoint-lan-enabled" class="bx--checkbox-label"><span class="bx--checkbox-label-text">启用LAN发现</span></label></div>
-          </div>
-          <div class="bx--form-item mt-1"><label class="bx--label">STUN服务器 (逗号分隔)</label><input id="edit-endpoint-stun" type="text" class="bx--text-input"></div>
-          <div class="bx--form-item mt-1"><label class="bx--label">最大中继跳数</label><input id="edit-endpoint-max-hops" type="number" class="bx--text-input"></div>
         </div>
         <div class="bx--modal-footer">
           <button class="bx--btn bx--btn--secondary" type="button" data-modal-close>取消</button>

@@ -46,7 +46,7 @@ type Config struct {
 	Servers           map[string]*ListenConfig       `json:"servers"`
 	Proxies           map[string]*ProxyConfig        `json:"proxies,omitempty"`
 	Tunnels           map[string]*TunnelConfig       `json:"tunnels,omitempty"`
-	Endpoints         map[string]*EndpointConfig_APS `json:"endpoints,omitempty"` // Endpoint configurations for P2P management
+	Endpoints         map[string]*EndpointConfig_APS `json:"endpoints,omitempty"` // Endpoint configurations
 	Mirrors           map[string][]string            `json:"mirrors,omitempty"`   // Mirror groups
 	Auth              *AuthConfig                    `json:"auth,omitempty"`
 	AuthProviders     map[string]*AuthProviderConfig `json:"authProviders,omitempty"` // 第三方认证提供商配置
@@ -66,7 +66,6 @@ type EndpointConfig_APS struct {
 	Password          string                `json:"password,omitempty"`
 	Mirror            string                `json:"mirror,omitempty"` // Reference to mirrors group
 	PortMappings      []EndpointPortMapping `json:"portMappings,omitempty"`
-	P2P               *EndpointP2PSettings  `json:"p2p,omitempty"`
 	LogLevel          *int                  `json:"logLevel,omitempty"`
 	LogRetentionHours *int                  `json:"logRetentionHours,omitempty"`
 }
@@ -76,13 +75,6 @@ type EndpointPortMapping struct {
 	LocalPort      int    `json:"localPort"`      // Port this endpoint listens on
 	RemoteTarget   string `json:"remoteTarget"`   // IP:Port on the remote endpoint's network
 	TargetEndpoint string `json:"targetEndpoint"` // Which endpoint to forward traffic to
-}
-
-// EndpointP2PSettings holds P2P connection settings for an endpoint
-type EndpointP2PSettings struct {
-	StunServers        []string `json:"stunServers,omitempty"`
-	EnableLANDiscovery bool     `json:"lanDiscovery,omitempty"`
-	MaxRelayHops       int      `json:"maxRelayHops,omitempty"` // Default 3
 }
 
 // TokenLocation 指定 token 的位置（header、cookie 或 querystring）

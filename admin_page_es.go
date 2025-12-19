@@ -2856,25 +2856,12 @@ async function loadEndpoints() {
       var ep = data[id] || {};
       var portMappingsStr = (ep.portMappings && ep.portMappings.length > 0) ? ep.portMappings.length + "个映射" : "无";
       
-      // P2P and LAN default to true if not specified
-      var p2pEnabled = true;
-      var lanEnabled = true;
-      var maxHops = 3;
-      if (ep.p2pSettings) {
-        p2pEnabled = ep.p2pSettings.enabled !== false;
-        lanEnabled = ep.p2pSettings.lanDiscovery !== false;
-        maxHops = ep.p2pSettings.maxRelayHops || 3;
-      }
-      
       var tr = document.createElement("tr");
       tr.innerHTML =
         "<td>" + id + "</td>" +
         "<td>" + (ep.tunnelName || "") + "</td>" +
         "<td>" + (ep.endpointName || "") + "</td>" +
         "<td>" + portMappingsStr + "</td>" +
-        "<td>" + (p2pEnabled ? "<span style='color:#0e6027'>启用</span>" : "<span style='color:#da1e28'>禁用</span>") + "</td>" +
-        "<td>" + (lanEnabled ? "<span style='color:#0e6027'>启用</span>" : "<span style='color:#da1e28'>禁用</span>") + "</td>" +
-        "<td>" + maxHops + "</td>" +
         "<td>" + (ep.stats ? (ep.stats.intercepted || 0) : "-") + "</td>" +
         "<td><button class='bx--btn bx--btn--sm bx--btn--ghost' onclick='openEditEndpointModal(\"" + id.replace(/"/g, '&quot;') + "\")'>编辑</button> " +
         "<button class='bx--btn bx--btn--sm bx--btn--danger--ghost' onclick='deleteEndpoint(\"" + id.replace(/"/g, '&quot;') + "\")'>删除</button></td>";
@@ -2916,10 +2903,6 @@ function openAddEndpointModal() {
   document.getElementById("add-endpoint-name").value = "";
   document.getElementById("add-endpoint-password").value = "";
   document.getElementById("add-endpoint-port-mappings").value = "";
-  document.getElementById("add-endpoint-p2p-enabled").checked = true;
-  document.getElementById("add-endpoint-lan-enabled").checked = true;
-  document.getElementById("add-endpoint-stun").value = "";
-  document.getElementById("add-endpoint-max-hops").value = "3";
   populateTunnelSelectorsForEndpoints();
   var modal = document.querySelector('#endpoint-add-modal');
   if (modal) modal.classList.add('is-visible');
@@ -2940,10 +2923,6 @@ async function openEditEndpointModal(endpointId) {
     document.getElementById("edit-endpoint-name").value = ep.endpointName || "";
     document.getElementById("edit-endpoint-password").value = "";
     document.getElementById("edit-endpoint-port-mappings").value = ep.portMappings ? JSON.stringify(ep.portMappings, null, 2) : "";
-    document.getElementById("edit-endpoint-p2p-enabled").checked = ep.p2pSettings ? ep.p2pSettings.enabled !== false : true;
-    document.getElementById("edit-endpoint-lan-enabled").checked = ep.p2pSettings ? ep.p2pSettings.lanDiscovery !== false : true;
-    document.getElementById("edit-endpoint-stun").value = (ep.p2pSettings && ep.p2pSettings.stunServers) ? ep.p2pSettings.stunServers.join(", ") : "";
-    document.getElementById("edit-endpoint-max-hops").value = (ep.p2pSettings && ep.p2pSettings.maxRelayHops) ? ep.p2pSettings.maxRelayHops : "3";
     
     var modal = document.querySelector('#endpoint-edit-modal');
     if (modal) modal.classList.add('is-visible');
@@ -2961,10 +2940,6 @@ async function confirmAddEndpoint() {
   var endpointName = document.getElementById("add-endpoint-name").value.trim();
   var password = document.getElementById("add-endpoint-password").value;
   var portMappingsStr = document.getElementById("add-endpoint-port-mappings").value.trim();
-  var p2pEnabled = document.getElementById("add-endpoint-p2p-enabled").checked;
-  var lanEnabled = document.getElementById("add-endpoint-lan-enabled").checked;
-  var stunServers = document.getElementById("add-endpoint-stun").value.trim();
-  var maxHops = document.getElementById("add-endpoint-max-hops").value;
   
   // Auto-generate UUID if config ID is empty
   if (!id) {
@@ -2992,12 +2967,6 @@ async function confirmAddEndpoint() {
     endpointName: endpointName,
     password: password || undefined,
     portMappings: portMappings,
-    p2pSettings: {
-      enabled: p2pEnabled,
-      lanDiscovery: lanEnabled,
-      stunServers: stunServers ? stunServers.split(",").map(function(s){return s.trim();}).filter(function(s){return s;}) : [],
-      maxRelayHops: parseInt(maxHops, 10) || 3
-    }
   };
   
   try {
@@ -3026,10 +2995,6 @@ async function confirmEditEndpoint() {
   var endpointName = document.getElementById("edit-endpoint-name").value.trim();
   var password = document.getElementById("edit-endpoint-password").value;
   var portMappingsStr = document.getElementById("edit-endpoint-port-mappings").value.trim();
-  var p2pEnabled = document.getElementById("edit-endpoint-p2p-enabled").checked;
-  var lanEnabled = document.getElementById("edit-endpoint-lan-enabled").checked;
-  var stunServers = document.getElementById("edit-endpoint-stun").value.trim();
-  var maxHops = document.getElementById("edit-endpoint-max-hops").value;
   
   if (!id) { if (msg) msg.textContent = "配置ID必填"; return; }
   if (!tunnelName) { if (msg) msg.textContent = "隧道名称必填"; return; }
@@ -3044,12 +3009,6 @@ async function confirmEditEndpoint() {
     tunnelName: tunnelName,
     endpointName: endpointName,
     portMappings: portMappings,
-    p2pSettings: {
-      enabled: p2pEnabled,
-      lanDiscovery: lanEnabled,
-      stunServers: stunServers ? stunServers.split(",").map(function(s){return s.trim();}).filter(function(s){return s;}) : [],
-      maxRelayHops: parseInt(maxHops, 10) || 3
-    }
   };
   if (password) payload.password = password;
   

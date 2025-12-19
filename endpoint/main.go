@@ -27,9 +27,7 @@ import (
 
 var (
 	// New flags (recommended)
-	configID   = flag.String("cid", "", "Configuration ID to fetch from APS (recommended)")
-	listenPort = flag.Int("listen", 0, "Port to listen for incoming APS connections (passive mode)")
-	stunServer = flag.String("stun", "stun.miwifi.com:3478", "STUN server address for NAT detection")
+	configID = flag.String("cid", "", "Configuration ID to fetch from APS (recommended)")
 
 	// Legacy flags (deprecated but supported)
 	serverAddr     = flag.String("server", "", "APS server address(es) - single address or comma-separated list (addr:port,addr:port,...)")
@@ -43,7 +41,6 @@ var (
 	start     = flag.Bool("start", false, "start system service")
 	stop      = flag.Bool("stop", false, "stop system service")
 	restart   = flag.Bool("restart", false, "restart system service")
-	protocol  = flag.String("protocol", "tcp", "tunnel protocol: tcp (default: tcp)")
 
 	proxyConnections sync.Map // Stores map[string]net.Conn for proxy connections
 	logger           service.Logger
@@ -53,12 +50,7 @@ var (
 	runtimeConfigMu sync.RWMutex
 	usingLegacyMode bool
 
-	// P2P components
-	p2pManager        *P2PManager
-	lanDiscovery      *LANDiscovery
-	relayManager      *RelayManager
 	portMapper        *PortMapper
-	upnpClient        *UPnPClient
 	connectionManager *ConnectionManager // Manages multiple APS connections
 )
 
@@ -115,9 +107,6 @@ func (p *program) run() {
 		return
 	}
 
-	// Initialize P2P components
-	initializeP2PComponents()
-
 	go func() {
 		for {
 			select {
@@ -148,111 +137,8 @@ func (p *program) run() {
 }
 
 func (p *program) Stop(s service.Service) error {
-	stopP2PComponents()
 	close(p.exit)
 	return nil
-}
-
-// initializeP2PComponents initializes all P2P-related components
-func initializeP2PComponents() {
-	tunnelName := GetEffectiveTunnelName()
-	endpointName := GetEffectiveEndpointName()
-
-	if tunnelName == "" || endpointName == "" {
-		log.Println("[P2P] Skipping P2P initialization (missing tunnel/endpoint name)")
-		return
-	}
-
-	// Get STUN servers
-	stunServers := []string{*stunServer}
-	if runtimeConfig != nil && runtimeConfig.P2PSettings != nil && len(runtimeConfig.P2PSettings.StunServers) > 0 {
-		stunServers = runtimeConfig.P2PSettings.StunServers
-	}
-
-	// Get max relay hops
-	maxHops := 3
-	if runtimeConfig != nil {
-		maxHops = runtimeConfig.GetMaxRelayHops()
-	}
-
-	// Initialize P2P Manager
-	p2pManager = NewP2PManager(stunServers, endpointName, tunnelName)
-	if err := p2pManager.Start(); err != nil {
-		log.Printf("[P2P] P2P manager start failed: %v", err)
-	}
-
-	// Initialize LAN Discovery (if enabled)
-	enableLAN := true
-	if runtimeConfig != nil {
-		enableLAN = runtimeConfig.IsLANDiscoveryEnabled()
-	}
-
-	if enableLAN {
-		lanDiscovery = NewLANDiscovery(tunnelName, endpointName)
-		if err := lanDiscovery.Start(); err != nil {
-			log.Printf("[P2P] LAN discovery start failed: %v", err)
-		}
-	}
-
-	// Initialize Relay Manager
-	if lanDiscovery != nil {
-		relayManager = NewRelayManager(lanDiscovery, maxHops)
-		if err := relayManager.Start(); err != nil {
-			log.Printf("[P2P] Relay manager start failed: %v", err)
-		}
-	}
-
-	// Initialize Port Mapper (if we have port mappings)
-	if runtimeConfig != nil && len(runtimeConfig.PortMappings) > 0 {
-		portMapper = NewPortMapper(runtimeConfig.PortMappings)
-		if err := portMapper.Start(); err != nil {
-			log.Printf("[P2P] Port mapper start failed: %v", err)
-		}
-	}
-
-	// Initialize UPnP for NAT traversal improvement
-	upnpClient = NewUPnPClient()
-	if err := upnpClient.Discover(); err != nil {
-		log.Printf("[UPNP] UPnP discovery failed: %v (continuing without UPnP)", err)
-	} else {
-		// Try to add port mapping for P2P connections
-		// Use a random high port for external mapping
-		if lanDiscovery != nil && lanDiscovery.GetListenerPort() > 0 {
-			port := lanDiscovery.GetListenerPort()
-			err := upnpClient.AddPortMapping(port, port, "TCP", "APS-Endpoint-P2P", 3600)
-			if err != nil {
-				log.Printf("[UPNP] Failed to add port mapping: %v", err)
-			}
-		}
-	}
-
-	log.Printf("[P2P] Components initialized (STUN: %v, LAN: %v, Relay: %v, PortMap: %v, UPnP: %v)",
-		p2pManager != nil, lanDiscovery != nil, relayManager != nil, portMapper != nil, upnpClient.IsAvailable())
-}
-
-// stopP2PComponents cleanly stops all P2P components
-func stopP2PComponents() {
-	if upnpClient != nil {
-		upnpClient.ClearAllMappings()
-		upnpClient = nil
-	}
-	if portMapper != nil {
-		portMapper.Stop()
-		portMapper = nil
-	}
-	if relayManager != nil {
-		relayManager.Stop()
-		relayManager = nil
-	}
-	if lanDiscovery != nil {
-		lanDiscovery.Stop()
-		lanDiscovery = nil
-	}
-	if p2pManager != nil {
-		p2pManager.Stop()
-		p2pManager = nil
-	}
-	log.Println("[P2P] All components stopped")
 }
 
 func main() {

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"log"
+	"net"
 	"strings"
 	"sync"
 )
@@ -46,6 +47,16 @@ func (cm *ConnectionManager) ParseServerAddress(addr string, isSeed bool) *Serve
 	} else {
 		configID = cm.globalCID
 		address = addr
+	}
+
+	// Check if address has port, default to 80 if missing
+	if _, _, err := net.SplitHostPort(address); err != nil {
+		if strings.Contains(err.Error(), "missing port") {
+			address = address + ":80"
+		} else if strings.Contains(err.Error(), "too many colons") {
+			// Likely IPv6 literal without brackets/port, e.g. ::1
+			address = net.JoinHostPort(address, "80")
+		}
 	}
 
 	return &ServerConfig{

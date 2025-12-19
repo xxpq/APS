@@ -7,8 +7,6 @@ import (
 	"net"
 	"sync"
 	"time"
-
-	"github.com/xtaci/smux"
 )
 
 // PortMapper manages local port listeners that forward traffic to remote endpoints
@@ -129,62 +127,8 @@ func (pm *PortMapper) handleConnection(conn net.Conn, mapping PortMappingConfig)
 	log.Printf("[PORT-MAP] New connection from %s on port %d -> %s via endpoint %s",
 		clientAddr, mapping.LocalPort, mapping.RemoteTarget, mapping.TargetEndpoint)
 
-	// Try to use P2P SMUX if available
-	if p2pManager != nil {
-		if p2pConn, ok := p2pManager.GetConnection(mapping.TargetEndpoint); ok {
-			if p2pConn.Session != nil {
-				// Use P2P SMUX stream
-				log.Printf("[PORT-MAP] Using P2P %s connection to %s",
-					p2pConn.ConnectionType, mapping.TargetEndpoint)
-				pm.handleP2PStreamForward(conn, p2pConn.Session, mapping, clientAddr)
-				return
-			}
-		}
-	}
-
-	// Fall back to APS tunnel (also uses SMUX now)
 	log.Printf("[PORT-MAP] Using APS tunnel for %s", mapping.TargetEndpoint)
 	pm.handleTunnelStreamForward(conn, tc, mapping, clientAddr)
-}
-
-// handleP2PStreamForward forwards connection via P2P SMUX stream
-func (pm *PortMapper) handleP2PStreamForward(localConn net.Conn, session *smux.Session, mapping PortMappingConfig, clientIP string) {
-	stream, err := session.OpenStream()
-	if err != nil {
-		log.Printf("[PORT-MAP] Failed to open P2P stream: %v", err)
-		return
-	}
-	defer stream.Close()
-
-	// Send port forward request on the stream
-	tc := NewTunnelConn(stream)
-	if err := tc.SendJSON(MsgTypePortForwardRequest, PortForwardRequestPayload{
-		TargetEndpoint: mapping.TargetEndpoint,
-		RemoteTarget:   mapping.RemoteTarget,
-		ClientIP:       clientIP,
-	}); err != nil {
-		log.Printf("[PORT-MAP] Failed to send request on P2P stream: %v", err)
-		return
-	}
-
-	log.Printf("[PORT-MAP] P2P stream opened, starting bidirectional copy")
-
-	// Bidirectional copy
-	var wg sync.WaitGroup
-	wg.Add(2)
-
-	go func() {
-		defer wg.Done()
-		io.Copy(stream, localConn)
-	}()
-
-	go func() {
-		defer wg.Done()
-		io.Copy(localConn, stream)
-	}()
-
-	wg.Wait()
-	log.Printf("[PORT-MAP] P2P stream copy finished")
 }
 
 // handleTunnelStreamForward forwards connection via APS tunnel SMUX stream

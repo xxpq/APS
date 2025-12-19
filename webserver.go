@@ -771,7 +771,6 @@ func (h *AdminHandlers) handleEndpointConfigs(w http.ResponseWriter, r *http.Req
 				"endpointName": endpoint.EndpointName,
 				"password":     effectivePassword,
 				"portMappings": endpoint.PortMappings,
-				"p2p":          endpoint.P2P,
 			},
 		})
 		return
@@ -877,7 +876,6 @@ func (h *AdminHandlers) pushConfigToEndpoint(tunnelName, endpointName string, co
 		"tunnelName":   config.TunnelName,
 		"endpointName": config.EndpointName,
 		"portMappings": config.PortMappings,
-		"p2pSettings":  config.P2P,
 	}
 
 	// Only include password if it's set
