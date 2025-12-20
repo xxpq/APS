@@ -25,6 +25,16 @@ type TCPTunnelServer struct {
 	running       bool
 }
 
+// EndpointStats holds statistics for an endpoint
+type EndpointStats struct {
+	RequestCount uint64  `json:"requestCount"`
+	Errors       uint64  `json:"errors"`
+	Intercepted  uint64  `json:"intercepted"`
+	BytesSent    uint64  `json:"bytesSent"`
+	BytesRecv    uint64  `json:"bytesRecv"`
+	QPS          float64 `json:"qps"`
+}
+
 // TCPEndpoint represents an endpoint connected via TCP
 type TCPEndpoint struct {
 	ID               string
@@ -34,6 +44,7 @@ type TCPEndpoint struct {
 	RemoteAddr       string
 	OnlineTime       time.Time
 	LastActivityTime time.Time
+	Stats            EndpointStats
 
 	// Session key manager for dynamic encryption
 	KeyManager *SessionKeyManager
@@ -412,6 +423,16 @@ func (ep *TCPEndpoint) Close() {
 	}
 	ep.proxyConns = make(map[string]*tcpProxyConnection)
 	ep.mu.Unlock()
+}
+
+// IsOnline returns true if the endpoint is online
+func (ep *TCPEndpoint) IsOnline() bool {
+	select {
+	case <-ep.done:
+		return false
+	default:
+		return true
+	}
 }
 
 // writeLoop sends messages to the endpoint

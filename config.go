@@ -18,6 +18,13 @@ import (
 // IsDebugMode 全局debug模式标志
 var IsDebugMode bool = false
 
+// DebugLog 只在debug模式下输出日志
+func DebugLog(format string, args ...interface{}) {
+	if IsDebugMode {
+		log.Printf(format, args...)
+	}
+}
+
 // Server Types
 const (
 	ServerTypeTCP     = 1
@@ -45,6 +52,7 @@ type Config struct {
 	Firewalls         map[string]*FirewallRule       `json:"firewalls,omitempty"`    // 防火墙规则组配置
 	Mappings          []Mapping                      `json:"mappings"`
 	Version           int64                          `json:"version,omitempty"` // 配置版本号，用于并发编辑检测
+	RateLimitRules    map[string]*RateLimitRule      `json:"rateLimitRules,omitempty"`
 	mu                sync.RWMutex
 }
 
@@ -230,6 +238,7 @@ type User struct {
 	LogRetentionHours *int        `json:"logRetentionHours,omitempty"` // 日志保留时长(小时)
 	Endpoint          interface{} `json:"endpoint,omitempty"`          // string or []string
 	Tunnel            interface{} `json:"tunnel,omitempty"`            // string or []string
+	RateLimitRules    []string    `json:"rateLimitRules,omitempty"`    // 绑定的流控规则名
 	ConnectionPolicies
 	TrafficPolicies
 }
@@ -467,6 +476,7 @@ type Mapping struct {
 	LogLevel          *int        `json:"logLevel,omitempty"`          // 日志等级: 0=不记录, 1=基本请求, 2=完整请求
 	LogRetentionHours *int        `json:"logRetentionHours,omitempty"` // 日志保留时长(小时)
 	Firewall          string      `json:"firewall,omitempty"`          // 引用 firewalls 的 key
+	RateLimitRules    []string    `json:"rateLimitRules,omitempty"`    // 绑定的流控规则名
 	ConnectionPolicies
 	TrafficPolicies
 
@@ -504,6 +514,7 @@ type ListenConfig struct {
 	Public            *bool       `json:"public,omitempty"`            // true: 0.0.0.0:port, false: 127.0.0.1:port (default true)
 	Panel             *bool       `json:"panel,omitempty"`             // true: register /.api & /.admin, false: do not (default false)
 	Firewall          string      `json:"firewall,omitempty"`          // 引用 firewalls 的 key
+	RateLimitRules    []string    `json:"rateLimitRules,omitempty"`    // 绑定的流控规则名
 	ConnectionPolicies
 	TrafficPolicies
 }

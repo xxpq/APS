@@ -115,10 +115,11 @@ type AdminHandlers struct {
 	statsDB        *StatsDB
 	loggingDB      *LoggingDB
 	logBroadcaster *LogBroadcaster
+	rateLimiter    *RateLimitEngine
 }
 
 // NewAdminHandlers creates a new AdminHandlers instance.
-func NewAdminHandlers(config *Config, configPath string, statsCollector *StatsCollector, statsDB *StatsDB, loggingDB *LoggingDB, logBroadcaster *LogBroadcaster) *AdminHandlers {
+func NewAdminHandlers(config *Config, configPath string, statsCollector *StatsCollector, statsDB *StatsDB, loggingDB *LoggingDB, logBroadcaster *LogBroadcaster, rateLimiter *RateLimitEngine) *AdminHandlers {
 	return &AdminHandlers{
 		config:         config,
 		configPath:     configPath,
@@ -127,6 +128,7 @@ func NewAdminHandlers(config *Config, configPath string, statsCollector *StatsCo
 		statsDB:        statsDB,
 		loggingDB:      loggingDB,
 		logBroadcaster: logBroadcaster,
+		rateLimiter:    rateLimiter,
 	}
 }
 
@@ -149,6 +151,8 @@ func (h *AdminHandlers) RegisterHandlers(mux *http.ServeMux) {
 	mux.HandleFunc("/.api/endpoints", h.handleEndpointConfigs) // Endpoint configuration for P2P management
 	mux.HandleFunc("/.api/servers", h.handleServers)
 	mux.HandleFunc("/.api/rules", h.handleRules)
+	mux.HandleFunc("/.api/rate_limit_rules", h.handleRateLimitRules)  // New endpoint
+	mux.HandleFunc("/.api/online_endpoints", h.handleOnlineEndpoints) // New endpoint
 	mux.HandleFunc("/.api/firewalls", h.handleFirewalls)
 	mux.HandleFunc("/.api/auth_providers", h.handleAuthProviders)
 	mux.HandleFunc("/.api/log", h.handleLogs)
@@ -161,6 +165,23 @@ func (h *AdminHandlers) RegisterHandlers(mux *http.ServeMux) {
 		}
 
 		stats := h.statsCollector.GetIPStats()
+
+		// Enrich stats with location and rate limiter status
+		for i := range stats {
+			// Get location from ASN cache
+			location, err := GetIPLocation(stats[i].IP)
+			if err == nil && location != nil {
+				stats[i].Location = location
+			}
+
+			// Get rate limiter status (true = not banned, false = banned)
+			if h.rateLimiter != nil {
+				stats[i].Status = !h.rateLimiter.IsBanned(stats[i].IP)
+			} else {
+				stats[i].Status = true
+			}
+		}
+
 		response := struct {
 			IPs       []IPRequestStats `json:"ips"`
 			TotalIPs  int              `json:"totalIPs"`
@@ -310,13 +331,13 @@ func (h *AdminHandlers) handleTunnelEndpoints(w http.ResponseWriter, r *http.Req
 	}
 
 	type PublicEndpointInfo struct {
-		Name         string         `json:"name"`
-		Online       bool           `json:"online"`
-		RemoteAddr   string         `json:"remoteAddr"`
-		OnlineTime   string         `json:"onlineTime"`
-		LastActivity string         `json:"lastActivity"`
-		Latency      string         `json:"latency"`
-		Stats        *PublicMetrics `json:"stats,omitempty"` // Stats enabled
+		Name         string      `json:"name"`
+		Online       bool        `json:"online"`
+		RemoteAddr   string      `json:"remoteAddr"`
+		OnlineTime   string      `json:"onlineTime"`
+		LastActivity string      `json:"lastActivity"`
+		Latency      string      `json:"latency"`
+		Stats        interface{} `json:"stats,omitempty"` // Stats enabled
 	}
 
 	response := struct {
@@ -1694,4 +1715,69 @@ func indexOf(s, substr string) int {
 		}
 	}
 	return -1
+}
+
+func (h *AdminHandlers) handleRateLimitRules(w http.ResponseWriter, r *http.Request) {
+	if !isAdminRequest(r, h.config) {
+		return
+	}
+
+	h.configMux.Lock()
+	defer h.configMux.Unlock()
+
+	if r.Method == http.MethodGet {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(h.config.RateLimitRules)
+		return
+	}
+
+	if r.Method == http.MethodPost {
+		var rule RateLimitRule
+		if err := json.NewDecoder(r.Body).Decode(&rule); err != nil {
+			http.Error(w, err.Error(), 400)
+			return
+		}
+		if h.config.RateLimitRules == nil {
+			h.config.RateLimitRules = make(map[string]*RateLimitRule)
+		}
+		h.config.RateLimitRules[rule.Name] = &rule
+		if err := h.saveConfigLocked(); err != nil {
+			http.Error(w, "Failed to save config: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		if h.rateLimiter != nil {
+			h.rateLimiter.UpdateRule(&rule)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(rule)
+		return
+	}
+
+	if r.Method == http.MethodDelete {
+		name := r.URL.Query().Get("name")
+		delete(h.config.RateLimitRules, name)
+		if err := h.saveConfigLocked(); err != nil {
+			http.Error(w, "Failed to save config: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if h.rateLimiter != nil {
+			h.rateLimiter.DeleteRule(name)
+		}
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+}
+
+func (h *AdminHandlers) handleOnlineEndpoints(w http.ResponseWriter, r *http.Request) {
+	if !isAdminRequest(r, h.config) {
+		return
+	}
+
+	endpoints := h.tunnelManager.GetAllOnlineEndpoints()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"endpoints": endpoints,
+	})
 }

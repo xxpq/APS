@@ -443,6 +443,45 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Rate Limiting Check (Mapping and User level)
+	if p.rateLimiter != nil {
+		clientIP := getClientIP(r)
+		token := p.extractToken(r)
+
+		bindings := make(map[string][]string)
+
+		if mapping != nil && len(mapping.RateLimitRules) > 0 {
+			// Use mapping From URL as identifier
+			bindings["mapping:"+mapping.GetFromURL()] = mapping.RateLimitRules
+		}
+
+		if user != nil && len(user.RateLimitRules) > 0 {
+			bindings["user:"+username] = user.RateLimitRules
+		}
+
+		if len(bindings) > 0 {
+			result := p.rateLimiter.CheckRequest(clientIP, token, bindings)
+			if !result.Allowed {
+				if result.Action == ActionRedirect {
+					http.Redirect(w, r, result.RedirectURL, http.StatusFound)
+					return
+				}
+				if result.Action == ActionQueue {
+					time.Sleep(result.WaitDuration)
+				} else {
+					http.Error(w, result.Message, http.StatusTooManyRequests)
+					return
+				}
+			}
+
+			p.rateLimiter.OnRequestStart(clientIP, token, bindings)
+			defer func() {
+				// Use current value of bytesSent which is updated at the end
+				p.rateLimiter.OnRequestEnd(clientIP, token, bindings, int64(bytesSent))
+			}()
+		}
+	}
+
 	// Check firewall rules (server firewall takes priority over mapping firewall)
 	if serverConfig != nil && serverConfig.Firewall != "" {
 		firewallRule = GetFirewallRule(p.config, serverConfig.Firewall)

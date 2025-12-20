@@ -19,14 +19,14 @@ type RequestPayload struct {
 
 // EndpointInfo contains information about a connected endpoint
 type EndpointInfo struct {
-	ID               string         `json:"id"`
-	Name             string         `json:"name"`
-	TunnelName       string         `json:"tunnel_name"`
-	RemoteAddr       string         `json:"remote_addr"`
-	OnlineTime       time.Time      `json:"online_time"`
-	LastActivityTime time.Time      `json:"last_activity_time"`
-	Status           string         `json:"status"`
-	Stats            *PublicMetrics `json:"stats,omitempty"` // Statistics for this endpoint (tunnel-level)
+	ID               string      `json:"id"`
+	Name             string      `json:"name"`
+	TunnelName       string      `json:"tunnel_name"`
+	RemoteAddr       string      `json:"remote_addr"`
+	OnlineTime       time.Time   `json:"online_time"`
+	LastActivityTime time.Time   `json:"last_activity_time"`
+	Status           string      `json:"status"`
+	Stats            interface{} `json:"stats,omitempty"` // Statistics for this endpoint (tunnel-level)
 }
 
 // TunnelManagerInterface 定义隧道管理器的统一接口
@@ -51,6 +51,9 @@ type TunnelManagerInterface interface {
 
 	// Config hot reload
 	SendConfigUpdate(tunnelName, endpointName string, payload []byte) error
+
+	// Online endpoints
+	GetAllOnlineEndpoints() []EndpointInfo
 }
 
 // 确保HybridTunnelManager实现这个接口

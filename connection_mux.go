@@ -14,9 +14,27 @@ type ConnectionMux struct {
 	listener      net.Listener
 	httpHandler   func(net.Conn) // Handler for HTTP connections
 	tunnelHandler func(net.Conn) // Handler for TCP tunnel connections
-	rateLimiter   *IPRateLimiter // Rate limiter for IP banning
+	rateLimiter   *RateLimitEngine
+	ruleNames     []string
+	serverName    string
 	mu            sync.RWMutex
 	running       bool
+}
+
+// RateLimitConn wraps a net.Conn to track connection end
+type RateLimitConn struct {
+	net.Conn
+	onClose func()
+	once    sync.Once
+}
+
+func (c *RateLimitConn) Close() error {
+	c.once.Do(func() {
+		if c.onClose != nil {
+			c.onClose()
+		}
+	})
+	return c.Conn.Close()
 }
 
 // PeekConn wraps a net.Conn with peek/unread capability
@@ -76,10 +94,12 @@ func (m *ConnectionMux) SetTunnelHandler(handler func(net.Conn)) {
 }
 
 // SetRateLimiter sets the rate limiter for connection tracking
-func (m *ConnectionMux) SetRateLimiter(limiter *IPRateLimiter) {
+func (m *ConnectionMux) SetRateLimiter(limiter *RateLimitEngine, serverName string, ruleNames []string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.rateLimiter = limiter
+	m.serverName = serverName
+	m.ruleNames = ruleNames
 }
 
 // Start starts accepting and routing connections
@@ -118,20 +138,46 @@ func (m *ConnectionMux) handleConnection(conn net.Conn) {
 	ip := extractIPFromAddr(conn.RemoteAddr().String())
 
 	// Check if IP is banned
+	// Check if IP is banned or rate limited
 	m.mu.RLock()
 	rateLimiter := m.rateLimiter
+	serverName := m.serverName
+	ruleNames := m.ruleNames
 	m.mu.RUnlock()
 
 	if rateLimiter != nil {
+		// 1. Check if banned (fast check)
 		if rateLimiter.IsBanned(ip) {
 			DebugLog("[RATE LIMIT] Blocked connection from banned IP: %s", ip)
 			conn.Close()
 			return
 		}
 
-		// Register connection for tracking
-		rateLimiter.RegisterConnection(ip, conn)
-		defer rateLimiter.UnregisterConnection(ip, conn)
+		// 2. Check rules if any
+		if len(ruleNames) > 0 {
+			bindings := map[string][]string{
+				"server:" + serverName: ruleNames,
+			}
+			result := rateLimiter.CheckRequest(ip, "", bindings)
+			if !result.Allowed {
+				DebugLog("[RATE LIMIT] Connection rejected by rule: %s", result.Message)
+				conn.Close()
+				return
+			}
+
+			// 3. Track connection
+			rateLimiter.OnRequestStart(ip, "", bindings)
+
+			// Wrap connection to track end
+			conn = &RateLimitConn{
+				Conn: conn,
+				onClose: func() {
+					// We don't know bytes transferred here easily without wrapping Read/Write.
+					// For now pass 0 bytes.
+					rateLimiter.OnRequestEnd(ip, "", bindings, 0)
+				},
+			}
+		}
 	}
 
 	peekConn := NewPeekConn(conn)

@@ -9,6 +9,8 @@ var admin_page_js = `
     const configUrl = "/.api/config";
     const loginUrl = "/.api/login";
     const logoutUrl = "/.api/logout";
+    const rateLimitRulesUrl = "/.api/rate_limit_rules";
+    const onlineEndpointsUrl = "/.api/online_endpoints";
 
     // Cookie 工具函数
     function setCookie(name, value, days) {
@@ -101,6 +103,7 @@ var admin_page_js = `
           if (typeof populateFirewallSelectors === "function") populateFirewallSelectors();
           if (typeof populateAuthProviderSelectors === "function") populateAuthProviderSelectors();
         }
+        else if (tabId === "tab-rate-limits" && typeof loadRateLimitRules === "function") loadRateLimitRules();
         else if (tabId === "tab-firewalls" && typeof loadFirewalls === "function") loadFirewalls();
         else if (tabId === "tab-auth-providers" && typeof loadAuthProviders === "function") loadAuthProviders();
         else if (tabId === "tab-endpoints" && typeof loadEndpoints === "function") {
@@ -726,6 +729,7 @@ function openAddUserModal() {
   document.getElementById("add-user-token").value = "";
   document.getElementById("add-user-log-level").value = "";
   document.getElementById("add-user-log-retention").value = "";
+  document.getElementById("add-user-rate-limit-rules").value = "";
   var modal = document.querySelector('#user-add-modal');
   if (modal) modal.classList.add('is-visible');
 }
@@ -746,6 +750,7 @@ async function openEditUserModal(username) {
     document.getElementById("edit-user-token").value = u.token || "";
     document.getElementById("edit-user-log-level").value = (u.logLevel !== undefined && u.logLevel !== null) ? u.logLevel : "";
     document.getElementById("edit-user-log-retention").value = (u.logRetentionHours !== undefined && u.logRetentionHours !== null) ? u.logRetentionHours : "";
+    document.getElementById("edit-user-rate-limit-rules").value = (u.rateLimitRules || []).join(", ");
     
     var modal = document.querySelector('#user-edit-modal');
     if (modal) modal.classList.add('is-visible');
@@ -780,6 +785,11 @@ async function confirmAddUser() {
   if (logLevel !== "") payload.logLevel = parseInt(logLevel, 10);
   var logRetention = document.getElementById("add-user-log-retention").value;
   if (logRetention !== "") payload.logRetentionHours = parseInt(logRetention, 10);
+
+  var rateLimitRulesStr = document.getElementById("add-user-rate-limit-rules").value.trim();
+  if (rateLimitRulesStr) {
+    payload.rateLimitRules = rateLimitRulesStr.split(",").map(function(s){return s.trim();}).filter(function(s){return s;});
+  }
 
   try {
     var res = await authFetch(usersUrl, { 
@@ -823,6 +833,11 @@ async function confirmEditUser() {
   if (logLevel !== "") payload.logLevel = parseInt(logLevel, 10);
   var logRetention = document.getElementById("edit-user-log-retention").value;
   if (logRetention !== "") payload.logRetentionHours = parseInt(logRetention, 10);
+
+  var rateLimitRulesStr = document.getElementById("edit-user-rate-limit-rules").value.trim();
+  if (rateLimitRulesStr) {
+    payload.rateLimitRules = rateLimitRulesStr.split(",").map(function(s){return s.trim();}).filter(function(s){return s;});
+  }
 
   try {
     var res = await authFetch(usersUrl, { 
@@ -1278,6 +1293,7 @@ function openAddServerModal() {
   document.getElementById("add-server-proxy").checked = false;
   document.getElementById("add-server-log-level").value = "";
   document.getElementById("add-server-log-retention").value = "";
+  document.getElementById("add-server-rate-limit-rules").value = "";
   populateFirewallSelectors();
   var modal = document.querySelector('#server-add-modal');
   if (modal) modal.classList.add('is-visible');
@@ -1306,6 +1322,7 @@ function openEditServerModal(name) {
       document.getElementById("edit-server-proxy").checked = s.proxy || false;
       document.getElementById("edit-server-log-level").value = (s.logLevel !== undefined && s.logLevel !== null) ? s.logLevel : "";
       document.getElementById("edit-server-log-retention").value = (s.logRetentionHours !== undefined && s.logRetentionHours !== null) ? s.logRetentionHours : "";
+      document.getElementById("edit-server-rate-limit-rules").value = (s.rateLimitRules || []).join(", ");
       
       var modal = document.querySelector('#server-edit-modal');
       if (modal) modal.classList.add('is-visible');
@@ -1374,6 +1391,11 @@ async function confirmAddServer() {
   var logRetention = document.getElementById("add-server-log-retention").value;
   if (logRetention !== "") payload.logRetentionHours = parseInt(logRetention, 10);
   
+  var rateLimitRulesStr = document.getElementById("add-server-rate-limit-rules").value.trim();
+  if (rateLimitRulesStr) {
+    payload.rateLimitRules = rateLimitRulesStr.split(",").map(function(s){return s.trim();}).filter(function(s){return s;});
+  }
+  
   try {
     var res = await authFetch(serversUrl, {
       method: "POST",
@@ -1416,6 +1438,11 @@ async function confirmEditServer() {
   if (logLevel !== "") payload.logLevel = parseInt(logLevel, 10);
   var logRetention = document.getElementById("edit-server-log-retention").value;
   if (logRetention !== "") payload.logRetentionHours = parseInt(logRetention, 10);
+  
+  var rateLimitRulesStr = document.getElementById("edit-server-rate-limit-rules").value.trim();
+  if (rateLimitRulesStr) {
+    payload.rateLimitRules = rateLimitRulesStr.split(",").map(function(s){return s.trim();}).filter(function(s){return s;});
+  }
   
   try {
     var res = await authFetch(serversUrl, {
@@ -1491,6 +1518,7 @@ function openAddRuleModal() {
   document.getElementById("add-rule-auth-provider").value = "";
   document.getElementById("add-rule-log-level").value = "";
   document.getElementById("add-rule-log-retention").value = "";
+  document.getElementById("add-rule-rate-limit-rules").value = "";
   
   var modal = document.querySelector('#rule-add-modal');
   if (modal) modal.classList.add('is-visible');
@@ -1536,6 +1564,7 @@ function openEditRuleModal(index) {
       document.getElementById("edit-rule-servers").value = servers;
       document.getElementById("edit-rule-log-level").value = (rule.logLevel !== undefined && rule.logLevel !== null) ? rule.logLevel : "";
       document.getElementById("edit-rule-log-retention").value = (rule.logRetentionHours !== undefined && rule.logRetentionHours !== null) ? rule.logRetentionHours : "";
+      document.getElementById("edit-rule-rate-limit-rules").value = (rule.rateLimitRules || []).join(", ");
       
       var modal = document.querySelector('#rule-edit-modal');
       if (modal) modal.classList.add('is-visible');
@@ -1655,6 +1684,11 @@ async function confirmAddRule() {
   var logRetention = document.getElementById("add-rule-log-retention").value;
   if (logRetention !== "") rule.logRetentionHours = parseInt(logRetention, 10);
 
+  var rateLimitRulesStr = document.getElementById("add-rule-rate-limit-rules").value.trim();
+  if (rateLimitRulesStr) {
+    rule.rateLimitRules = rateLimitRulesStr.split(",").map(function(s){return s.trim();}).filter(function(s){return s;});
+  }
+
   try {
     var res = await authFetch(rulesUrl, {
       method: 'POST',
@@ -1716,6 +1750,11 @@ async function confirmEditRule() {
   if (logLevel !== "") rule.logLevel = parseInt(logLevel, 10);
   var logRetention = document.getElementById("edit-rule-log-retention").value;
   if (logRetention !== "") rule.logRetentionHours = parseInt(logRetention, 10);
+
+  var rateLimitRulesStr = document.getElementById("edit-rule-rate-limit-rules").value.trim();
+  if (rateLimitRulesStr) {
+    rule.rateLimitRules = rateLimitRulesStr.split(",").map(function(s){return s.trim();}).filter(function(s){return s;});
+  }
 
   try {
     // 删除旧规则
@@ -2086,6 +2125,255 @@ async function confirmEditFirewall() {
   }
 }
 
+// ===== 流控规则 =====
+function initRateLimitRuleModals() {
+  var addModal = document.querySelector('#rate-limit-rule-add-modal');
+  var editModal = document.querySelector('#rate-limit-rule-edit-modal');
+  if (addModal) {
+    addModal.querySelectorAll('[data-modal-close]').forEach(function(btn) {
+      btn.addEventListener('click', function() { addModal.classList.remove('is-visible'); });
+    });
+  }
+  if (editModal) {
+    editModal.querySelectorAll('[data-modal-close]').forEach(function(btn) {
+      btn.addEventListener('click', function() { editModal.classList.remove('is-visible'); });
+    });
+  }
+  
+  var btnAdd = document.getElementById("btn-rate-limits-add");
+  if (btnAdd) btnAdd.addEventListener("click", openAddRateLimitRuleModal);
+  
+  var btnLoad = document.getElementById("btn-rate-limits-load");
+  if (btnLoad) btnLoad.addEventListener("click", loadRateLimitRules);
+  
+  var btnConfirmAdd = document.getElementById("confirm-add-rate-limit");
+  if (btnConfirmAdd) btnConfirmAdd.addEventListener("click", confirmAddRateLimitRule);
+  
+  var btnConfirmEdit = document.getElementById("confirm-edit-rate-limit");
+  if (btnConfirmEdit) btnConfirmEdit.addEventListener("click", confirmEditRateLimitRule);
+}
+
+async function loadRateLimitRules() {
+  var msg = document.getElementById("rate-limits-msg");
+  if (msg) msg.textContent = "加载中...";
+  try {
+    var res = await authFetch(rateLimitRulesUrl, { headers: buildAuthHeaders({}) });
+    if (!res.ok) throw new Error(await res.text());
+    var data = await res.json();
+    
+    var tbody = document.getElementById("rate-limits-tbody");
+    if (tbody) tbody.innerHTML = "";
+    
+    Object.keys(data || {}).forEach(function(name) {
+      var rule = data[name] || {};
+      var tr = document.createElement("tr");
+      
+      var metricsStr = (rule.metrics || []).map(function(m) {
+        return m.type + "(" + m.window + "s, " + m.threshold + ")";
+      }).join("; ");
+      
+      var actionsStr = (rule.actions || []).map(function(a) {
+        var param = "";
+        if (a.type === "ban") param = a.duration + "s";
+        else if (a.type === "queue") param = a.maxWait + "s";
+        else if (a.type === "redirect") param = a.location;
+        return a.type + "(" + param + ")";
+      }).join("; ");
+      
+      tr.innerHTML = "<td>" + name + "</td>" +
+        "<td>" + (rule.targetType || "-") + "</td>" +
+        "<td>" + metricsStr + "</td>" +
+        "<td>" + actionsStr + "</td>" +
+        "<td><button class='bx--btn bx--btn--sm bx--btn--ghost' onclick='openEditRateLimitRuleModal(\"" + name.replace(/"/g, '&quot;') + "\")'>编辑</button> " +
+        "<button class='bx--btn bx--btn--sm bx--btn--danger--ghost' onclick='deleteRateLimitRule(\"" + name.replace(/"/g, '&quot;') + "\")'>删除</button></td>";
+      if (tbody) tbody.appendChild(tr);
+    });
+    
+    if (msg) msg.textContent = "规则已加载";
+  } catch (e) {
+    if (msg) msg.textContent = "加载失败: " + (e.message || e);
+  }
+}
+
+function openAddRateLimitRuleModal() {
+  document.getElementById("add-rate-limit-name").value = "";
+  document.getElementById("add-rate-limit-target").value = "ip";
+  document.getElementById("add-rate-limit-metrics").value = "";
+  document.getElementById("add-rate-limit-actions").value = "";
+  
+  var modal = document.querySelector('#rate-limit-rule-add-modal');
+  if (modal) modal.classList.add('is-visible');
+}
+
+function openEditRateLimitRuleModal(name) {
+  authFetch(rateLimitRulesUrl, { headers: buildAuthHeaders({}) })
+    .then(function(res) { return res.json(); })
+    .then(function(data) {
+      var rule = data[name];
+      if (!rule) return;
+      
+      document.getElementById("edit-rate-limit-original-name").value = name;
+      document.getElementById("edit-rate-limit-name").value = name;
+      document.getElementById("edit-rate-limit-target").value = rule.targetType || "ip";
+      
+      var metricsStr = (rule.metrics || []).map(function(m) {
+        return m.type + "," + m.window + "," + m.threshold;
+      }).join("\n");
+      document.getElementById("edit-rate-limit-metrics").value = metricsStr;
+      
+      var actionsStr = (rule.actions || []).map(function(a) {
+        var param = "";
+        if (a.type === "ban") param = a.duration;
+        else if (a.type === "queue") param = a.maxWait;
+        else if (a.type === "redirect") param = a.location;
+        return a.type + "," + param;
+      }).join("\n");
+      document.getElementById("edit-rate-limit-actions").value = actionsStr;
+      
+      var modal = document.querySelector('#rate-limit-rule-edit-modal');
+      if (modal) modal.classList.add('is-visible');
+    });
+}
+
+async function confirmAddRateLimitRule() {
+  var msg = document.getElementById("rate-limits-msg");
+  if (msg) msg.textContent = "";
+  var name = document.getElementById("add-rate-limit-name").value.trim();
+  var targetType = document.getElementById("add-rate-limit-target").value;
+  var metricsRaw = document.getElementById("add-rate-limit-metrics").value.trim();
+  var actionsRaw = document.getElementById("add-rate-limit-actions").value.trim();
+  
+  if (!name) { if (msg) msg.textContent = "名称必填"; return; }
+  
+  var metrics = [];
+  if (metricsRaw) {
+    metricsRaw.split("\n").forEach(function(line) {
+      var parts = line.split(",").map(function(s){return s.trim();});
+      if (parts.length >= 3) {
+        metrics.push({
+          type: parts[0],
+          window: parseInt(parts[1], 10),
+          threshold: parseFloat(parts[2]) // Use float to support rate
+        });
+      }
+    });
+  }
+  
+  var actions = [];
+  if (actionsRaw) {
+    actionsRaw.split("\n").forEach(function(line) {
+      var parts = line.split(",").map(function(s){return s.trim();});
+      if (parts.length >= 2) {
+        var action = { type: parts[0] };
+        if (action.type === "ban") action.duration = parseInt(parts[1], 10);
+        else if (action.type === "queue") action.maxWait = parseInt(parts[1], 10);
+        else if (action.type === "redirect") action.location = parts[1];
+        actions.push(action);
+      }
+    });
+  }
+  
+  try {
+    var res = await authFetch(rateLimitRulesUrl, {
+      method: "POST",
+      headers: buildAuthHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({
+        name: name,
+        rule: {
+          targetType: targetType,
+          metrics: metrics,
+          actions: actions
+        }
+      })
+    });
+    if (!res.ok) throw new Error(await res.text());
+    
+    if (msg) msg.textContent = "新增成功";
+    var modal = document.querySelector('#rate-limit-rule-add-modal');
+    if (modal) modal.classList.remove('is-visible');
+    loadRateLimitRules();
+  } catch (e) {
+    if (msg) msg.textContent = "新增失败: " + (e.message || e);
+  }
+}
+
+async function confirmEditRateLimitRule() {
+  var msg = document.getElementById("rate-limits-msg");
+  if (msg) msg.textContent = "";
+  var name = document.getElementById("edit-rate-limit-name").value.trim();
+  var targetType = document.getElementById("edit-rate-limit-target").value;
+  var metricsRaw = document.getElementById("edit-rate-limit-metrics").value.trim();
+  var actionsRaw = document.getElementById("edit-rate-limit-actions").value.trim();
+  
+  if (!name) { if (msg) msg.textContent = "名称必填"; return; }
+  
+  var metrics = [];
+  if (metricsRaw) {
+    metricsRaw.split("\n").forEach(function(line) {
+      var parts = line.split(",").map(function(s){return s.trim();});
+      if (parts.length >= 3) {
+        metrics.push({
+          type: parts[0],
+          window: parseInt(parts[1], 10),
+          threshold: parseFloat(parts[2])
+        });
+      }
+    });
+  }
+  
+  var actions = [];
+  if (actionsRaw) {
+    actionsRaw.split("\n").forEach(function(line) {
+      var parts = line.split(",").map(function(s){return s.trim();});
+      if (parts.length >= 2) {
+        var action = { type: parts[0] };
+        if (action.type === "ban") action.duration = parseInt(parts[1], 10);
+        else if (action.type === "queue") action.maxWait = parseInt(parts[1], 10);
+        else if (action.type === "redirect") action.location = parts[1];
+        actions.push(action);
+      }
+    });
+  }
+  
+  try {
+    var res = await authFetch(rateLimitRulesUrl, {
+      method: "POST",
+      headers: buildAuthHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({
+        name: name,
+        rule: {
+          targetType: targetType,
+          metrics: metrics,
+          actions: actions
+        }
+      })
+    });
+    if (!res.ok) throw new Error(await res.text());
+    
+    if (msg) msg.textContent = "更新成功";
+    var modal = document.querySelector('#rate-limit-rule-edit-modal');
+    if (modal) modal.classList.remove('is-visible');
+    loadRateLimitRules();
+  } catch (e) {
+    if (msg) msg.textContent = "更新失败: " + (e.message || e);
+  }
+}
+
+async function deleteRateLimitRule(name) {
+  if (!confirm('确认删除流控规则 "' + name + '" ?')) return;
+  var msg = document.getElementById("rate-limits-msg");
+  if (msg) msg.textContent = "";
+  
+  try {
+    var res = await authFetch(rateLimitRulesUrl + "?name=" + encodeURIComponent(name), { method: "DELETE", headers: buildAuthHeaders({}) });
+    if (!res.ok) throw new Error(await res.text());
+    if (msg) msg.textContent = "删除成功";
+    loadRateLimitRules();
+  } catch (e) {
+    if (msg) msg.textContent = "删除失败: " + (e.message || e);
+  }
+}
+
 // ===== 认证提供商 =====
 function initAuthProviderModals() {
   var addModal = document.querySelector('#auth-provider-add-modal');
@@ -2393,6 +2681,10 @@ window.loadServers = loadServers;
 window.loadRules = loadRules;
 window.loadFirewalls = loadFirewalls;
 window.loadTunnelEndpoints = loadTunnelEndpoints;
+window.loadRateLimitRules = loadRateLimitRules;
+window.openAddRateLimitRuleModal = openAddRateLimitRuleModal;
+window.openEditRateLimitRuleModal = openEditRateLimitRuleModal;
+window.deleteRateLimitRule = deleteRateLimitRule;
 
 // ===== 日志 =====
 var currentLogPage = 1;
@@ -3068,6 +3360,215 @@ window.deleteEndpoint = deleteEndpoint;
 window.confirmAddEndpoint = confirmAddEndpoint;
 window.confirmEditEndpoint = confirmEditEndpoint;
 window.populateTunnelSelectorsForEndpoints = populateTunnelSelectorsForEndpoints;
+
+// ===== Rate Limiting Rules =====
+var rateLimitRulesUrl = "/.api/rate_limit_rules";
+
+// Init modals
+function initRateLimitModals() {
+  var addModal = document.querySelector('#rate-limit-add-modal');
+  var editModal = document.querySelector('#rate-limit-edit-modal');
+  if (addModal) {
+    addModal.addEventListener('click', function(e) {
+      if (e.target.closest('[data-modal-close]')) addModal.classList.remove('is-visible');
+    });
+  }
+  if (editModal) {
+    editModal.addEventListener('click', function(e) {
+      if (e.target.closest('[data-modal-close]')) editModal.classList.remove('is-visible');
+    });
+  }
+}
+initRateLimitModals();
+
+async function loadRules() {
+  var msg = document.getElementById("rate-limits-msg");
+  if (msg) msg.textContent = "";
+  try {
+    var res = await authFetch(rateLimitRulesUrl, { headers: buildAuthHeaders({}) });
+    if (!res.ok) throw new Error(await res.text());
+    var data = await res.json();
+    var tbody = document.getElementById("rate-limits-tbody");
+    if (tbody) tbody.innerHTML = "";
+    
+    Object.keys(data || {}).forEach(function(name){
+      var r = data[name];
+      var tr = document.createElement("tr");
+      
+      var metrics = (r.metrics || []).map(m => m.type).join(", ");
+      var actions = (r.actions || []).map(a => a.type).join(", ");
+      
+      tr.innerHTML = 
+        "<td>" + name + "</td>" +
+        "<td>" + r.targetType + "</td>" +
+        "<td>" + metrics + "</td>" +
+        "<td>" + actions + "</td>" +
+        "<td><button class='bx--btn bx--btn--sm bx--btn--ghost' onclick='openEditRateLimitModal(\"" + name.replace(/"/g, '&quot;') + "\")'>编辑</button> " +
+        "<button class='bx--btn bx--btn--sm bx--btn--danger--ghost' onclick='deleteRateLimit(\"" + name.replace(/"/g, '&quot;') + "\")'>删除</button></td>";
+      if (tbody) tbody.appendChild(tr);
+    });
+    if (msg) msg.textContent = "规则已加载";
+  } catch (e) {
+    if (msg) msg.textContent = "加载失败: " + (e.message || e);
+  }
+}
+
+function openAddRateLimitModal() {
+  document.getElementById("add-rl-name").value = "";
+  document.getElementById("add-rl-target").value = "ip";
+  document.getElementById("add-rl-metrics").value = "";
+  document.getElementById("add-rl-actions").value = "";
+  var modal = document.querySelector('#rate-limit-add-modal');
+  if (modal) modal.classList.add('is-visible');
+}
+
+async function openEditRateLimitModal(name) {
+  try {
+    var res = await authFetch(rateLimitRulesUrl, { headers: buildAuthHeaders({}) });
+    if (!res.ok) throw new Error(await res.text());
+    var data = await res.json();
+    var r = data[name];
+    if (!r) throw new Error("Rule not found");
+    
+    document.getElementById("edit-rl-original-name").value = name;
+    document.getElementById("edit-rl-name").value = name;
+    document.getElementById("edit-rl-target").value = r.targetType;
+    document.getElementById("edit-rl-metrics").value = JSON.stringify(r.metrics || [], null, 2);
+    document.getElementById("edit-rl-actions").value = JSON.stringify(r.actions || [], null, 2);
+    
+    var modal = document.querySelector('#rate-limit-edit-modal');
+    if (modal) modal.classList.add('is-visible');
+  } catch (e) {
+    var msg = document.getElementById("rate-limits-msg");
+    if (msg) msg.textContent = "加载规则失败: " + (e.message || e);
+  }
+}
+
+async function confirmAddRateLimit() {
+  var msg = document.getElementById("rate-limits-msg");
+  if (msg) msg.textContent = "";
+  
+  var name = document.getElementById("add-rl-name").value.trim();
+  var targetType = document.getElementById("add-rl-target").value;
+  var metricsStr = document.getElementById("add-rl-metrics").value.trim();
+  var actionsStr = document.getElementById("add-rl-actions").value.trim();
+  
+  if (!name) { if (msg) msg.textContent = "规则名称必填"; return; }
+  
+  var metrics = [];
+  var actions = [];
+  try {
+    if (metricsStr) metrics = JSON.parse(metricsStr);
+    if (actionsStr) actions = JSON.parse(actionsStr);
+  } catch (e) {
+    if (msg) msg.textContent = "JSON 格式错误";
+    return;
+  }
+  
+  var rule = {
+    name: name,
+    targetType: targetType,
+    metrics: metrics,
+    actions: actions
+  };
+  
+  try {
+    var res = await authFetch(rateLimitRulesUrl, { 
+      method: "POST", 
+      headers: buildAuthHeaders({ "Content-Type": "application/json" }), 
+      body: JSON.stringify(rule) 
+    });
+    if (!res.ok) throw new Error(await res.text());
+    
+    if (msg) msg.textContent = "新增成功";
+    var modal = document.querySelector('#rate-limit-add-modal');
+    if (modal) modal.classList.remove('is-visible');
+    loadRules();
+  } catch (e) {
+    if (msg) msg.textContent = "新增失败: " + (e.message || e);
+  }
+}
+
+async function confirmEditRateLimit() {
+  var msg = document.getElementById("rate-limits-msg");
+  if (msg) msg.textContent = "";
+  
+  var originalName = document.getElementById("edit-rl-original-name").value;
+  var name = document.getElementById("edit-rl-name").value.trim();
+  var targetType = document.getElementById("edit-rl-target").value;
+  var metricsStr = document.getElementById("edit-rl-metrics").value.trim();
+  var actionsStr = document.getElementById("edit-rl-actions").value.trim();
+  
+  if (!name) { if (msg) msg.textContent = "规则名称必填"; return; }
+  
+  var metrics = [];
+  var actions = [];
+  try {
+    if (metricsStr) metrics = JSON.parse(metricsStr);
+    if (actionsStr) actions = JSON.parse(actionsStr);
+  } catch (e) {
+    if (msg) msg.textContent = "JSON 格式错误";
+    return;
+  }
+  
+  var rule = {
+    name: name,
+    targetType: targetType,
+    metrics: metrics,
+    actions: actions
+  };
+  
+  try {
+    // If name changed, delete old
+    if (originalName !== name) {
+        await authFetch(rateLimitRulesUrl + "?name=" + encodeURIComponent(originalName), { 
+            method: "DELETE", 
+            headers: buildAuthHeaders({}) 
+        });
+    }
+    
+    var res = await authFetch(rateLimitRulesUrl, { 
+      method: "POST", 
+      headers: buildAuthHeaders({ "Content-Type": "application/json" }), 
+      body: JSON.stringify(rule) 
+    });
+    if (!res.ok) throw new Error(await res.text());
+    
+    if (msg) msg.textContent = "保存成功";
+    var modal = document.querySelector('#rate-limit-edit-modal');
+    if (modal) modal.classList.remove('is-visible');
+    loadRules();
+  } catch (e) {
+    if (msg) msg.textContent = "保存失败: " + (e.message || e);
+  }
+}
+
+async function deleteRateLimit(name) {
+  if (!confirm("确定要删除规则 \"" + name + "\" 吗？")) return;
+  var msg = document.getElementById("rate-limits-msg");
+  if (msg) msg.textContent = "";
+  try {
+    var res = await authFetch(rateLimitRulesUrl + "?name=" + encodeURIComponent(name), { 
+      method: "DELETE", 
+      headers: buildAuthHeaders({}) 
+    });
+    if (!res.ok) throw new Error(await res.text());
+    if (msg) msg.textContent = "删除成功";
+    loadRules();
+  } catch (e) {
+    if (msg) msg.textContent = "删除失败: " + (e.message || e);
+  }
+}
+
+document.getElementById("btn-rate-limits-load").addEventListener("click", loadRules);
+document.getElementById("btn-rate-limits-add").addEventListener("click", openAddRateLimitModal);
+
+window.loadRules = loadRules;
+window.openAddRateLimitModal = openAddRateLimitModal;
+window.openEditRateLimitModal = openEditRateLimitModal;
+window.confirmAddRateLimit = confirmAddRateLimit;
+window.confirmEditRateLimit = confirmEditRateLimit;
+window.deleteRateLimit = deleteRateLimit;
 
 }); // End of DOMContentLoaded
 `

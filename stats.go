@@ -390,16 +390,18 @@ func (sc *StatsCollector) GetTopIPsAsDimensionStats(limit int) map[string]*Dimen
 
 // IPRequestStats represents statistics for a single IP address.
 type IPRequestStats struct {
-	IP              string    `json:"ip"`
-	Requests        int       `json:"requests"`
-	HTTPBytesSent   uint64    `json:"httpBytesSent"`
-	HTTPBytesRecv   uint64    `json:"httpBytesRecv"`
-	RawTCPBytesSent uint64    `json:"rawTcpBytesSent"`
-	RawTCPBytesRecv uint64    `json:"rawTcpBytesRecv"`
-	RawUDPBytesSent uint64    `json:"rawUdpBytesSent"`
-	RawUDPBytesRecv uint64    `json:"rawUdpBytesRecv"`
-	FirstSeen       time.Time `json:"firstSeen"`
-	LastSeen        time.Time `json:"lastSeen"`
+	IP              string        `json:"ip"`
+	Requests        int           `json:"requests"`
+	HTTPBytesSent   uint64        `json:"httpBytesSent"`
+	HTTPBytesRecv   uint64        `json:"httpBytesRecv"`
+	RawTCPBytesSent uint64        `json:"rawTcpBytesSent"`
+	RawTCPBytesRecv uint64        `json:"rawTcpBytesRecv"`
+	RawUDPBytesSent uint64        `json:"rawUdpBytesSent"`
+	RawUDPBytesRecv uint64        `json:"rawUdpBytesRecv"`
+	FirstSeen       time.Time     `json:"firstSeen"`
+	LastSeen        time.Time     `json:"lastSeen"`
+	Location        *LocationInfo `json:"location,omitempty"`
+	Status          bool          `json:"status"`
 }
 
 // GetIPStats returns IP request statistics for the past 24 hours, sorted by request count (descending).

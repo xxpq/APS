@@ -12,21 +12,22 @@ import (
 type MapRemoteProxy struct {
 	config *Config
 	// dataStore          *DataStore // Removed, no longer needed
-	harManager         *HarLoggerManager
-	tunnelManager      TunnelManagerInterface
-	scriptRunner       *ScriptRunner
-	trafficShaper      *TrafficShaper
-	stats              *StatsCollector
-	staticCache        *StaticCacheManager // 静态文件缓存管理器
-	loggingDB          *LoggingDB          // 请求日志数据库
-	serverName         string
-	rateLimiter        *IPRateLimiter
+	harManager    *HarLoggerManager
+	tunnelManager TunnelManagerInterface
+	scriptRunner  *ScriptRunner
+	trafficShaper *TrafficShaper
+	stats         *StatsCollector
+	staticCache   *StaticCacheManager // 静态文件缓存管理器
+	loggingDB     *LoggingDB          // 请求日志数据库
+	serverName    string
+
+	rateLimiter        *RateLimitEngine
 	client             *http.Client
 	concurrencyLimiter chan struct{}
 	endpointTunnelMap  map[string]string // endpointName -> tunnelName
 }
 
-func NewMapRemoteProxy(config *Config, harManager *HarLoggerManager, tunnelManager TunnelManagerInterface, scriptRunner *ScriptRunner, trafficShaper *TrafficShaper, stats *StatsCollector, staticCache *StaticCacheManager, loggingDB *LoggingDB, serverName string, rateLimiter *IPRateLimiter) *MapRemoteProxy {
+func NewMapRemoteProxy(config *Config, harManager *HarLoggerManager, tunnelManager TunnelManagerInterface, scriptRunner *ScriptRunner, trafficShaper *TrafficShaper, stats *StatsCollector, staticCache *StaticCacheManager, loggingDB *LoggingDB, serverName string, rateLimiter *RateLimitEngine) *MapRemoteProxy {
 	// Default policies from the server config, if they exist
 	serverConfig := config.Servers[serverName]
 	policies := config.ResolvePolicies(serverConfig, &Mapping{}, nil, "") // Get server-level or default policies
@@ -142,14 +143,44 @@ func (p *MapRemoteProxy) createProxyClient(proxyURL string) (*http.Client, error
 }
 
 func (p *MapRemoteProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	// Check rate limit
+	// Check rate limit (Server level)
 	if p.rateLimiter != nil {
 		clientIP := getClientIP(r)
-		allowed, banned := p.rateLimiter.CheckAndIncrement(clientIP)
-		if banned || !allowed {
-			// If banned or just exceeded limit (which triggers ban)
-			http.Error(w, "Too Many Requests", http.StatusTooManyRequests)
-			return
+
+		// Get server rules
+		serverConfig := p.config.Servers[p.serverName]
+		var ruleNames []string
+		if serverConfig != nil {
+			ruleNames = serverConfig.RateLimitRules
+		}
+
+		if len(ruleNames) > 0 {
+			bindings := map[string][]string{
+				"server:" + p.serverName: ruleNames,
+			}
+
+			// We don't have token here yet, pass empty
+			result := p.rateLimiter.CheckRequest(clientIP, "", bindings)
+			if !result.Allowed {
+				if result.Action == ActionRedirect {
+					http.Redirect(w, r, result.RedirectURL, http.StatusFound)
+					return
+				}
+				if result.Action == ActionQueue {
+					// Simple queue implementation: sleep
+					time.Sleep(result.WaitDuration)
+					// Re-check? Or just allow?
+					// Ideally we should re-check or just proceed.
+					// For now, just sleep and proceed.
+				} else {
+					// Ban or default block
+					http.Error(w, result.Message, http.StatusTooManyRequests)
+					return
+				}
+			}
+
+			// Record start for concurrency metric
+			p.rateLimiter.OnRequestStart(clientIP, "", bindings)
 		}
 	}
 

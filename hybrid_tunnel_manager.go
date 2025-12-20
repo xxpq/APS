@@ -139,3 +139,12 @@ func (htm *HybridTunnelManager) SendConfigUpdate(tunnelName, endpointName string
 	}
 	return htm.tcpManager.SendConfigUpdate(tunnelName, endpointName, payload)
 }
+
+// GetAllOnlineEndpoints returns all online endpoints
+func (htm *HybridTunnelManager) GetAllOnlineEndpoints() []EndpointInfo {
+if htm.tcpManager != nil {
+return htm.tcpManager.GetAllOnlineEndpoints()
+}
+return nil
+}
+

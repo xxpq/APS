@@ -371,3 +371,34 @@ func (tm *TCPTunnelManager) SendConfigUpdate(tunnelName, endpointName string, pa
 	}
 	return ep.Conn.WriteMessage(msg)
 }
+
+// GetAllOnlineEndpoints returns a list of all online endpoints
+func (tm *TCPTunnelManager) GetAllOnlineEndpoints() []EndpointInfo {
+	tm.mu.RLock()
+	defer tm.mu.RUnlock()
+
+	var onlineEndpoints []EndpointInfo
+	for _, tunnel := range tm.tunnels {
+		tunnel.mu.RLock()
+		for _, endpoints := range tunnel.endpoints {
+			for _, ep := range endpoints {
+				if ep.IsOnline() {
+					// Construct EndpointInfo
+					info := EndpointInfo{
+						ID:               ep.ID,
+						Name:             ep.EndpointName,
+						TunnelName:       tunnel.name,
+						RemoteAddr:       ep.RemoteAddr,
+						OnlineTime:       ep.OnlineTime,
+						LastActivityTime: ep.LastActivityTime,
+						// Latency:     ep.Latency, // Latency not available in TCPEndpoint
+						Stats: ep.Stats,
+					}
+					onlineEndpoints = append(onlineEndpoints, info)
+				}
+			}
+		}
+		tunnel.mu.RUnlock()
+	}
+	return onlineEndpoints
+}

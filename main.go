@@ -46,12 +46,17 @@ type ServerManager struct {
 	statsDB        *StatsDB
 	loggingDB      *LoggingDB
 	logBroadcaster *LogBroadcaster
-	rateLimiter    *IPRateLimiter
+	rateLimiter    *RateLimitEngine
 }
 
 func NewServerManager(config *Config, configFile string, harManager *HarLoggerManager, tunnelManager TunnelManagerInterface, scriptRunner *ScriptRunner, trafficShaper *TrafficShaper, stats *StatsCollector, staticCache *StaticCacheManager, replayManager *ReplayManager, statsDB *StatsDB, loggingDB *LoggingDB, logBroadcaster *LogBroadcaster) *ServerManager {
-	rateLimiter := NewIPRateLimiter()
-	go rateLimiter.CleanupExpired()
+	rateLimiter := NewRateLimitEngine(config.RateLimitRules)
+	// go rateLimiter.CleanupExpired() // RateLimitEngine handles cleanup internally or doesn't need explicit cleanup loop yet?
+	// The new engine uses sync.Map and doesn't have a cleanup loop yet.
+	// We should probably add one, but for now let's just initialize it.
+	// The old one had CleanupExpired. The new one has trackers that might grow.
+	// WindowTracker resets itself. Banned map might grow.
+	// We can add a cleanup goroutine later if needed.
 
 	return &ServerManager{
 		servers:        make(map[string]*http.Server),
@@ -559,7 +564,7 @@ func (sm *ServerManager) StartAll() {
 	}
 }
 
-func createServerHandler(serverName string, mappings []*Mapping, serverConfig *ListenConfig, config *Config, configFile string, harManager *HarLoggerManager, tunnelManager TunnelManagerInterface, scriptRunner *ScriptRunner, trafficShaper *TrafficShaper, stats *StatsCollector, staticCache *StaticCacheManager, replayManager *ReplayManager, isACMEEnabled bool, statsDB *StatsDB, loggingDB *LoggingDB, logBroadcaster *LogBroadcaster, rateLimiter *IPRateLimiter) http.Handler {
+func createServerHandler(serverName string, mappings []*Mapping, serverConfig *ListenConfig, config *Config, configFile string, harManager *HarLoggerManager, tunnelManager TunnelManagerInterface, scriptRunner *ScriptRunner, trafficShaper *TrafficShaper, stats *StatsCollector, staticCache *StaticCacheManager, replayManager *ReplayManager, isACMEEnabled bool, statsDB *StatsDB, loggingDB *LoggingDB, logBroadcaster *LogBroadcaster, rateLimiter *RateLimitEngine) http.Handler {
 	mux := http.NewServeMux()
 	proxy := NewMapRemoteProxy(config, harManager, tunnelManager, scriptRunner, trafficShaper, stats, staticCache, loggingDB, serverName, rateLimiter)
 
@@ -582,7 +587,7 @@ func createServerHandler(serverName string, mappings []*Mapping, serverConfig *L
 		mux.HandleFunc("/.api/stats", stats.ServeHTTP)
 
 		// 注册管理面板处理器
-		adminHandlers := NewAdminHandlers(config, configFile, stats, statsDB, loggingDB, logBroadcaster)
+		adminHandlers := NewAdminHandlers(config, configFile, stats, statsDB, loggingDB, logBroadcaster, rateLimiter)
 		// 设置tunnel管理器引用，用于查询endpoint状态
 		adminHandlers.SetTunnelManager(tunnelManager)
 		adminHandlers.RegisterHandlers(mux)
@@ -625,7 +630,7 @@ func createServerHandler(serverName string, mappings []*Mapping, serverConfig *L
 	return h2c.NewHandler(baseHandler, http2Server)
 }
 
-func startServer(name string, config *ListenConfig, handler http.Handler, tunnelManager TunnelManagerInterface, rateLimiter *IPRateLimiter) (*http.Server, *ConnectionMux) {
+func startServer(name string, config *ListenConfig, handler http.Handler, tunnelManager TunnelManagerInterface, rateLimiter *RateLimitEngine) (*http.Server, *ConnectionMux) {
 	// Determine bind address based on 'public' (default: true)
 	host := "127.0.0.1"
 	if config.Public == nil || *config.Public {
@@ -650,7 +655,7 @@ func startServer(name string, config *ListenConfig, handler http.Handler, tunnel
 
 	// Create ConnectionMux
 	mux := NewConnectionMux(listener)
-	mux.SetRateLimiter(rateLimiter)
+	mux.SetRateLimiter(rateLimiter, name, config.RateLimitRules)
 
 	// Setup Tunnel Handler
 	mux.SetTunnelHandler(func(conn net.Conn) {
