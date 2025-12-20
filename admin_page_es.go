@@ -9,6 +9,14 @@ var admin_page_js = `
     const configUrl = "/.api/config";
     const loginUrl = "/.api/login";
     const logoutUrl = "/.api/logout";
+    const rulesUrl = "/.api/rules";
+    const serversUrl = "/.api/servers";
+    const tunnelsUrl = "/.api/tunnels";
+    const proxiesUrl = "/.api/proxies";
+    const usersUrl = "/.api/users";
+    const firewallsUrl = "/.api/firewalls";
+    const authProvidersUrl = "/.api/auth_providers";
+    const logsUrl = "/.api/logs";
     const rateLimitRulesUrl = "/.api/rate_limit_rules";
     const onlineEndpointsUrl = "/.api/online_endpoints";
 
@@ -1220,6 +1228,117 @@ function initRuleModals() {
       btn.addEventListener('click', function() { editModal.classList.remove('is-visible'); });
     });
   }
+}
+
+// ===== 规则 =====
+async function loadRules() {
+  var msg = document.getElementById("rules-msg");
+  if (msg) msg.textContent = "";
+  try {
+    var res = await authFetch(rulesUrl, { headers: buildAuthHeaders({}) });
+    if (!res.ok) throw new Error(await res.text());
+    var data = await res.json();
+    var tbody = document.getElementById("rules-tbody");
+    if (tbody) tbody.innerHTML = "";
+    
+    (data || []).forEach(function(rule, index) {
+      var fromSummary = typeof rule.from === 'string' ? rule.from : (rule.from && rule.from.url ? rule.from.url : JSON.stringify(rule.from || {}));
+      var toSummary = typeof rule.to === 'string' ? rule.to : (rule.to && rule.to.url ? rule.to.url : JSON.stringify(rule.to || {}));
+      var serversSummary = '';
+      if (rule.servers) {
+        if (typeof rule.servers === 'string') {
+          serversSummary = rule.servers;
+        } else if (Array.isArray(rule.servers)) {
+          serversSummary = rule.servers.join(', ');
+        }
+      }
+      
+      // Truncate if too long
+      if (fromSummary.length > 30) fromSummary = fromSummary.substring(0, 27) + "...";
+      if (toSummary.length > 30) toSummary = toSummary.substring(0, 27) + "...";
+      if (serversSummary.length > 30) serversSummary = serversSummary.substring(0, 27) + "...";
+      
+      var tr = document.createElement("tr");
+      tr.innerHTML = "<td>" + index + "</td>" +
+        "<td>" + fromSummary + "</td>" +
+        "<td>" + toSummary + "</td>" +
+        "<td>" + (serversSummary || "-") + "</td>" +
+        "<td><button class='bx--btn bx--btn--sm bx--btn--ghost' onclick='openEditRuleModal(" + index + ")'>编辑</button> " +
+        "<button class='bx--btn bx--btn--sm bx--btn--danger--ghost' onclick='deleteRule(" + index + ")'>删除</button></td>";
+      if (tbody) tbody.appendChild(tr);
+    });
+    
+    if (msg) msg.textContent = "路由列表已加载 (" + (data || []).length + " 条规则)";
+  } catch (e) {
+    if (msg) msg.textContent = "加载失败: " + (e.message || e);
+  }
+}
+
+function openAddRuleModal() {
+  var addFrom = document.getElementById("add-rule-from");
+  var addTo = document.getElementById("add-rule-to");
+  var addServers = document.getElementById("add-rule-servers");
+  var addVia = document.getElementById("add-rule-via-endpoints");
+  
+  if (addFrom) addFrom.value = "";
+  if (addTo) addTo.value = "";
+  if (addServers) addServers.value = "";
+  if (addVia) addVia.value = "";
+  document.getElementById("add-rule-auth-provider").value = "";
+  document.getElementById("add-rule-log-level").value = "";
+  document.getElementById("add-rule-log-retention").value = "";
+  
+  var modal = document.querySelector('#rule-add-modal');
+  if (modal) modal.classList.add('is-visible');
+}
+
+function openEditRuleModal(index) {
+  authFetch(rulesUrl, { headers: buildAuthHeaders({}) })
+    .then(function(res) { return res.json(); })
+    .then(function(data) {
+      var rule = (data || [])[index];
+      if (!rule) {
+        showNotification('error', '错误', '规则不存在');
+        return;
+      }
+      
+      document.getElementById("edit-rule-index").value = index;
+      
+      // 填充from
+      populateFromFields(rule.from, 'edit');
+      
+      // 填充to
+      populateToFields(rule.to, 'edit');
+      
+      // 填充via
+      if (rule.via && rule.via.endpoints) {
+        document.getElementById("edit-rule-via-endpoints").value = rule.via.endpoints;
+      } else {
+        document.getElementById("edit-rule-via-endpoints").value = "";
+      }
+      
+      // 填充authProvider
+      var authProvider = "";
+      if (rule.auth && rule.auth.authProvider) {
+        authProvider = rule.auth.authProvider;
+      }
+      document.getElementById("edit-rule-auth-provider").value = authProvider;
+      
+      // 填充servers
+      var servers = '';
+      if (rule.servers) {
+        servers = Array.isArray(rule.servers) ? rule.servers.join(', ') : rule.servers;
+      }
+      document.getElementById("edit-rule-servers").value = servers;
+      document.getElementById("edit-rule-log-level").value = (rule.logLevel !== undefined && rule.logLevel !== null) ? rule.logLevel : "";
+      document.getElementById("edit-rule-log-retention").value = (rule.logRetentionHours !== undefined && rule.logRetentionHours !== null) ? rule.logRetentionHours : "";
+      
+      var modal = document.querySelector('#rule-edit-modal');
+      if (modal) modal.classList.add('is-visible');
+    })
+    .catch(function(e) {
+      showNotification('error', '加载失败', e.message || e);
+    });
 }
 
 // ===== 防火墙 =====
@@ -3380,38 +3499,6 @@ function initRateLimitModals() {
   }
 }
 initRateLimitModals();
-
-async function loadRules() {
-  var msg = document.getElementById("rate-limits-msg");
-  if (msg) msg.textContent = "";
-  try {
-    var res = await authFetch(rateLimitRulesUrl, { headers: buildAuthHeaders({}) });
-    if (!res.ok) throw new Error(await res.text());
-    var data = await res.json();
-    var tbody = document.getElementById("rate-limits-tbody");
-    if (tbody) tbody.innerHTML = "";
-    
-    Object.keys(data || {}).forEach(function(name){
-      var r = data[name];
-      var tr = document.createElement("tr");
-      
-      var metrics = (r.metrics || []).map(m => m.type).join(", ");
-      var actions = (r.actions || []).map(a => a.type).join(", ");
-      
-      tr.innerHTML = 
-        "<td>" + name + "</td>" +
-        "<td>" + r.targetType + "</td>" +
-        "<td>" + metrics + "</td>" +
-        "<td>" + actions + "</td>" +
-        "<td><button class='bx--btn bx--btn--sm bx--btn--ghost' onclick='openEditRateLimitModal(\"" + name.replace(/"/g, '&quot;') + "\")'>编辑</button> " +
-        "<button class='bx--btn bx--btn--sm bx--btn--danger--ghost' onclick='deleteRateLimit(\"" + name.replace(/"/g, '&quot;') + "\")'>删除</button></td>";
-      if (tbody) tbody.appendChild(tr);
-    });
-    if (msg) msg.textContent = "规则已加载";
-  } catch (e) {
-    if (msg) msg.textContent = "加载失败: " + (e.message || e);
-  }
-}
 
 function openAddRateLimitModal() {
   document.getElementById("add-rl-name").value = "";
