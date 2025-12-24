@@ -11,13 +11,16 @@ import (
 
 func (p *MapRemoteProxy) serveFile(w http.ResponseWriter, r *http.Request, mapping *Mapping) {
 	toURL := mapping.GetToURL()
-	// file://path/to/file or file:///C:/path/to/file
-	localPath := strings.TrimPrefix(toURL, "file://")
-	if strings.HasPrefix(localPath, "/") && len(localPath) > 2 && localPath[2] == ':' { // Windows path like /C:/...
-		localPath = localPath[1:]
+
+	// Resolve file:// URL to local path (supports relative and absolute paths)
+	localPath, err := resolveFileURL(toURL)
+	if err != nil {
+		http.Error(w, "Invalid file path", http.StatusInternalServerError)
+		log.Printf("Error resolving file URL %s: %v", toURL, err)
+		return
 	}
 
-	if strings.HasSuffix(localPath, "*") {
+	if strings.HasSuffix(toURL, "*") {
 		basePath := strings.TrimSuffix(localPath, "*")
 		fromURL := mapping.GetFromURL()
 		fromBasePath := ""

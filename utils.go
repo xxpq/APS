@@ -151,6 +151,48 @@ func findIndexFile(path string) string {
 	return path
 }
 
+// resolveFileURL resolves a file:// URL to an absolute local path
+// Supports:
+// - file://www/wwwroot -> absolute path /www/wwwroot (or C:\www\wwwroot on Windows)
+// - file://./www/wwwroot -> relative path from current working directory
+// - file://../www/wwwroot -> relative path from parent directory
+// - file:///C:/www/wwwroot -> Windows absolute path C:\www\wwwroot
+func resolveFileURL(fileURL string) (string, error) {
+	// Remove file:// prefix
+	localPath := strings.TrimPrefix(fileURL, "file://")
+
+	// Check if it starts with ./ or ../ (relative path)
+	if strings.HasPrefix(localPath, "./") || strings.HasPrefix(localPath, "../") {
+		// Relative path: resolve from current working directory
+		cwd, err := os.Getwd()
+		if err != nil {
+			return "", err
+		}
+		// Join the relative path with cwd
+		// filepath.Join will handle ./ and ../ properly
+		return filepath.Join(cwd, localPath), nil
+	}
+
+	// Check for Windows absolute path like /C:/path or C:/path
+	if strings.HasPrefix(localPath, "/") && len(localPath) > 2 && localPath[2] == ':' {
+		// Windows path like /C:/... -> remove leading /
+		return localPath[1:], nil
+	}
+
+	// Otherwise treat as absolute path
+	// On Unix: /www/wwwroot stays as /www/wwwroot
+	// On Windows: www/wwwroot becomes C:\www\wwwroot (current drive)
+	if !filepath.IsAbs(localPath) {
+		// Not an absolute path, make it absolute by prepending /
+		// This handles cases like file://www/wwwroot -> /www/wwwroot
+		if !strings.HasPrefix(localPath, "/") {
+			localPath = "/" + localPath
+		}
+	}
+
+	return localPath, nil
+}
+
 func (p *MapRemoteProxy) buildOriginalURL(r *http.Request) string {
 	originalURL := r.URL.String()
 
