@@ -11,8 +11,9 @@ func BenchmarkDebugGCStats(b *testing.B) {
 	r := NewRegistry()
 	RegisterDebugGCStats(r)
 	b.ResetTimer()
+	var gcStats debug.GCStats
 	for i := 0; i < b.N; i++ {
-		CaptureDebugGCStatsOnce(r)
+		CaptureDebugGCStatsOnce(r, &gcStats)
 	}
 }
 
@@ -53,7 +54,8 @@ func TestDebugGCStatsDoubleRegister(t *testing.T) {
 	var storedGauge = (r.Get("debug.GCStats.LastGC")).(Gauge)
 
 	runtime.GC()
-	CaptureDebugGCStatsOnce(r)
+	var gcStats debug.GCStats
+	CaptureDebugGCStatsOnce(r, &gcStats)
 
 	firstGC := storedGauge.Value()
 	if 0 == firstGC {
@@ -64,7 +66,7 @@ func TestDebugGCStatsDoubleRegister(t *testing.T) {
 
 	RegisterDebugGCStats(r)
 	runtime.GC()
-	CaptureDebugGCStatsOnce(r)
+	CaptureDebugGCStatsOnce(r, &gcStats)
 	if lastGC := storedGauge.Value(); firstGC == lastGC {
 		t.Errorf("lastGC got %d, expected a higher timestamp value", lastGC)
 	}
