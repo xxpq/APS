@@ -2398,11 +2398,9 @@ async function confirmAddRateLimitRule() {
       headers: buildAuthHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify({
         name: name,
-        rule: {
-          targetType: targetType,
-          metrics: metrics,
-          actions: actions
-        }
+        targetType: targetType,
+        metrics: metrics,
+        actions: actions
       })
     });
     if (!res.ok) throw new Error(await res.text());
@@ -2460,11 +2458,9 @@ async function confirmEditRateLimitRule() {
       headers: buildAuthHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify({
         name: name,
-        rule: {
-          targetType: targetType,
-          metrics: metrics,
-          actions: actions
-        }
+        targetType: targetType,
+        metrics: metrics,
+        actions: actions
       })
     });
     if (!res.ok) throw new Error(await res.text());
@@ -3035,6 +3031,7 @@ function setupAdvancedPanelToggles() {
         initServerModals();
         initRuleModals();
         initFirewallModals();
+        initRateLimitRuleModals();
         initAuthProviderModals();
       }
     }, 100);
@@ -3480,182 +3477,7 @@ window.confirmAddEndpoint = confirmAddEndpoint;
 window.confirmEditEndpoint = confirmEditEndpoint;
 window.populateTunnelSelectorsForEndpoints = populateTunnelSelectorsForEndpoints;
 
-// ===== Rate Limiting Rules =====
-var rateLimitRulesUrl = "/.api/rate_limit_rules";
 
-// Init modals
-function initRateLimitModals() {
-  var addModal = document.querySelector('#rate-limit-add-modal');
-  var editModal = document.querySelector('#rate-limit-edit-modal');
-  if (addModal) {
-    addModal.addEventListener('click', function(e) {
-      if (e.target.closest('[data-modal-close]')) addModal.classList.remove('is-visible');
-    });
-  }
-  if (editModal) {
-    editModal.addEventListener('click', function(e) {
-      if (e.target.closest('[data-modal-close]')) editModal.classList.remove('is-visible');
-    });
-  }
-}
-initRateLimitModals();
-
-function openAddRateLimitModal() {
-  document.getElementById("add-rl-name").value = "";
-  document.getElementById("add-rl-target").value = "ip";
-  document.getElementById("add-rl-metrics").value = "";
-  document.getElementById("add-rl-actions").value = "";
-  var modal = document.querySelector('#rate-limit-add-modal');
-  if (modal) modal.classList.add('is-visible');
-}
-
-async function openEditRateLimitModal(name) {
-  try {
-    var res = await authFetch(rateLimitRulesUrl, { headers: buildAuthHeaders({}) });
-    if (!res.ok) throw new Error(await res.text());
-    var data = await res.json();
-    var r = data[name];
-    if (!r) throw new Error("Rule not found");
-    
-    document.getElementById("edit-rl-original-name").value = name;
-    document.getElementById("edit-rl-name").value = name;
-    document.getElementById("edit-rl-target").value = r.targetType;
-    document.getElementById("edit-rl-metrics").value = JSON.stringify(r.metrics || [], null, 2);
-    document.getElementById("edit-rl-actions").value = JSON.stringify(r.actions || [], null, 2);
-    
-    var modal = document.querySelector('#rate-limit-edit-modal');
-    if (modal) modal.classList.add('is-visible');
-  } catch (e) {
-    var msg = document.getElementById("rate-limits-msg");
-    if (msg) msg.textContent = "加载规则失败: " + (e.message || e);
-  }
-}
-
-async function confirmAddRateLimit() {
-  var msg = document.getElementById("rate-limits-msg");
-  if (msg) msg.textContent = "";
-  
-  var name = document.getElementById("add-rl-name").value.trim();
-  var targetType = document.getElementById("add-rl-target").value;
-  var metricsStr = document.getElementById("add-rl-metrics").value.trim();
-  var actionsStr = document.getElementById("add-rl-actions").value.trim();
-  
-  if (!name) { if (msg) msg.textContent = "规则名称必填"; return; }
-  
-  var metrics = [];
-  var actions = [];
-  try {
-    if (metricsStr) metrics = JSON.parse(metricsStr);
-    if (actionsStr) actions = JSON.parse(actionsStr);
-  } catch (e) {
-    if (msg) msg.textContent = "JSON 格式错误";
-    return;
-  }
-  
-  var rule = {
-    name: name,
-    targetType: targetType,
-    metrics: metrics,
-    actions: actions
-  };
-  
-  try {
-    var res = await authFetch(rateLimitRulesUrl, { 
-      method: "POST", 
-      headers: buildAuthHeaders({ "Content-Type": "application/json" }), 
-      body: JSON.stringify(rule) 
-    });
-    if (!res.ok) throw new Error(await res.text());
-    
-    if (msg) msg.textContent = "新增成功";
-    var modal = document.querySelector('#rate-limit-add-modal');
-    if (modal) modal.classList.remove('is-visible');
-    loadRules();
-  } catch (e) {
-    if (msg) msg.textContent = "新增失败: " + (e.message || e);
-  }
-}
-
-async function confirmEditRateLimit() {
-  var msg = document.getElementById("rate-limits-msg");
-  if (msg) msg.textContent = "";
-  
-  var originalName = document.getElementById("edit-rl-original-name").value;
-  var name = document.getElementById("edit-rl-name").value.trim();
-  var targetType = document.getElementById("edit-rl-target").value;
-  var metricsStr = document.getElementById("edit-rl-metrics").value.trim();
-  var actionsStr = document.getElementById("edit-rl-actions").value.trim();
-  
-  if (!name) { if (msg) msg.textContent = "规则名称必填"; return; }
-  
-  var metrics = [];
-  var actions = [];
-  try {
-    if (metricsStr) metrics = JSON.parse(metricsStr);
-    if (actionsStr) actions = JSON.parse(actionsStr);
-  } catch (e) {
-    if (msg) msg.textContent = "JSON 格式错误";
-    return;
-  }
-  
-  var rule = {
-    name: name,
-    targetType: targetType,
-    metrics: metrics,
-    actions: actions
-  };
-  
-  try {
-    // If name changed, delete old
-    if (originalName !== name) {
-        await authFetch(rateLimitRulesUrl + "?name=" + encodeURIComponent(originalName), { 
-            method: "DELETE", 
-            headers: buildAuthHeaders({}) 
-        });
-    }
-    
-    var res = await authFetch(rateLimitRulesUrl, { 
-      method: "POST", 
-      headers: buildAuthHeaders({ "Content-Type": "application/json" }), 
-      body: JSON.stringify(rule) 
-    });
-    if (!res.ok) throw new Error(await res.text());
-    
-    if (msg) msg.textContent = "保存成功";
-    var modal = document.querySelector('#rate-limit-edit-modal');
-    if (modal) modal.classList.remove('is-visible');
-    loadRules();
-  } catch (e) {
-    if (msg) msg.textContent = "保存失败: " + (e.message || e);
-  }
-}
-
-async function deleteRateLimit(name) {
-  if (!confirm("确定要删除规则 \"" + name + "\" 吗？")) return;
-  var msg = document.getElementById("rate-limits-msg");
-  if (msg) msg.textContent = "";
-  try {
-    var res = await authFetch(rateLimitRulesUrl + "?name=" + encodeURIComponent(name), { 
-      method: "DELETE", 
-      headers: buildAuthHeaders({}) 
-    });
-    if (!res.ok) throw new Error(await res.text());
-    if (msg) msg.textContent = "删除成功";
-    loadRules();
-  } catch (e) {
-    if (msg) msg.textContent = "删除失败: " + (e.message || e);
-  }
-}
-
-document.getElementById("btn-rate-limits-load").addEventListener("click", loadRules);
-document.getElementById("btn-rate-limits-add").addEventListener("click", openAddRateLimitModal);
-
-window.loadRules = loadRules;
-window.openAddRateLimitModal = openAddRateLimitModal;
-window.openEditRateLimitModal = openEditRateLimitModal;
-window.confirmAddRateLimit = confirmAddRateLimit;
-window.confirmEditRateLimit = confirmEditRateLimit;
-window.deleteRateLimit = deleteRateLimit;
 
 }); // End of DOMContentLoaded
 `
