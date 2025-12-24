@@ -307,6 +307,8 @@ func (p *DedicatedProxy) serveFile(w http.ResponseWriter, r *http.Request) {
 		localPath = filepath.Join(basePath, requestedPath)
 	}
 
+	localPath = findIndexFile(localPath)
+
 	content, err := os.ReadFile(localPath)
 	if err != nil {
 		http.Error(w, "File not found", http.StatusNotFound)
