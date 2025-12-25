@@ -99,28 +99,32 @@ var admin_page_js = `
       
       // 自动加载对应tab的数据
       setTimeout(function() {
-        if (tabId === "tab-users" && typeof loadUsers === "function") loadUsers();
-        else if (tabId === "tab-proxies" && typeof loadProxies === "function") loadProxies();
-        else if (tabId === "tab-tunnels" && typeof loadTunnels === "function") loadTunnels();
-        else if (tabId === "tab-servers" && typeof loadServers === "function") {
+        if (tabId === "tab-stats") {
+          refreshStats();
+          loadTimeSeriesData();
+        }
+        else if (tabId === "tab-users") loadUsers();
+        else if (tabId === "tab-proxies") loadProxies();
+        else if (tabId === "tab-tunnels") loadTunnels();
+        else if (tabId === "tab-servers") {
           loadServers();
-          if (typeof populateFirewallSelectors === "function") populateFirewallSelectors();
+          populateFirewallSelectors();
         }
-        else if (tabId === "tab-rules" && typeof loadRules === "function") {
+        else if (tabId === "tab-rules") {
           loadRules();
-          if (typeof populateFirewallSelectors === "function") populateFirewallSelectors();
-          if (typeof populateAuthProviderSelectors === "function") populateAuthProviderSelectors();
+          populateFirewallSelectors();
+          populateAuthProviderSelectors();
         }
-        else if (tabId === "tab-rate-limits" && typeof loadRateLimitRules === "function") loadRateLimitRules();
-        else if (tabId === "tab-firewalls" && typeof loadFirewalls === "function") loadFirewalls();
-        else if (tabId === "tab-auth-providers" && typeof loadAuthProviders === "function") loadAuthProviders();
-        else if (tabId === "tab-endpoints" && typeof loadEndpoints === "function") {
+        else if (tabId === "tab-rate-limits") loadRateLimitRules();
+        else if (tabId === "tab-firewalls") loadFirewalls();
+        else if (tabId === "tab-auth-providers") loadAuthProviders();
+        else if (tabId === "tab-endpoints") {
           loadEndpoints();
-          if (typeof populateTunnelSelectorsForEndpoints === "function") populateTunnelSelectorsForEndpoints();
+          populateTunnelSelectorsForEndpoints();
         }
-        else if (tabId === "tab-logs" && typeof loadLogs === "function") loadLogs();
+        else if (tabId === "tab-logs") loadLogs();
         else if (tabId === "tab-act") { /* No auto-load needed, manual connect */ }
-        else if (tabId === "tab-config" && typeof loadConfig === "function") loadConfig();
+        else if (tabId === "tab-config") loadConfig();
       }, 100);
     }
     
@@ -345,8 +349,11 @@ var admin_page_js = `
       if (statsTimer) clearInterval(statsTimer);
       statsTimer = setInterval(() => { 
         // 仅在统计页面且autoRefresh为true时刷新
-        if (autoRefresh && currentTab === "tab-stats") refreshStats(); 
-      }, 10000);
+        if (autoRefresh && currentTab === "tab-stats") {
+          refreshStats();
+          loadTimeSeriesData();
+        }
+      }, 3000);
     }
     startAutoRefresh();
 
@@ -455,7 +462,7 @@ var admin_page_js = `
 
     function renderRaw(stats) {
       const el = document.getElementById("stats-raw");
-      el.textContent = JSON.stringify(stats, null, 2);
+      if (el) el.textContent = JSON.stringify(stats, null, 2);
     }
 
 // ===== 管理 API 常量与工具 =====
@@ -1034,10 +1041,14 @@ async function loadTunnelEndpoints(tunnelName) {
   var tbody = document.getElementById("tunnel-endpoints-tbody");
   if (!tbody) return;
   tbody.innerHTML = "";
-  if (!tunnelName) return;
 
   try {
-    var res = await authFetch(tunnelEndpointsUrl + "?tunnel=" + encodeURIComponent(tunnelName), { headers: buildAuthHeaders({}) });
+    // 如果没有选择隧道，则查询所有在线节点
+    var url = tunnelName ? 
+      tunnelEndpointsUrl + "?tunnel=" + encodeURIComponent(tunnelName) : 
+      tunnelEndpointsUrl;
+    
+    var res = await authFetch(url, { headers: buildAuthHeaders({}) });
     if (!res.ok) throw new Error(await res.text());
     var data = await res.json();
     (data.endpoints || []).forEach(function(ep){
@@ -1092,6 +1103,8 @@ async function loadTunnels() {
       if (tbody) tbody.appendChild(tr);
     });
     if (msg) msg.textContent = "隧道列表已加载";
+    // 加载所有在线节点
+    loadTunnelEndpoints();
   } catch (e) {
     if (msg) msg.textContent = "加载失败: " + (e.message || e);
   }
@@ -2024,8 +2037,24 @@ async function loadFirewalls() {
     
     Object.keys(data || {}).forEach(function(name) {
       var fw = data[name] || {};
-      var allowList = parseFirewallRules(fw.allow);
-      var blockList = parseFirewallRules(fw.block);
+      
+      var getRules = function(ruleSet) {
+        var list = [];
+        if (!ruleSet) return list;
+        
+        if (typeof ruleSet === 'object' && !Array.isArray(ruleSet)) {
+          if (ruleSet.networks) list = list.concat(parseFirewallRules(ruleSet.networks));
+          if (ruleSet.regions && Array.isArray(ruleSet.regions)) {
+            list = list.concat(ruleSet.regions.map(function(r) { return "Region:" + r; }));
+          }
+        } else {
+          list = parseFirewallRules(ruleSet);
+        }
+        return list;
+      };
+
+      var allowList = getRules(fw.allow);
+      var blockList = getRules(fw.block);
       
       var mode = allowList.length > 0 ? "白名单" : (blockList.length > 0 ? "黑名单" : "无规则");
       var count = allowList.length + blockList.length;
@@ -3270,7 +3299,6 @@ async function loadEndpoints() {
         "<td>" + (ep.tunnelName || "") + "</td>" +
         "<td>" + (ep.endpointName || "") + "</td>" +
         "<td>" + portMappingsStr + "</td>" +
-        "<td>" + (ep.stats ? (ep.stats.intercepted || 0) : "-") + "</td>" +
         "<td><button class='bx--btn bx--btn--sm bx--btn--ghost' onclick='openEditEndpointModal(\"" + id.replace(/"/g, '&quot;') + "\")'>编辑</button> " +
         "<button class='bx--btn bx--btn--sm bx--btn--danger--ghost' onclick='deleteEndpoint(\"" + id.replace(/"/g, '&quot;') + "\")'>删除</button></td>";
       if (tbody) tbody.appendChild(tr);

@@ -75,6 +75,7 @@ type StatsCollector struct {
 	TunnelStats   sync.Map // map[string]*Metrics
 	ProxyStats    sync.Map // map[string]*Metrics
 	EndpointStats sync.Map // map[string]*Metrics - per endpoint statistics
+	UrlStats      sync.Map // map[string]*Metrics - per URL statistics
 
 	// For auth-aware masking in stats
 	Config *Config
@@ -169,6 +170,7 @@ type RecordData struct {
 
 	// Client information
 	ClientIP string // Client IP address for IP statistics
+	URL      string // Request URL for URL statistics
 }
 
 // Record processes a RecordData event asynchronously.
@@ -202,6 +204,7 @@ func (sc *StatsCollector) statsWorker() {
 		sc.updateMetricsForDim(&sc.TunnelStats, data.TunnelKey, data)
 		sc.updateMetricsForDim(&sc.EndpointStats, data.EndpointKey, data)
 		sc.updateMetricsForDim(&sc.ProxyStats, data.ProxyKey, data)
+		sc.updateMetricsForDim(&sc.UrlStats, data.URL, data)
 
 		// Record IP statistics with traffic data
 		if data.ClientIP != "" {
@@ -437,6 +440,54 @@ func (sc *StatsCollector) GetIPStats() []IPRequestStats {
 				RawUDPBytesRecv: atomic.LoadUint64(&ipData.RawUDPBytesRecv),
 				FirstSeen:       firstSeen,
 				LastSeen:        lastSeen,
+			})
+		}
+
+		return true
+	})
+
+	// Sort by request count (descending)
+	sort.Slice(stats, func(i, j int) bool {
+		return stats[i].Requests > stats[j].Requests
+	})
+
+	return stats
+}
+
+// UrlRequestStats represents statistics for a single URL.
+type UrlRequestStats struct {
+	URL        string `json:"url"`
+	Requests   uint64 `json:"requests"`
+	BytesSent  uint64 `json:"bytesSent"`
+	BytesRecv  uint64 `json:"bytesRecv"`
+	Errors     uint64 `json:"errors"`
+	LastAccess string `json:"lastAccess"`
+}
+
+// GetUrlStats returns URL request statistics, sorted by request count (descending).
+func (sc *StatsCollector) GetUrlStats() []UrlRequestStats {
+	stats := make([]UrlRequestStats, 0)
+
+	sc.UrlStats.Range(func(key, value interface{}) bool {
+		urlStr := key.(string)
+		metrics := value.(*Metrics)
+
+		metrics.mutex.Lock()
+		reqs := atomic.LoadUint64(&metrics.RequestCount)
+		sent := atomic.LoadUint64(&metrics.BytesSent.Total)
+		recv := atomic.LoadUint64(&metrics.BytesRecv.Total)
+		errs := atomic.LoadUint64(&metrics.Errors)
+		lastAccess := metrics.lastRequestTime
+		metrics.mutex.Unlock()
+
+		if reqs > 0 {
+			stats = append(stats, UrlRequestStats{
+				URL:        urlStr,
+				Requests:   reqs,
+				BytesSent:  sent,
+				BytesRecv:  recv,
+				Errors:     errs,
+				LastAccess: lastAccess.Format("2006-01-02 15:04:05"),
 			})
 		}
 

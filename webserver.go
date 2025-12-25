@@ -158,6 +158,7 @@ func (h *AdminHandlers) RegisterHandlers(mux *http.ServeMux) {
 	mux.HandleFunc("/.api/log", h.handleLogs)
 	mux.HandleFunc("/.api/act", h.handleAct)
 	mux.HandleFunc("/.api/stats/timeseries", h.handleTimeSeriesStats)
+	mux.HandleFunc("/.api/stats/url", h.handleUrlStats)
 	mux.HandleFunc("/.api/stats/ip", func(w http.ResponseWriter, r *http.Request) {
 		// Admin authentication check
 		if !isAdminRequest(r, h.config) {
@@ -307,26 +308,15 @@ func (h *AdminHandlers) handleLogin(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"status": "success", "token": token})
 }
 
-// handleTunnelEndpoints returns detailed information about endpoints for a specific tunnel.
+// handleTunnelEndpoints returns detailed information about endpoints for a specific tunnel or all online endpoints.
 func (h *AdminHandlers) handleTunnelEndpoints(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	tunnelName := r.URL.Query().Get("tunnel")
-	if tunnelName == "" {
-		http.Error(w, "Missing tunnel query parameter", http.StatusBadRequest)
-		return
-	}
 
 	if h.tunnelManager == nil {
 		http.Error(w, "Tunnel manager not initialized", http.StatusInternalServerError)
-		return
-	}
-
-	endpoints := h.tunnelManager.GetEndpointsInfo(tunnelName, h.statsCollector)
-	if endpoints == nil {
-		http.Error(w, "Tunnel not found", http.StatusNotFound)
 		return
 	}
 
@@ -342,37 +332,85 @@ func (h *AdminHandlers) handleTunnelEndpoints(w http.ResponseWriter, r *http.Req
 
 	response := struct {
 		Endpoints []PublicEndpointInfo `json:"endpoints"`
-		Tunnel    string               `json:"tunnel"`
+		Tunnel    string               `json:"tunnel,omitempty"`
 	}{
 		Endpoints: make([]PublicEndpointInfo, 0),
-		Tunnel:    tunnelName,
 	}
 
-	for _, ep := range endpoints {
-		// 显示标准时间格式而不是相对时间
-		onlineTimeStr := "-"
-		if !ep.OnlineTime.IsZero() {
-			onlineTimeStr = ep.OnlineTime.Format("2006-01-02 15:04:05")
-		}
+	tunnelName := r.URL.Query().Get("tunnel")
 
-		lastActivityStr := "-"
-		if !ep.LastActivityTime.IsZero() {
-			lastActivityStr = ep.LastActivityTime.Format("2006-01-02 15:04:05")
+	if tunnelName != "" {
+		// Return endpoints for a specific tunnel
+		endpoints := h.tunnelManager.GetEndpointsInfo(tunnelName, h.statsCollector)
+		if endpoints == nil {
+			http.Error(w, "Tunnel not found", http.StatusNotFound)
+			return
 		}
+		response.Tunnel = tunnelName
 
-		response.Endpoints = append(response.Endpoints, PublicEndpointInfo{
-			Name:         ep.Name,
-			Online:       true,
-			RemoteAddr:   ep.RemoteAddr,
-			OnlineTime:   onlineTimeStr,
-			LastActivity: lastActivityStr,
-			Latency:      "-",      // Latency measurement disabled
-			Stats:        ep.Stats, // Include statistics from endpoint info
-		})
+		for _, ep := range endpoints {
+			// 显示标准时间格式而不是相对时间
+			onlineTimeStr := "-"
+			if !ep.OnlineTime.IsZero() {
+				onlineTimeStr = ep.OnlineTime.Format("2006-01-02 15:04:05")
+			}
+
+			lastActivityStr := "-"
+			if !ep.LastActivityTime.IsZero() {
+				lastActivityStr = ep.LastActivityTime.Format("2006-01-02 15:04:05")
+			}
+
+			response.Endpoints = append(response.Endpoints, PublicEndpointInfo{
+				Name:         ep.Name,
+				Online:       true,
+				RemoteAddr:   ep.RemoteAddr,
+				OnlineTime:   onlineTimeStr,
+				LastActivity: lastActivityStr,
+				Latency:      "-",      // Latency measurement disabled
+				Stats:        ep.Stats, // Include statistics from endpoint info
+			})
+		}
+	} else {
+		// Return all online endpoints across all tunnels
+		allEndpoints := h.tunnelManager.GetAllOnlineEndpoints()
+
+		for _, ep := range allEndpoints {
+			// 显示标准时间格式而不是相对时间
+			onlineTimeStr := "-"
+			if !ep.OnlineTime.IsZero() {
+				onlineTimeStr = ep.OnlineTime.Format("2006-01-02 15:04:05")
+			}
+
+			lastActivityStr := "-"
+			if !ep.LastActivityTime.IsZero() {
+				lastActivityStr = ep.LastActivityTime.Format("2006-01-02 15:04:05")
+			}
+
+			response.Endpoints = append(response.Endpoints, PublicEndpointInfo{
+				Name:         ep.Name,
+				Online:       true,
+				RemoteAddr:   ep.RemoteAddr,
+				OnlineTime:   onlineTimeStr,
+				LastActivity: lastActivityStr,
+				Latency:      "-",      // Latency measurement disabled
+				Stats:        ep.Stats, // Include statistics from endpoint info
+			})
+		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(response)
+}
+
+func (h *AdminHandlers) handleUrlStats(w http.ResponseWriter, r *http.Request) {
+	if !isAdminRequest(r, h.config) {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	stats := h.statsCollector.GetUrlStats()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(stats)
 }
 
 func (h *AdminHandlers) handleConfig(w http.ResponseWriter, r *http.Request) {

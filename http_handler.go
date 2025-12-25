@@ -153,6 +153,7 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 			Protocol:     "http",
 			StatusCode:   statusCode,
 			ClientIP:     getClientIP(r),
+			URL:          p.buildOriginalURL(r),
 		})
 
 		// Request logging (async, non-blocking)
