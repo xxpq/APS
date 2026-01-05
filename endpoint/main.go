@@ -510,6 +510,21 @@ func runServerConnection(ctx context.Context, serverAddress string) {
 			// Increment retry counter
 			connectionManager.IncrementRetry(serverAddress)
 
+			// Re-fetch configuration if using CID mode (ensures fresh config after any disruption)
+			if cfg.ConfigID != "" {
+				log.Printf("[%s] Re-fetching configuration before reconnect", serverAddress)
+				newConfig, err := FetchConfigFromAPS(cfg.Address, cfg.ConfigID)
+				if err == nil {
+					runtimeConfigMu.Lock()
+					runtimeConfig = newConfig
+					runtimeConfigMu.Unlock()
+					log.Printf("[%s] Configuration refreshed: tunnel=%s, endpoint=%s",
+						serverAddress, newConfig.TunnelName, newConfig.EndpointName)
+				} else {
+					log.Printf("[%s] Failed to refresh config (will use existing): %v", serverAddress, err)
+				}
+			}
+
 			// Log and sleep before retry
 			retryInfo := ""
 			if cfg.IsSeed {

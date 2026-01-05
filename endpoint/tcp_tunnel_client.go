@@ -346,8 +346,8 @@ func runTCPTunnelSession(ctx context.Context) bool {
 		defer close(done)
 		for {
 			// Set read deadline to detect dead connections
-			// Server sends heartbeat every 30s, use 120s for large transfers
-			tc.conn.SetReadDeadline(time.Now().Add(120 * time.Second))
+			// Server sends heartbeat every 30s, use 60s timeout for faster recovery
+			tc.conn.SetReadDeadline(time.Now().Add(60 * time.Second))
 			msg, err := tc.ReadMessage()
 			if err != nil {
 				if err != io.EOF {
@@ -366,6 +366,8 @@ func runTCPTunnelSession(ctx context.Context) bool {
 			return initiateKeyRotation(tc, keyManager)
 		})
 	}()
+	// Ensure key rotation is stopped when connection closes
+	defer keyManager.StopAutoRotation()
 
 	// Heartbeat loop
 	heartbeatTicker := time.NewTicker(30 * time.Second)
@@ -408,6 +410,14 @@ func handleTCPMessage(tc *TunnelConn, msg *TunnelMessage, km *SessionKeyManager)
 
 	case MsgTypeMirrorUpdate:
 		handleMirrorUpdate(tc, msg)
+
+	// Key rotation messages
+	case MsgTypeKeyRequest:
+		handleKeyRequest(tc, msg, km)
+	case MsgTypeKeyResponse:
+		handleKeyResponse(tc, msg, km)
+	case MsgTypeKeyConfirm:
+		handleKeyConfirm(tc, msg, km)
 	}
 }
 
@@ -427,8 +437,9 @@ func handleTCPRequest(tc *TunnelConn, msg *TunnelMessage) {
 	// Decrypt request data
 	decryptedData, err := decrypt(reqPayload.Data, GetEffectivePassword())
 	if err != nil {
-		log.Printf("[ERROR %s] Decryption failed: %v", requestID, err)
-		sendTCPErrorResponse(tc, requestID, "decryption failed")
+		log.Printf("[FATAL] Decryption failed - key mismatch detected: %v", err)
+		log.Printf("[FATAL] Forcing connection reset to recover from key state inconsistency")
+		tc.Close() // Force connection close to trigger reconnection
 		return
 	}
 
