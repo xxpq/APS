@@ -1266,15 +1266,22 @@ async function loadRules() {
         }
       }
       
+      var viaSummary = '';
+      if (rule.via && rule.via.endpoints) {
+        viaSummary = Array.isArray(rule.via.endpoints) ? rule.via.endpoints.join(', ') : rule.via.endpoints;
+      }
+
       // Truncate if too long
       if (fromSummary.length > 30) fromSummary = fromSummary.substring(0, 27) + "...";
       if (toSummary.length > 30) toSummary = toSummary.substring(0, 27) + "...";
+      if (viaSummary.length > 30) viaSummary = viaSummary.substring(0, 27) + "...";
       if (serversSummary.length > 30) serversSummary = serversSummary.substring(0, 27) + "...";
       
       var tr = document.createElement("tr");
       tr.innerHTML = "<td>" + index + "</td>" +
         "<td>" + fromSummary + "</td>" +
         "<td>" + toSummary + "</td>" +
+        "<td>" + (viaSummary || "-") + "</td>" +
         "<td>" + (serversSummary || "-") + "</td>" +
         "<td><button class='bx--btn bx--btn--sm bx--btn--ghost' onclick='openEditRuleModal(" + index + ")'>编辑</button> " +
         "<button class='bx--btn bx--btn--sm bx--btn--danger--ghost' onclick='deleteRule(" + index + ")'>删除</button></td>";
@@ -1616,15 +1623,22 @@ async function loadRules() {
         }
       }
       
+      var viaSummary = '';
+      if (rule.via && rule.via.endpoints) {
+        viaSummary = Array.isArray(rule.via.endpoints) ? rule.via.endpoints.join(', ') : rule.via.endpoints;
+      }
+
       // Truncate if too long
       if (fromSummary.length > 30) fromSummary = fromSummary.substring(0, 27) + "...";
       if (toSummary.length > 30) toSummary = toSummary.substring(0, 27) + "...";
+      if (viaSummary.length > 30) viaSummary = viaSummary.substring(0, 27) + "...";
       if (serversSummary.length > 30) serversSummary = serversSummary.substring(0, 27) + "...";
       
       var tr = document.createElement("tr");
       tr.innerHTML = "<td>" + index + "</td>" +
         "<td>" + fromSummary + "</td>" +
         "<td>" + toSummary + "</td>" +
+        "<td>" + (viaSummary || "-") + "</td>" +
         "<td>" + (serversSummary || "-") + "</td>" +
         "<td><button class='bx--btn bx--btn--sm bx--btn--ghost' onclick='openEditRuleModal(" + index + ")'>编辑</button> " +
         "<button class='bx--btn bx--btn--sm bx--btn--danger--ghost' onclick='deleteRule(" + index + ")'>删除</button></td>";

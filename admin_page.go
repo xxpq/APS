@@ -545,7 +545,7 @@ var admin_page_content = `
         </div>
         <div class="table-wrap">
           <table class="bx--data-table carbon-table">
-            <thead><tr><th>#</th><th>From</th><th>To</th><th>Servers</th><th>操作</th></tr></thead>
+            <thead><tr><th>#</th><th>From</th><th>To</th><th>Via</th><th>Servers</th><th>操作</th></tr></thead>
             <tbody id="rules-tbody"></tbody>
           </table>
         </div>
