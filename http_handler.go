@@ -1073,14 +1073,31 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	// Check if we should cache this response (preliminary check, status code confirmed later)
 	shouldCache := r.Method == http.MethodGet && p.staticCache != nil && p.staticCache.IsCacheable(r.URL.Path) && resp.StatusCode == http.StatusOK
 
+	// Detect if it's a streaming response (SSE or chunked without known length)
+	contentType := resp.Header.Get("Content-Type")
+	isSSE := strings.HasPrefix(contentType, "text/event-stream")
+	isChunked := strings.ToLower(resp.Header.Get("Transfer-Encoding")) == "chunked"
+	hasContentLength := resp.ContentLength > 0 || resp.Header.Get("Content-Length") != ""
+
+	// Streaming detection logic:
+	// 1. SSE is always a stream
+	// 2. Chunked encoding without a Content-Length is treated as a stream if it's not a known cacheable file type
+	isStreaming := isSSE || (isChunked && !hasContentLength && !p.staticCache.IsCacheable(r.URL.Path))
+
 	var body []byte
 	var errRead error
 
 	// Decide if we need to read the full body into memory
 	// We read if:
-	// 1. Modification is needed AND it's a text content type
-	// 2. Caching is enabled AND it's a cacheable file (regardless of type)
-	readBody := (needsModification && isTextContentType(resp.Header.Get("Content-Type"))) || shouldCache
+	// 1. Modification is needed AND it's a text content type AND NOT streaming
+	// 2. Caching is enabled AND it's a cacheable file (regardless of type) AND NOT streaming
+	readBody := !isStreaming && ((needsModification && isTextContentType(contentType)) || shouldCache)
+
+	if isStreaming {
+		DebugLog("[STREAM] Detected streaming response (SSE=%v, Chunked=%v). Bypassing buffering.", isSSE, isChunked)
+		// Disable caching if it was somehow still flagged
+		shouldCache = false
+	}
 
 	if readBody {
 		if needsModification && isTextContentType(resp.Header.Get("Content-Type")) {
@@ -1148,9 +1165,44 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	// Use pooled writer wrapper to count bytes written
 	counterWriter := getCounterWriter(writer)
 	defer putCounterWriter(counterWriter)
-	_, err = io.Copy(counterWriter, reader)
+
+	// Stream copying logic
+	if isStreaming {
+		// Use a smaller buffer for streaming to ensure responsiveness if not using io.Copy defaults
+		// but io.Copy is generally fine. The key is flushing.
+		flushWriter, canFlush := w.(http.Flusher)
+		if canFlush {
+			// For streaming, we might need to copy in chunks and flush
+			buf := make([]byte, 4096)
+			for {
+				n, readErr := reader.Read(buf)
+				if n > 0 {
+					_, writeErr := counterWriter.Write(buf[:n])
+					if writeErr != nil {
+						err = writeErr
+						break
+					}
+					flushWriter.Flush()
+				}
+				if readErr != nil {
+					if readErr != io.EOF {
+						err = readErr
+					}
+					break
+				}
+			}
+		} else {
+			_, err = io.Copy(counterWriter, reader)
+		}
+	} else {
+		_, err = io.Copy(counterWriter, reader)
+	}
+
 	if err != nil {
-		log.Printf("Error writing response body: %v", err)
+		// Don't log "context canceled" as a hard error, it's common for streams
+		if err != context.Canceled {
+			log.Printf("Error writing response body: %v", err)
+		}
 	}
 	bytesSent = counterWriter.BytesWritten
 
