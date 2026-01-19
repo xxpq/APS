@@ -251,6 +251,20 @@ func (tm *TCPTunnelManager) SendRequestStream(ctx context.Context, tunnelName, e
 				return nil, nil, err
 			}
 			DebugLog("[TCP TUNNEL] Successfully received and decrypted response header for %s (%d bytes)", requestID, len(headerBytes))
+		} else if msg.Type == MsgTypeResponseEnd {
+			var end ResponseEndPayloadTCP
+			if err := msg.ParseJSON(&end); err != nil {
+				DebugLog("[TCP TUNNEL] Failed to parse response end for %s: %v", requestID, err)
+				pipeWriter.CloseWithError(err)
+				return nil, nil, err
+			}
+			errMsg := "request failed at endpoint"
+			if end.Error != "" {
+				errMsg = end.Error
+			}
+			DebugLog("[TCP TUNNEL] Received response end for %s immediately: %s", requestID, errMsg)
+			pipeWriter.CloseWithError(errors.New(errMsg))
+			return nil, nil, errors.New(errMsg)
 		} else {
 			DebugLog("[TCP TUNNEL] Unexpected response type %d for %s", msg.Type, requestID)
 			pipeWriter.CloseWithError(errors.New("unexpected response type"))
