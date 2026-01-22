@@ -214,8 +214,8 @@ func (tm *TCPTunnelManager) SendRequestStream(ctx context.Context, tunnelName, e
 	ep.pendingRequests[requestID] = pending
 	ep.mu.Unlock()
 
-	// Encrypt request data
-	encryptedData, err := encrypt(reqPayload.Data, tm.config.Tunnels[tunnelName].Password)
+	// Encrypt request data using KeyManager
+	encryptedData, err := ep.KeyManager.Encrypt(reqPayload.Data)
 	if err != nil {
 		pipeWriter.Close()
 		return nil, nil, err
@@ -244,7 +244,7 @@ func (tm *TCPTunnelManager) SendRequestStream(ctx context.Context, tunnelName, e
 				pipeWriter.CloseWithError(err)
 				return nil, nil, err
 			}
-			headerBytes, err = decrypt(header.Header, tm.config.Tunnels[tunnelName].Password)
+			headerBytes, err = ep.KeyManager.Decrypt(header.Header)
 			if err != nil {
 				DebugLog("[TCP TUNNEL] Failed to decrypt response header for %s: %v", requestID, err)
 				pipeWriter.CloseWithError(err)
@@ -297,7 +297,7 @@ func (tm *TCPTunnelManager) SendRequestStream(ctx context.Context, tunnelName, e
 					pipeWriter.CloseWithError(err)
 					return
 				}
-				decryptedChunk, err := decrypt(chunk.Data, tm.config.Tunnels[tunnelName].Password)
+				decryptedChunk, err := ep.KeyManager.Decrypt(chunk.Data)
 				if err != nil {
 					pipeWriter.CloseWithError(err)
 					return

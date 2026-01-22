@@ -949,7 +949,7 @@ func (ep *TCPEndpoint) initiateKeyRotation() error {
 		return err
 	}
 
-	if err := ep.Conn.WriteMessage(&TunnelMessage{Type: MsgTypeKeyRequest, Payload: payload}); err != nil {
+	if err := ep.Send(&TunnelMessage{Type: MsgTypeKeyRequest, Payload: payload}); err != nil {
 		DebugLog("[KEY] Failed to send key request to %s: %v", ep.EndpointName, err)
 		return err
 	}

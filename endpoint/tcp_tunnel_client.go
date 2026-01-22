@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -251,6 +252,11 @@ func (msg *TunnelMessage) ParseJSON(v interface{}) error {
 func runTCPTunnelSession(ctx context.Context) bool {
 	log.Printf("Connecting to TCP tunnel server at %s", *serverAddr)
 
+	// 如果serverAddr不包含端口，则添加默认端口
+	if !strings.Contains(*serverAddr, ":") {
+		*serverAddr += ":80"
+	}
+
 	conn, err := net.DialTimeout("tcp", *serverAddr, 30*time.Second)
 	if err != nil {
 		log.Printf("Failed to connect: %v", err)
@@ -389,7 +395,7 @@ func runTCPTunnelSession(ctx context.Context) bool {
 func handleTCPMessage(tc *TunnelConn, msg *TunnelMessage, km *SessionKeyManager) {
 	switch msg.Type {
 	case MsgTypeRequest:
-		handleTCPRequest(tc, msg)
+		handleTCPRequest(tc, msg, km)
 	case MsgTypeProxyConnect:
 		handleTCPProxyConnect(tc, msg)
 		handleTCPProxyDataBinary(msg)
@@ -422,7 +428,7 @@ func handleTCPMessage(tc *TunnelConn, msg *TunnelMessage, km *SessionKeyManager)
 }
 
 // handleTCPRequest handles HTTP request via TCP tunnel
-func handleTCPRequest(tc *TunnelConn, msg *TunnelMessage) {
+func handleTCPRequest(tc *TunnelConn, msg *TunnelMessage, km *SessionKeyManager) {
 	var reqPayload RequestPayloadTCP
 	if err := msg.ParseJSON(&reqPayload); err != nil {
 		log.Printf("Failed to parse request: %v", err)
@@ -434,12 +440,13 @@ func handleTCPRequest(tc *TunnelConn, msg *TunnelMessage) {
 		log.Printf("[DEBUG %s] Handling TCP request, URL: %s", requestID, reqPayload.URL)
 	}
 
-	// Decrypt request data
-	decryptedData, err := decrypt(reqPayload.Data, GetEffectivePassword())
+	// Use KeyManager.Decrypt instead of password-based decrypt
+	// This will try both currentKey and previousKey during grace period
+	decryptedData, err := km.Decrypt(reqPayload.Data)
 	if err != nil {
-		log.Printf("[FATAL] Decryption failed - key mismatch detected: %v", err)
-		log.Printf("[FATAL] Forcing connection reset to recover from key state inconsistency")
-		tc.Close() // Force connection close to trigger reconnection
+		log.Printf("[ERROR] Decryption failed - trying all available keys: %v", err)
+		log.Printf("[ERROR] This may indicate a key synchronization issue")
+		sendTCPErrorResponse(tc, requestID, "decryption failed")
 		return
 	}
 
@@ -490,7 +497,7 @@ func handleTCPRequest(tc *TunnelConn, msg *TunnelMessage) {
 		return
 	}
 
-	encryptedHeader, err := encrypt(headerBytes, GetEffectivePassword())
+	encryptedHeader, err := km.Encrypt(headerBytes)
 	if err != nil {
 		log.Printf("[ERROR %s] Failed to encrypt response header: %v", requestID, err)
 		sendTCPErrorResponse(tc, requestID, "failed to encrypt response header")
@@ -515,7 +522,7 @@ func handleTCPRequest(tc *TunnelConn, msg *TunnelMessage) {
 	for {
 		n, err := resp.Body.Read(buf)
 		if n > 0 {
-			encryptedChunk, encErr := encrypt(buf[:n], GetEffectivePassword())
+			encryptedChunk, encErr := km.Encrypt(buf[:n])
 			if encErr != nil {
 				log.Printf("[ERROR %s] Failed to encrypt chunk: %v", requestID, encErr)
 				sendTCPErrorResponse(tc, requestID, "failed to encrypt chunk")
