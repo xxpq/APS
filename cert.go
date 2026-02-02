@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/tls"
@@ -25,6 +26,9 @@ var (
 	caKey       *rsa.PrivateKey
 	caCertPEM   []byte
 	acmeManager *autocert.Manager
+
+	acmeDomainsMutex sync.RWMutex
+	acmeDomains      []string
 )
 
 const (
@@ -233,31 +237,56 @@ func fileExists(path string) bool {
 	return !os.IsNotExist(err)
 }
 
-// InitACME initializes the ACME certificate manager.
+// InitACME initializes or refreshes the ACME certificate manager.
 func InitACME(config *Config) {
 	// 从配置中收集所有需要ACME证书的域名
-	var acmeDomains []string
+	var newDomains []string
 	for _, mapping := range config.Mappings {
 		// 检查与此mapping关联的server是否配置了acme
+		isACME := false
 		for _, serverName := range mapping.serverNames {
 			if server, ok := config.Servers[serverName]; ok {
 				if certStr, ok := server.Cert.(string); ok && certStr == "acme" {
-					// 从 "from" URL 中提取域名
-					domain := extractDomain(mapping.GetFromURL())
-					if domain != "" && !containsString(acmeDomains, domain) {
-						acmeDomains = append(acmeDomains, domain)
+					isACME = true
+					break
+				}
+			}
+		}
+
+		if isACME {
+			fromConfig := mapping.GetFromConfig()
+			if fromConfig != nil && len(fromConfig.URLs) > 0 {
+				for _, u := range fromConfig.URLs {
+					domain := extractDomain(u)
+					if domain != "" && !containsString(newDomains, domain) {
+						newDomains = append(newDomains, domain)
 					}
+				}
+			} else {
+				domain := extractDomain(mapping.GetFromURL())
+				if domain != "" && !containsString(newDomains, domain) {
+					newDomains = append(newDomains, domain)
 				}
 			}
 		}
 	}
 
-	if len(acmeDomains) == 0 {
+	// 更新全局域名列表
+	acmeDomainsMutex.Lock()
+	acmeDomains = newDomains
+	acmeDomainsMutex.Unlock()
+
+	if len(newDomains) == 0 {
 		log.Println("[ACME] No domains configured for ACME, skipping initialization.")
 		return
 	}
 
-	log.Printf("[ACME] Initializing for domains: %v", acmeDomains)
+	log.Printf("[ACME] Initializing/Refreshing for %d domains: %v", len(newDomains), newDomains)
+
+	// 如果 acmeManager 已经初始化，只需更新域名列表即可（由 dynamicHostPolicy 处理）
+	if acmeManager != nil {
+		return
+	}
 
 	// 确保ACME缓存目录存在
 	if err := os.MkdirAll(acmeDir, 0755); err != nil {
@@ -265,10 +294,21 @@ func InitACME(config *Config) {
 	}
 
 	acmeManager = &autocert.Manager{
-		Cache:  autocert.DirCache(acmeDir),
-		Prompt: autocert.AcceptTOS,
-		// HostPolicy: autocert.HostWhitelist(acmeDomains...),
+		Cache:      autocert.DirCache(acmeDir),
+		Prompt:     autocert.AcceptTOS,
+		HostPolicy: dynamicHostPolicy,
 	}
+}
+
+// dynamicHostPolicy is a thread-safe host policy that checks against the current ACME domains.
+func dynamicHostPolicy(ctx context.Context, host string) error {
+	acmeDomainsMutex.RLock()
+	defer acmeDomainsMutex.RUnlock()
+
+	if containsString(acmeDomains, host) {
+		return nil
+	}
+	return os.ErrPermission
 }
 
 // GetACMETLSConfig returns a TLS config for ACME.

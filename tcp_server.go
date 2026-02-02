@@ -119,19 +119,23 @@ func (s *RawTCPServer) UpdateMappings(mappings []*Mapping) {
 
 // acceptLoop accepts incoming connections
 func (s *RawTCPServer) acceptLoop() {
+	log.Printf("[RAW TCP] Accept loop started for server '%s'", s.name)
 	for {
+		DebugLog("[RAW TCP] Waiting for connection on '%s'...", s.name)
 		conn, err := s.listener.Accept()
 		if err != nil {
 			s.mu.Lock()
 			closed := s.closed
 			s.mu.Unlock()
 			if closed {
+				log.Printf("[RAW TCP] Accept loop exiting for server '%s' (closed)", s.name)
 				return
 			}
 			log.Printf("[RAW TCP] Accept error on '%s': %v", s.name, err)
 			continue
 		}
 
+		log.Printf("[RAW TCP] Accepted connection on '%s' from %s", s.name, conn.RemoteAddr().String())
 		go s.handleConnection(conn)
 	}
 }
@@ -348,13 +352,17 @@ func (s *RawTCPServer) handleConnection(clientConn net.Conn) {
 
 // findMapping finds a matching mapping for this TCP server
 func (s *RawTCPServer) findMapping() *Mapping {
+	DebugLog("[RAW TCP] findMapping: Server '%s' (port %d) has %d mappings", s.name, s.config.Port, len(s.mappings))
+
 	// First, try to find a mapping explicitly assigned to this server
-	for _, m := range s.mappings {
+	for i, m := range s.mappings {
+		DebugLog("[RAW TCP] findMapping: Checking mapping %d: %s -> %s, serverNames=%v", i, m.GetFromURL(), m.GetToURL(), m.serverNames)
 		for _, serverName := range m.serverNames {
 			if serverName == s.name {
 				fromURL := m.GetFromURL()
 				if strings.HasPrefix(fromURL, "tcp://") {
 					// Logging moved to caller after firewall checks
+					DebugLog("[RAW TCP] findMapping: Found explicit match by serverName")
 					return m
 				}
 			}
@@ -364,7 +372,8 @@ func (s *RawTCPServer) findMapping() *Mapping {
 	// If no explicit mapping, try to match by port
 	// This handles the case where mapping doesn't specify servers
 	serverPort := s.config.Port
-	for _, m := range s.mappings {
+	DebugLog("[RAW TCP] findMapping: No explicit serverName match, trying port matching for port %d", serverPort)
+	for i, m := range s.mappings {
 		fromURL := m.GetFromURL()
 		if !strings.HasPrefix(fromURL, "tcp://") {
 			continue
@@ -373,22 +382,27 @@ func (s *RawTCPServer) findMapping() *Mapping {
 		// Parse the from URL to get the port
 		u, err := url.Parse(fromURL)
 		if err != nil {
+			DebugLog("[RAW TCP] findMapping: Failed to parse URL %s: %v", fromURL, err)
 			continue
 		}
 
 		portStr := u.Port()
 		if portStr == "" {
+			DebugLog("[RAW TCP] findMapping: No port in URL %s", fromURL)
 			continue
 		}
 
 		mappingPort, err := strconv.Atoi(portStr)
 		if err != nil {
+			DebugLog("[RAW TCP] findMapping: Failed to parse port %s: %v", portStr, err)
 			continue
 		}
 
+		DebugLog("[RAW TCP] findMapping: Mapping %d port %d vs server port %d", i, mappingPort, serverPort)
 		// If ports match, use this mapping
 		if mappingPort == serverPort {
 			// Logging moved to caller after firewall checks
+			DebugLog("[RAW TCP] findMapping: Found match by port!")
 			return m
 		}
 	}

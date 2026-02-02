@@ -109,11 +109,13 @@ func (sm *ServerManager) Start(name string, serverConfig *ListenConfig, isACMEEn
 		// For rawTCP servers, also match by port if no explicit server assignment
 		if (serverConfig.Type == ServerTypeTCP || serverConfig.Type == ServerTypeTCPUDP) && len(mapping.serverNames) == 0 {
 			fromURL := mapping.GetFromURL()
+			DebugLog("[TCP MAPPING] Checking mapping %s for server '%s' (port %d), serverNames=%v", fromURL, name, serverConfig.Port, mapping.serverNames)
 			if strings.HasPrefix(fromURL, "tcp://") {
 				// Parse the from URL to get the port
 				if u, err := url.Parse(fromURL); err == nil {
 					if portStr := u.Port(); portStr != "" {
 						if mappingPort, err := strconv.Atoi(portStr); err == nil {
+							DebugLog("[TCP MAPPING] Parsed port %d from %s, comparing with server port %d", mappingPort, fromURL, serverConfig.Port)
 							if mappingPort == serverConfig.Port {
 								serverMappings[name] = append(serverMappings[name], mapping)
 								log.Printf("[RAW TCP] Auto-assigned mapping %s to server '%s' (port %d)", fromURL, name, serverConfig.Port)
@@ -134,7 +136,7 @@ func (sm *ServerManager) Start(name string, serverConfig *ListenConfig, isACMEEn
 						if mappingPort, err := strconv.Atoi(portStr); err == nil {
 							if mappingPort == serverConfig.Port {
 								serverMappings[name] = append(serverMappings[name], mapping)
-								log.Printf("[RAW UDP] Auto-assigned mapping %s to server '%s' (port %d)", fromURL, name, serverConfig.Port)
+								log.Printf("[RAW UDP] Auto-assigned mapping %s to server  '%s' (port %d)", fromURL, name, serverConfig.Port)
 							}
 						}
 					}

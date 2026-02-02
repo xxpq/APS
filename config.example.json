@@ -7,7 +7,8 @@
       "proxy": false,
       "public": true,
       "panel": true,
-      "firewall": "china_only"
+      "firewall": "office_access",
+      "rateLimitRules": ["global_limit"]
     },
     "mstsc_sucdri_my_pc": {
       "port": 3388,
@@ -17,13 +18,12 @@
       "panel": false,
       "firewall": "china_only"
     },
-    "mstsc_sucdri_ssh": {
-      "port": 2222,
+    "mstsc_sucdri_vps": {
+      "port": 3387,
       "type": 1,
       "proxy": false,
       "public": true,
-      "panel": false,
-      "firewall": "china_only"
+      "panel": false
     },
     "mstsc_sucdri_windows": {
       "port": 3690,
@@ -33,7 +33,7 @@
       "panel": false,
       "firewall": "china_only"
     },
-    "mstsc_sucdri_windows_dev": {
+    "mstsc_sucdri_windows_audit": {
       "port": 3390,
       "type": 1,
       "proxy": false,
@@ -49,6 +49,21 @@
       "panel": false,
       "firewall": "china_only"
     },
+    "ssh_ls_sh_sucdri": {
+      "port": 1222,
+      "type": 1,
+      "proxy": false,
+      "public": true,
+      "panel": false
+    },
+    "ssh_sucdri": {
+      "port": 2222,
+      "type": 1,
+      "proxy": false,
+      "public": true,
+      "panel": false,
+      "firewall": "china_only"
+    },
     "ssl": {
       "port": 443,
       "type": 2,
@@ -60,7 +75,7 @@
     },
     "sucdri_esxi": {
       "port": 5000,
-      "type": 2,
+      "type": 1,
       "proxy": false,
       "public": true,
       "panel": false,
@@ -69,9 +84,7 @@
   },
   "proxies": {
     "test": {
-      "urls": [
-        "http://user@pass:localhost:8081"
-      ]
+      "urls": ["http://user@pass:localhost:8081"]
     },
     "test1": {
       "urls": [
@@ -83,13 +96,11 @@
   },
   "tunnels": {
     "ls_sucdri": {
-      "servers": [],
+      "servers": ["default"],
       "password": "sucdri"
     },
     "sucdri": {
-      "servers": [
-        "default"
-      ],
+      "servers": ["default"],
       "password": "sucdri"
     }
   },
@@ -98,13 +109,17 @@
       "tunnelName": "sucdri",
       "endpointName": "cjy_server"
     },
+    "lrq_pc": {
+      "tunnelName": "sucdri",
+      "endpointName": "lrq_pc"
+    },
+    "ls_server": {
+      "tunnelName": "ls_sucdri",
+      "endpointName": "ls_server"
+    },
     "my_pc": {
       "tunnelName": "sucdri",
       "endpointName": "my_pc"
-    },
-    "vps_sucdri": {
-      "tunnelName": "sucdri",
-      "endpointName": "vps_sucdri"
     }
   },
   "auth": {
@@ -131,11 +146,7 @@
   "firewalls": {
     "allow_specific_regions": {
       "allow": {
-        "regions": [
-          "CN-Beijing",
-          "CN-Shanghai",
-          "CN-Guangdong"
-        ]
+        "regions": ["CN-Beijing", "CN-Shanghai", "CN-Guangdong"]
       }
     },
     "block_bad_actors": {
@@ -150,43 +161,26 @@
     },
     "block_sensitive_regions": {
       "block": {
-        "regions": [
-          "CN-Xinjiang"
-        ]
+        "regions": ["CN-Xinjiang"]
       }
     },
     "block_specific_countries": {
       "block": {
-        "regions": [
-          "KP",
-          "IR"
-        ]
+        "regions": ["KP", "IR"]
       }
     },
     "china_only": {
       "allow": {
-        "regions": [
-          "CN"
-        ]
+        "regions": ["CN"]
       }
     },
     "combined_geo_and_ip": {
       "allow": {
-        "regions": [
-          "CN",
-          "US",
-          "JP",
-          "SG"
-        ]
+        "regions": ["CN", "US", "JP", "SG"]
       },
       "block": {
-        "networks": [
-          "10.0.0.0/8",
-          "172.16.0.0/12"
-        ],
-        "regions": [
-          "US-California"
-        ]
+        "networks": ["10.0.0.0/8", "172.16.0.0/12"],
+        "regions": ["US-California"]
       }
     },
     "internal_only": {
@@ -201,31 +195,18 @@
     },
     "mixed_region_formats": {
       "allow": {
-        "regions": [
-          "CN",
-          "US-California",
-          "US-New York",
-          "JP-Tokyo",
-          "SG"
-        ]
+        "regions": ["CN", "US-California", "US-New York", "JP-Tokyo", "SG"]
       }
     },
     "office_access": {
       "allow": {
-        "networks": [
-          "203.0.113.0/24",
-          "198.51.100.50-60",
-          "2001:db8::/32"
-        ]
+        "networks": ["203.0.113.0/24", "198.51.100.50-60", "2001:db8::/32"]
       }
     }
   },
   "mappings": [
     {
-      "from": [
-        "http://a.l-l.cn/*",
-        "https://a.l-l.cn/*"
-      ],
+      "from": ["http://a.l-l.cn/*", "https://a.l-l.cn/*"],
       "to": "http://ip.sb/*"
     },
     {
@@ -252,10 +233,7 @@
       }
     },
     {
-      "from": [
-        "http://shkc.p-q.co/*",
-        "https://shkc.p-q.co/*"
-      ],
+      "from": ["http://shkc.p-q.co/*", "https://shkc.p-q.co/*"],
       "to": "http://127.0.0.1:7788/*"
     },
     {
@@ -266,17 +244,8 @@
       "to": "http://127.0.0.1:8080/*"
     },
     {
-      "from": [
-        "https://bt.jy.sucdri.p-q.co/*"
-      ],
+      "from": ["https://bt.jy.sucdri.p-q.co/*"],
       "to": "http://127.0.0.1:13682/*"
-    },
-    {
-      "from": "https://git.sucdri.p-q.co/*",
-      "to": "http://10.1.105.222:3000/*",
-      "via": {
-        "endpoints": "cjy_server"
-      }
     },
     {
       "from": "tcp://0.0.0.0:5000",
@@ -300,40 +269,7 @@
       }
     },
     {
-      "from": "tcp://0.0.0.0:3388",
-      "to": "tcp://127.0.0.1:3389",
-      "via": {
-        "endpoints": "my_pc"
-      }
-    },
-    {
-      "from": [
-        "https://vps.sucdri.p-q.co/*"
-      ],
-      "to": {
-        "insecure": true,
-        "url": "https://10.1.105.33/*"
-      },
-      "via": {
-        "endpoints": "cjy_server"
-      }
-    },
-    {
-      "from": [
-        "wss://vps.sucdri.p-q.co/*"
-      ],
-      "to": {
-        "insecure": true,
-        "url": "wss://10.1.105.33/*"
-      },
-      "via": {
-        "endpoints": "cjy_server"
-      }
-    },
-    {
-      "from": [
-        "https://test1.sucdri.p-q.co/*"
-      ],
+      "from": ["https://test1.sucdri.p-q.co/*"],
       "to": "http://127.0.0.1:7788/api/open/*",
       "auth": {
         "authUrl": "http://127.0.0.1:7788/api/open/x/*",
@@ -341,9 +277,7 @@
       }
     },
     {
-      "from": [
-        "https://test.jy.sucdri.p-q.co/*"
-      ],
+      "from": ["https://test.jy.sucdri.p-q.co/*"],
       "to": "https://bt.jy.sucdri.p-q.co/*",
       "via": {
         "endpoints": "my_pc"
@@ -401,13 +335,6 @@
       }
     },
     {
-      "from": "https://fw.ls.sucdri.p-q.co/*",
-      "to": "https://10.168.1.1:4543/*",
-      "via": {
-        "endpoints": "ls_server"
-      }
-    },
-    {
       "from": "https://pandax.ls.sucdri.p-q.co/*",
       "to": "http://127.0.0.1:7788/*",
       "via": {
@@ -416,7 +343,20 @@
     },
     {
       "from": "https://esxi.ls.sucdri.p-q.co/*",
-      "to": "https://10.168.1.200/*",
+      "to": {
+        "insecure": true,
+        "url": "https://10.168.1.200/*"
+      },
+      "via": {
+        "endpoints": "ls_server"
+      }
+    },
+    {
+      "from": "wss://esxi.ls.sucdri.p-q.co/*",
+      "to": {
+        "insecure": true,
+        "url": "wss://10.168.1.200/*"
+      },
       "via": {
         "endpoints": "ls_server"
       }
@@ -425,9 +365,97 @@
       "from": "tcp://0.0.0.0:3390",
       "to": "tcp://10.1.105.123:3389",
       "via": {
-        "endpoints": "my_pc"
+        "endpoints": "cjy_server"
+      }
+    },
+    {
+      "from": "https://zcx.p-q.co/*",
+      "to": "file://../zcx/*"
+    },
+    {
+      "from": "https://api.zcx.p-q.co/*",
+      "to": "http://8.153.207.139:8080/*"
+    },
+    {
+      "from": "https://m.gzxc.sucdri.p-q.co/*",
+      "to": "file://../mobile_gz/*"
+    },
+    {
+      "from": "tcp://0.0.0.0:3387",
+      "to": "tcp://10.1.105.104:3389",
+      "via": {
+        "endpoints": "cjy_server"
+      }
+    },
+    {
+      "from": "https://fw.ls.sucdri.p-q.co/*",
+      "to": "https://10.168.1.1:4543/*",
+      "via": {
+        "endpoints": "ls_server"
+      }
+    },
+    {
+      "from": "tcp://0.0.0.0:1222",
+      "to": "tcp://10.0.0.12:22",
+      "via": {
+        "endpoints": "ls_server"
+      }
+    },
+    {
+      "from": "https://git.sucdri.p-q.co/*",
+      "to": "http://10.1.105.222:3000/*",
+      "via": {
+        "endpoints": "cjy_server"
+      }
+    },
+    {
+      "from": "tcp://0.0.0.0:3388",
+      "to": "tcp://10.1.105.105:3389",
+      "via": {
+        "endpoints": "cjy_server"
+      }
+    },
+    {
+      "from": "https://vps.sucdri.p-q.co/*",
+      "to": {
+        "insecure": true,
+        "url": "https://10.1.105.33/*"
+      },
+      "via": {
+        "endpoints": "cjy_server"
+      }
+    },
+    {
+      "from": ["ws://vps.sucdri.p-q.co/*", "wss://vps.sucdri.p-q.co/*"],
+      "to": {
+        "insecure": true,
+        "url": "wss://10.1.105.33/*"
+      },
+      "via": {
+        "endpoints": "cjy_server"
       }
     }
   ],
-  "version": 123
+  "version": 234,
+  "rateLimitRules": {
+    "global_limit": {
+      "name": "global_limit",
+      "targetType": "ip",
+      "metrics": [
+        {
+          "type": "request_count",
+          "window": 60,
+          "threshold": 100
+        }
+      ],
+      "actions": [
+        {
+          "type": "ban",
+          "duration": 18000,
+          "maxWait": 0,
+          "location": ""
+        }
+      ]
+    }
+  }
 }
