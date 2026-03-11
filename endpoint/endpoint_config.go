@@ -95,10 +95,18 @@ func initializeConfiguration() error {
 		if *serverAddr != "" {
 			// Active mode: connect to APS and fetch config
 			log.Printf("Fetching configuration from APS (%s) with ID: %s", *serverAddr, *configID)
-			config, err := FetchConfigFromAPS(*serverAddr, *configID)
-			if err != nil {
-				return fmt.Errorf("failed to fetch configuration: %w", err)
+
+			var config *EndpointRuntimeConfig
+			var err error
+			for {
+				config, err = FetchConfigFromAPS(*serverAddr, *configID)
+				if err == nil {
+					break
+				}
+				log.Printf("Failed to fetch configuration: %v. Retrying in 10 seconds...", err)
+				time.Sleep(10 * time.Second)
 			}
+
 			if err := config.ValidateConfig(); err != nil {
 				return fmt.Errorf("invalid configuration: %w", err)
 			}
@@ -118,7 +126,6 @@ func initializeConfiguration() error {
 			TunnelName:   *tunnelName,
 			EndpointName: *name,
 			Password:     *tunnelPassword,
-			
 		}
 		usingLegacyMode = true
 		return nil

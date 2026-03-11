@@ -289,12 +289,18 @@ func createServiceConfig() (*service.Config, error) {
 		var fetchedName string
 		if *serverAddr != "" {
 			fmt.Println("Fetching configuration from APS...")
-			config, err := FetchConfigFromAPS(*serverAddr, *configID)
-			if err == nil && config != nil {
-				fetchedName = config.EndpointName
-				fmt.Printf("Successfully fetched configuration for endpoint: %s\n", fetchedName)
-			} else {
-				fmt.Printf("Warning: Failed to fetch configuration: %v\n", err)
+
+			var config *EndpointRuntimeConfig
+			var err error
+			for {
+				config, err = FetchConfigFromAPS(*serverAddr, *configID)
+				if err == nil && config != nil {
+					fetchedName = config.EndpointName
+					fmt.Printf("Successfully fetched configuration for endpoint: %s\n", fetchedName)
+					break
+				}
+				fmt.Printf("Warning: Failed to fetch configuration: %v. Retrying in 10 seconds...\n", err)
+				time.Sleep(10 * time.Second)
 			}
 		}
 

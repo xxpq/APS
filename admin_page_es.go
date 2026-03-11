@@ -3082,6 +3082,8 @@ function setupAdvancedPanelToggles() {
 
   // ===== 时间序列图表功能 (扩展维度支持) =====
   let timeSeriesCharts = {};
+  const carbonChartsLib = window.Charts || window.charts;
+  let timeSeriesRequestSeq = 0;
   let currentDimension = 'global';
   let currentDimensionKey = '';
   
@@ -3137,6 +3139,7 @@ function setupAdvancedPanelToggles() {
   }
   
   async function loadTimeSeriesData() {
+    const requestSeq = ++timeSeriesRequestSeq;
     let url = '/.api/stats/timeseries';
     
     if (currentDimension !== 'global' && currentDimensionKey) {
@@ -3147,6 +3150,8 @@ function setupAdvancedPanelToggles() {
       const res = await authFetch(url);
       if (!res.ok) throw new Error('Failed to load time-series data');
       const data = await res.json();
+      // 丢弃过期响应，避免并发刷新导致旧数据覆盖新图
+      if (requestSeq !== timeSeriesRequestSeq) return;
       renderCharts(data);
     } catch (e) {
       console.error('Error loading time-series data:', e);
@@ -3201,9 +3206,37 @@ function setupAdvancedPanelToggles() {
     }
   }
   
+  function ensureChartContainer(containerId) {
+    let container = document.getElementById(containerId);
+    if (container) return container;
+    
+    const cardIndexMap = {
+      'chart-requests': 0,
+      'chart-traffic': 1,
+      'chart-connections': 2,
+      'chart-qps': 3
+    };
+    const idx = cardIndexMap[containerId];
+    if (idx === undefined) return null;
+    
+    const cards = document.querySelectorAll('.charts-grid .chart-card');
+    if (!cards || !cards[idx]) return null;
+    
+    container = document.createElement('div');
+    container.id = containerId;
+    container.className = 'chart-container';
+    cards[idx].appendChild(container);
+    return container;
+  }
+  
   function renderLineChart(containerId, dataSets) {
-    const container = document.getElementById(containerId);
+    const container = ensureChartContainer(containerId);
     if (!container) return;
+    if (!carbonChartsLib || !carbonChartsLib.LineChart) {
+      console.error('Carbon Charts library not loaded for line chart rendering');
+      container.innerHTML = '<div style="padding: 2rem; text-align: center; color: #da1e28;">图表组件未加载</div>';
+      return;
+    }
     
     const data = [];
     dataSets.forEach(ds => {
@@ -3221,20 +3254,39 @@ function setupAdvancedPanelToggles() {
       toolbar: { enabled: false }
     };
     
-    if (timeSeriesCharts[containerId]) {
-      try { timeSeriesCharts[containerId].destroy(); } catch (e) {}
+    const existingChart = timeSeriesCharts[containerId];
+    if (existingChart && existingChart.model && typeof existingChart.model.setData === 'function') {
+      try {
+        existingChart.model.setData(data);
+        if (typeof existingChart.model.setOptions === 'function') {
+          existingChart.model.setOptions(options);
+        }
+        return;
+      } catch (e) {
+        console.error('Error updating line chart, recreating:', e);
+      }
     }
     
     try {
-      timeSeriesCharts[containerId] = new charts.LineChart(container, { data, options });
+      if (existingChart && typeof existingChart.destroy === 'function') {
+        try { existingChart.destroy(); } catch (e) {}
+      }
+      container.innerHTML = '';
+      timeSeriesCharts[containerId] = new carbonChartsLib.LineChart(container, { data, options });
     } catch (e) {
+      console.error('Error rendering line chart:', e);
       container.innerHTML = '<div style="padding: 2rem; text-align: center; color: #da1e28;">图表渲染失败</div>';
     }
   }
   
   function renderAreaChart(containerId, dataSets) {
-    const container = document.getElementById(containerId);
+    const container = ensureChartContainer(containerId);
     if (!container) return;
+    if (!carbonChartsLib || !carbonChartsLib.AreaChart) {
+      console.error('Carbon Charts library not loaded for area chart rendering');
+      container.innerHTML = '<div style="padding: 2rem; text-align: center; color: #da1e28;">图表组件未加载</div>';
+      return;
+    }
     
     const data = [];
     dataSets.forEach(ds => {
@@ -3252,13 +3304,27 @@ function setupAdvancedPanelToggles() {
       toolbar: { enabled: false }
     };
     
-    if (timeSeriesCharts[containerId]) {
-      try { timeSeriesCharts[containerId].destroy(); } catch (e) {}
+    const existingChart = timeSeriesCharts[containerId];
+    if (existingChart && existingChart.model && typeof existingChart.model.setData === 'function') {
+      try {
+        existingChart.model.setData(data);
+        if (typeof existingChart.model.setOptions === 'function') {
+          existingChart.model.setOptions(options);
+        }
+        return;
+      } catch (e) {
+        console.error('Error updating area chart, recreating:', e);
+      }
     }
     
     try {
-      timeSeriesCharts[containerId] = new charts.AreaChart(container, { data, options });
+      if (existingChart && typeof existingChart.destroy === 'function') {
+        try { existingChart.destroy(); } catch (e) {}
+      }
+      container.innerHTML = '';
+      timeSeriesCharts[containerId] = new carbonChartsLib.AreaChart(container, { data, options });
     } catch (e) {
+      console.error('Error rendering area chart:', e);
       container.innerHTML = '<div style="padding: 2rem; text-align: center; color: #da1e28;">图表渲染失败</div>';
     }
   }
