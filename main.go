@@ -640,10 +640,10 @@ func startServer(name string, config *ListenConfig, handler http.Handler, tunnel
 	}
 	addr := fmt.Sprintf("%s:%d", host, config.Port)
 	server := &http.Server{
-		Handler:           handler,
-		WriteTimeout:      30 * time.Second, // Kill stuck writes after 30s
-		ReadHeaderTimeout: 10 * time.Second, // Already set elsewhere, consolidating here
-		IdleTimeout:       60 * time.Second, // Close idle connections
+		Handler: handler,
+		// WriteTimeout:      30 * time.Second, // Kill stuck writes after 30s
+		ReadHeaderTimeout: 100 * time.Second, // Already set elsewhere, consolidating here
+		IdleTimeout:       100 * time.Second, // Close idle connections
 	}
 
 	log.Printf("Starting server '%s' on %s", name, addr)
