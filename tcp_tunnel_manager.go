@@ -5,8 +5,12 @@ import (
 	"errors"
 	"io"
 	"log"
+	"math/rand"
 	"net"
+	"os"
+	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -25,6 +29,34 @@ type tcpTunnel struct {
 	name      string
 	endpoints map[string][]*TCPEndpoint // endpointName -> endpoints (multiple for load balancing)
 	mu        sync.RWMutex
+}
+
+const (
+	defaultHTTPStreamChunkSize = 256 * 1024
+	minHTTPStreamChunkSize     = 16 * 1024
+	maxHTTPStreamChunkSize     = 4 * 1024 * 1024
+	httpChunkSizeEnv           = "APS_TUNNEL_HTTP_CHUNK_KB"
+)
+
+var httpStreamChunkSize = loadHTTPStreamChunkSize()
+
+func loadHTTPStreamChunkSize() int {
+	raw := os.Getenv(httpChunkSizeEnv)
+	if raw == "" {
+		return defaultHTTPStreamChunkSize
+	}
+	kb, err := strconv.Atoi(raw)
+	if err != nil || kb <= 0 {
+		return defaultHTTPStreamChunkSize
+	}
+	size := kb * 1024
+	if size < minHTTPStreamChunkSize {
+		size = minHTTPStreamChunkSize
+	}
+	if size > maxHTTPStreamChunkSize {
+		size = maxHTTPStreamChunkSize
+	}
+	return size
 }
 
 // NewTCPTunnelManager creates a new TCP tunnel manager
@@ -98,7 +130,8 @@ func (tm *TCPTunnelManager) UnregisterEndpoint(ep *TCPEndpoint) {
 	tunnel.mu.Unlock()
 }
 
-// GetEndpoint returns a random endpoint for the given tunnel/endpoint name
+// GetEndpoint returns a scored endpoint for the given tunnel/endpoint name.
+// Strategy: least-connections candidate set + weighted-random by EWMA latency/health.
 func (tm *TCPTunnelManager) GetEndpoint(tunnelName, endpointName string) (*TCPEndpoint, error) {
 	tm.mu.RLock()
 	tunnel, exists := tm.tunnels[tunnelName]
@@ -109,39 +142,141 @@ func (tm *TCPTunnelManager) GetEndpoint(tunnelName, endpointName string) (*TCPEn
 	}
 
 	tunnel.mu.RLock()
-	endpoints := tunnel.endpoints[endpointName]
+	endpoints := append([]*TCPEndpoint(nil), tunnel.endpoints[endpointName]...)
 	tunnel.mu.RUnlock()
 
 	if len(endpoints) == 0 {
 		return nil, errors.New("no endpoints available")
 	}
 
-	// Simple round-robin / random selection (for now just return first)
-	return endpoints[0], nil
+	selected := tm.selectEndpoint(endpoints)
+	if selected == nil {
+		return nil, errors.New("no endpoints available")
+	}
+	return selected, nil
 }
 
-// GetRandomEndpointFromTunnels returns a random endpoint from the given tunnels
+// GetRandomEndpointFromTunnels returns one selected endpoint from candidate tunnels.
 func (tm *TCPTunnelManager) GetRandomEndpointFromTunnels(tunnelNames []string) (string, string, error) {
+	var candidates []*TCPEndpoint
+
 	for _, tunnelName := range tunnelNames {
 		tm.mu.RLock()
 		tunnel, exists := tm.tunnels[tunnelName]
 		tm.mu.RUnlock()
-
 		if !exists {
 			continue
 		}
 
 		tunnel.mu.RLock()
-		for endpointName, endpoints := range tunnel.endpoints {
-			if len(endpoints) > 0 {
-				tunnel.mu.RUnlock()
-				return tunnelName, endpointName, nil
-			}
+		for _, endpoints := range tunnel.endpoints {
+			candidates = append(candidates, endpoints...)
 		}
 		tunnel.mu.RUnlock()
 	}
 
-	return "", "", errors.New("no available endpoints in any tunnel")
+	selected := tm.selectEndpoint(candidates)
+	if selected == nil {
+		return "", "", errors.New("no available endpoints in any tunnel")
+	}
+	return selected.TunnelName, selected.EndpointName, nil
+}
+
+type endpointCandidate struct {
+	ep      *TCPEndpoint
+	active  int64
+	latency time.Duration
+	health  float64
+	score   float64
+}
+
+func (tm *TCPTunnelManager) selectEndpoint(endpoints []*TCPEndpoint) *TCPEndpoint {
+	if len(endpoints) == 0 {
+		return nil
+	}
+
+	candidates := make([]endpointCandidate, 0, len(endpoints))
+	minActive := int64(^uint64(0) >> 1)
+
+	for _, ep := range endpoints {
+		if ep == nil || !ep.IsOnline() {
+			continue
+		}
+		active, latency, health := ep.GetSchedulingSnapshot()
+		if latency <= 0 {
+			latency = 80 * time.Millisecond
+		}
+		if health <= 0 {
+			health = 0.1
+		}
+		if active < minActive {
+			minActive = active
+		}
+
+		latMs := float64(latency.Milliseconds())
+		if latMs < 1 {
+			latMs = 1
+		}
+		latWeight := 1.0 / (1.0 + latMs/25.0)
+		loadWeight := 1.0 / (1.0 + float64(active))
+		score := health * (0.65*latWeight + 0.35*loadWeight)
+		if score <= 0 {
+			score = 0.01
+		}
+
+		candidates = append(candidates, endpointCandidate{
+			ep:      ep,
+			active:  active,
+			latency: latency,
+			health:  health,
+			score:   score,
+		})
+	}
+
+	if len(candidates) == 0 {
+		return nil
+	}
+
+	// Least-connections set (allow +1 for tie smoothing), then weighted random.
+	leastLoaded := make([]endpointCandidate, 0, len(candidates))
+	for _, c := range candidates {
+		if c.active <= minActive+1 {
+			leastLoaded = append(leastLoaded, c)
+		}
+	}
+	if len(leastLoaded) == 0 {
+		leastLoaded = candidates
+	}
+
+	total := 0.0
+	for _, c := range leastLoaded {
+		total += c.score
+	}
+	if total <= 0 {
+		return leastLoaded[rand.Intn(len(leastLoaded))].ep
+	}
+
+	target := rand.Float64() * total
+	acc := 0.0
+	for _, c := range leastLoaded {
+		acc += c.score
+		if target <= acc {
+			return c.ep
+		}
+	}
+	return leastLoaded[len(leastLoaded)-1].ep
+}
+
+func (tm *TCPTunnelManager) MeasureEndpointLatency(tunnelName, endpointName string) (time.Duration, error) {
+	ep, err := tm.GetEndpoint(tunnelName, endpointName)
+	if err != nil {
+		return 0, err
+	}
+	_, latency, _ := ep.GetSchedulingSnapshot()
+	if latency <= 0 {
+		return 0, errors.New("latency data not ready")
+	}
+	return latency, nil
 }
 
 // FindTunnelForEndpoint finds the tunnel containing the given endpoint
@@ -232,23 +367,114 @@ func (tm *TCPTunnelManager) SendRequestStream(ctx context.Context, tunnelName, e
 	ep.pendingRequests[requestID] = pending
 	ep.mu.Unlock()
 
-	// Encrypt request data using KeyManager
-	encryptedData, err := ep.KeyManager.Encrypt(reqPayload.Data)
-	if err != nil {
+	ep.MarkRequestStart()
+	requestStartedAt := time.Now()
+	var doneFlag int32
+	reportRequestDone := func(doneErr error) {
+		if atomic.CompareAndSwapInt32(&doneFlag, 0, 1) {
+			ep.MarkRequestDone(time.Since(requestStartedAt), doneErr)
+		}
+	}
+	fail := func(sendErr error) (io.ReadCloser, []byte, error) {
 		cleanupPending()
-		pipeWriter.Close()
-		return nil, nil, err
+		pipeWriter.CloseWithError(sendErr)
+		reportRequestDone(sendErr)
+		return nil, nil, sendErr
 	}
 
-	// Send request to endpoint
-	if err := ep.SendJSON(MsgTypeRequest, RequestPayloadTCP{
-		ID:   requestID,
-		URL:  reqPayload.URL,
-		Data: encryptedData,
-	}); err != nil {
-		cleanupPending()
-		pipeWriter.Close()
-		return nil, nil, err
+	useStreamingRequest := len(reqPayload.HeaderData) > 0 || reqPayload.Body != nil
+	if useStreamingRequest {
+		if len(reqPayload.HeaderData) == 0 {
+			return fail(errors.New("missing request header bytes"))
+		}
+		encryptedHeader, err := ep.KeyManager.Encrypt(reqPayload.HeaderData)
+		if err != nil {
+			return fail(err)
+		}
+
+		if err := ep.SendJSON(MsgTypeRequestStart, RequestStartPayloadTCP{
+			ID:     requestID,
+			URL:    reqPayload.URL,
+			Header: encryptedHeader,
+		}); err != nil {
+			return fail(err)
+		}
+
+		if reqPayload.Body != nil {
+			defer reqPayload.Body.Close()
+			buf := make([]byte, httpStreamChunkSize)
+			for {
+				select {
+				case <-ctx.Done():
+					_ = ep.SendJSON(MsgTypeRequestEnd, RequestEndPayloadTCP{
+						ID:    requestID,
+						Error: ctx.Err().Error(),
+					})
+					return fail(ctx.Err())
+				default:
+				}
+
+				n, readErr := reqPayload.Body.Read(buf)
+				if n > 0 {
+					encryptedChunk, encErr := ep.KeyManager.Encrypt(buf[:n])
+					if encErr != nil {
+						_ = ep.SendJSON(MsgTypeRequestEnd, RequestEndPayloadTCP{
+							ID:    requestID,
+							Error: "encrypt request chunk failed",
+						})
+						return fail(encErr)
+					}
+
+					payload, payloadErr := BuildScopedBinaryPayload(requestID, encryptedChunk)
+					if payloadErr != nil {
+						_ = ep.SendJSON(MsgTypeRequestEnd, RequestEndPayloadTCP{
+							ID:    requestID,
+							Error: payloadErr.Error(),
+						})
+						return fail(payloadErr)
+					}
+
+					if err := ep.Send(&TunnelMessage{
+						Type:    MsgTypeRequestChunkBin,
+						Payload: payload,
+					}); err != nil {
+						_ = ep.SendJSON(MsgTypeRequestEnd, RequestEndPayloadTCP{
+							ID:    requestID,
+							Error: err.Error(),
+						})
+						return fail(err)
+					}
+				}
+
+				if readErr == io.EOF {
+					break
+				}
+				if readErr != nil {
+					_ = ep.SendJSON(MsgTypeRequestEnd, RequestEndPayloadTCP{
+						ID:    requestID,
+						Error: readErr.Error(),
+					})
+					return fail(readErr)
+				}
+			}
+		}
+
+		if err := ep.SendJSON(MsgTypeRequestEnd, RequestEndPayloadTCP{ID: requestID}); err != nil {
+			return fail(err)
+		}
+	} else {
+		// Legacy fallback path: full request in one encrypted frame.
+		encryptedData, err := ep.KeyManager.Encrypt(reqPayload.Data)
+		if err != nil {
+			return fail(err)
+		}
+		if err := ep.SendJSON(MsgTypeRequest, RequestPayloadTCP{
+			ID:   requestID,
+			URL:  reqPayload.URL,
+			Data: encryptedData,
+		}); err != nil {
+			return fail(err)
+		}
 	}
 
 	// Wait for response header
@@ -259,71 +485,62 @@ func (tm *TCPTunnelManager) SendRequestStream(ctx context.Context, tunnelName, e
 		if !ok || msg == nil {
 			err := errors.New("endpoint disconnected while waiting for response header")
 			DebugLog("%s [TCP TUNNEL] %v for request %s", logPrefix, err, requestID)
-			cleanupPending()
-			pipeWriter.CloseWithError(err)
-			return nil, nil, err
+			return fail(err)
 		}
 		DebugLog("%s [TCP TUNNEL] Received message type %d for request %s", logPrefix, msg.Type, requestID)
 		if msg.Type == MsgTypeResponseHeader {
 			var header ResponseHeaderPayloadTCP
 			if err := msg.ParseJSON(&header); err != nil {
 				DebugLog("%s [TCP TUNNEL] Failed to parse response header for %s: %v", logPrefix, requestID, err)
-				cleanupPending()
-				pipeWriter.CloseWithError(err)
-				return nil, nil, err
+				return fail(err)
 			}
 			headerBytes, err = ep.KeyManager.Decrypt(header.Header)
 			if err != nil {
 				DebugLog("%s [TCP TUNNEL] Failed to decrypt response header for %s: %v", logPrefix, requestID, err)
-				cleanupPending()
-				pipeWriter.CloseWithError(err)
-				return nil, nil, err
+				return fail(err)
 			}
 			DebugLog("%s [TCP TUNNEL] Successfully received and decrypted response header for %s (%d bytes)", logPrefix, requestID, len(headerBytes))
 		} else if msg.Type == MsgTypeResponseEnd {
 			var end ResponseEndPayloadTCP
 			if err := msg.ParseJSON(&end); err != nil {
 				DebugLog("%s [TCP TUNNEL] Failed to parse response end for %s: %v", logPrefix, requestID, err)
-				cleanupPending()
-				pipeWriter.CloseWithError(err)
-				return nil, nil, err
+				return fail(err)
 			}
 			errMsg := "request failed at endpoint"
 			if end.Error != "" {
 				errMsg = end.Error
 			}
 			DebugLog("%s [TCP TUNNEL] Received response end for %s immediately: %s", logPrefix, requestID, errMsg)
-			cleanupPending()
-			pipeWriter.CloseWithError(errors.New(errMsg))
-			return nil, nil, errors.New(errMsg)
+			return fail(errors.New(errMsg))
 		} else {
 			DebugLog("%s [TCP TUNNEL] Unexpected response type %d for %s", logPrefix, msg.Type, requestID)
-			cleanupPending()
-			pipeWriter.CloseWithError(errors.New("unexpected response type"))
-			return nil, nil, errors.New("unexpected response type")
+			return fail(errors.New("unexpected response type"))
 		}
 	case <-ctx.Done():
 		DebugLog("%s [TCP TUNNEL] Context cancelled while waiting for response header for %s", logPrefix, requestID)
-		cleanupPending()
-		pipeWriter.CloseWithError(ctx.Err())
-		return nil, nil, ctx.Err()
+		return fail(ctx.Err())
 	}
 
 	// Start goroutine to handle response chunks
 	DebugLog("%s [TCP TUNNEL] Starting response streaming goroutine for %s", logPrefix, requestID)
 	go func() {
+		var streamErr error
 		defer func() {
 			DebugLog("%s [TCP TUNNEL] Response streaming goroutine finished for %s", logPrefix, requestID)
 			// Clean up pending request after goroutine completes
 			ep.mu.Lock()
 			delete(ep.pendingRequests, requestID)
 			ep.mu.Unlock()
-			pipeWriter.Close()
-
+			if streamErr != nil {
+				pipeWriter.CloseWithError(streamErr)
+			} else {
+				pipeWriter.Close()
+			}
+			reportRequestDone(streamErr)
 		}()
 		for msg := range pending.responseChan {
 			if msg == nil {
-				pipeWriter.CloseWithError(errors.New("endpoint disconnected"))
+				streamErr = errors.New("endpoint disconnected")
 				return
 			}
 			debugLogTCPTunnelThrottled(
@@ -341,39 +558,65 @@ func (tm *TCPTunnelManager) SendRequestStream(ctx context.Context, tunnelName, e
 			case MsgTypeResponseChunk:
 				var chunk ResponseChunkPayloadTCP
 				if err := msg.ParseJSON(&chunk); err != nil {
-					pipeWriter.CloseWithError(err)
+					streamErr = err
 					return
 				}
 				decryptedChunk, err := ep.KeyManager.Decrypt(chunk.Data)
 				if err != nil {
-					pipeWriter.CloseWithError(err)
+					streamErr = err
 					return
 				}
-				// Write with retry for transient failures
-				written := 0
-				for written < len(decryptedChunk) {
-					n, err := pipeWriter.Write(decryptedChunk[written:])
-					written += n
-					if err != nil {
-						return
-					}
+				if err := writeAllToPipe(pipeWriter, decryptedChunk); err != nil {
+					streamErr = err
+					return
+				}
+			case MsgTypeResponseChunkBin:
+				scopeID, encryptedChunk, err := ParseScopedBinaryPayload(msg.Payload)
+				if err != nil {
+					streamErr = err
+					return
+				}
+				if scopeID != requestID {
+					continue
+				}
+				decryptedChunk, err := ep.KeyManager.Decrypt(encryptedChunk)
+				if err != nil {
+					streamErr = err
+					return
+				}
+				if err := writeAllToPipe(pipeWriter, decryptedChunk); err != nil {
+					streamErr = err
+					return
 				}
 			case MsgTypeResponseEnd:
 				var end ResponseEndPayloadTCP
 				if err := msg.ParseJSON(&end); err != nil {
-					pipeWriter.CloseWithError(err)
+					streamErr = err
 					return
 				}
 				if end.Error != "" {
-					pipeWriter.CloseWithError(errors.New(end.Error))
+					streamErr = errors.New(end.Error)
 				}
 				return
 			}
 		}
 		DebugLog("%s [TCP TUNNEL] Response channel closed for %s", logPrefix, requestID)
+		streamErr = errors.New("response channel closed unexpectedly")
 	}()
 
 	return pipeReader, headerBytes, nil
+}
+
+func writeAllToPipe(pipeWriter *io.PipeWriter, data []byte) error {
+	offset := 0
+	for offset < len(data) {
+		n, err := pipeWriter.Write(data[offset:])
+		offset += n
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // GetEndpointsInfo returns information about endpoints in a tunnel

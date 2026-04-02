@@ -7,26 +7,34 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
+	"strconv"
 	"sync"
 )
 
 // Message types for TCP tunnel protocol
 const (
-	MsgTypeRegister        uint8 = 0x01 // Endpoint registration
-	MsgTypeRegisterAck     uint8 = 0x02 // Registration acknowledgement
-	MsgTypeRequest         uint8 = 0x10 // HTTP request
-	MsgTypeResponse        uint8 = 0x11 // HTTP response
-	MsgTypeResponseHeader  uint8 = 0x12 // Response header (streaming)
-	MsgTypeResponseChunk   uint8 = 0x13 // Response chunk (streaming)
-	MsgTypeResponseEnd     uint8 = 0x14 // Response end (streaming)
-	MsgTypeProxyConnect    uint8 = 0x20 // TCP proxy connect request
-	MsgTypeProxyConnectAck uint8 = 0x21 // TCP proxy connect acknowledgement
-	MsgTypeProxyStreamMode uint8 = 0x25 // Signal switch to direct stream mode
+	MsgTypeRegister         uint8 = 0x01 // Endpoint registration
+	MsgTypeRegisterAck      uint8 = 0x02 // Registration acknowledgement
+	MsgTypeRequest          uint8 = 0x10 // HTTP request
+	MsgTypeResponse         uint8 = 0x11 // HTTP response
+	MsgTypeResponseHeader   uint8 = 0x12 // Response header (streaming)
+	MsgTypeResponseChunk    uint8 = 0x13 // Response chunk (streaming)
+	MsgTypeResponseEnd      uint8 = 0x14 // Response end (streaming)
+	MsgTypeRequestStart     uint8 = 0x15 // HTTP request start (streaming)
+	MsgTypeRequestChunkBin  uint8 = 0x16 // HTTP request body chunk (binary)
+	MsgTypeRequestEnd       uint8 = 0x17 // HTTP request end (streaming)
+	MsgTypeResponseChunkBin uint8 = 0x18 // HTTP response body chunk (binary)
+	MsgTypeProxyConnect     uint8 = 0x20 // TCP proxy connect request
+	MsgTypeProxyConnectAck  uint8 = 0x21 // TCP proxy connect acknowledgement
+	MsgTypeProxyStreamMode  uint8 = 0x25 // Signal switch to direct stream mode
 	// MsgTypeProxyData removed (legacy JSON format)
 	MsgTypeProxyClose      uint8 = 0x23 // TCP proxy close
 	MsgTypeProxyDataBinary uint8 = 0x24 // TCP proxy data (binary format)
 	MsgTypeHeartbeat       uint8 = 0xF0 // Heartbeat/keepalive
 	MsgTypeCancel          uint8 = 0xF1 // Cancel request
+	MsgTypeProbePing       uint8 = 0xF2 // Active probe ping
+	MsgTypeProbePong       uint8 = 0xF3 // Active probe pong
 
 	// Port forwarding between endpoints
 	MsgTypePortForwardRequest  uint8 = 0x30 // Request port forward through APS
@@ -52,8 +60,14 @@ const (
 // Message header size: 4 bytes length + 1 byte type
 const headerSize = 5
 
-// Maximum message size (10 MB)
-const maxMessageSize = 10 * 1024 * 1024
+const (
+	defaultMaxMessageSize    = 32 * 1024 * 1024
+	maxMessageSizeUpperBound = 32 * 1024 * 1024
+	minMessageSizeLowerBound = 1 * 1024 * 1024
+	maxFrameSizeEnv          = "APS_TUNNEL_MAX_FRAME_MB"
+)
+
+var maxMessageSize = loadTunnelMaxMessageSize()
 
 // TunnelMessage represents a message in the TCP tunnel protocol
 type TunnelMessage struct {
@@ -88,6 +102,13 @@ type RequestPayloadTCP struct {
 	Data []byte `json:"data"` // Encrypted HTTP request bytes
 }
 
+// RequestStartPayloadTCP represents an HTTP request header for streaming mode
+type RequestStartPayloadTCP struct {
+	ID     string `json:"id"`
+	URL    string `json:"url"`
+	Header []byte `json:"header"` // Encrypted HTTP request header bytes
+}
+
 // ResponseHeaderPayloadTCP represents HTTP response header
 type ResponseHeaderPayloadTCP struct {
 	ID     string `json:"id"`
@@ -98,6 +119,12 @@ type ResponseHeaderPayloadTCP struct {
 type ResponseChunkPayloadTCP struct {
 	ID   string `json:"id"`
 	Data []byte `json:"data"` // Encrypted chunk data
+}
+
+// RequestEndPayloadTCP marks the end of request body streaming
+type RequestEndPayloadTCP struct {
+	ID    string `json:"id"`
+	Error string `json:"error,omitempty"`
 }
 
 // ResponseEndPayloadTCP marks the end of a response
@@ -144,6 +171,12 @@ type MirrorUpdatePayload struct {
 // HeartbeatPayload for keepalive
 type HeartbeatPayload struct {
 	Timestamp int64 `json:"timestamp"`
+}
+
+// ProbePayload is used for active latency probes
+type ProbePayload struct {
+	Nonce     uint64 `json:"nonce"`
+	Timestamp int64  `json:"timestamp"`
 }
 
 // TunnelConn wraps a net.Conn with protocol read/write methods
@@ -218,6 +251,10 @@ func (tc *TunnelConn) WriteMessage(msg *TunnelMessage) error {
 	}
 	tc.closedMu.RUnlock()
 
+	if uint32(len(msg.Payload)) > maxMessageSize {
+		return fmt.Errorf("message too large: %d bytes", len(msg.Payload))
+	}
+
 	// Build frame: length (4) + type (1) + payload
 	frame := make([]byte, headerSize+len(msg.Payload))
 	binary.BigEndian.PutUint32(frame[:4], uint32(len(msg.Payload)))
@@ -282,4 +319,56 @@ func (tc *TunnelConn) UnderlyingConn() net.Conn {
 // ParseJSON unmarshals message payload as JSON
 func (msg *TunnelMessage) ParseJSON(v interface{}) error {
 	return json.Unmarshal(msg.Payload, v)
+}
+
+// BuildScopedBinaryPayload builds payload format: [idLen(1)][id][data...]
+func BuildScopedBinaryPayload(scopeID string, data []byte) ([]byte, error) {
+	if len(scopeID) == 0 {
+		return nil, errors.New("scope id is required")
+	}
+	if len(scopeID) > 255 {
+		return nil, errors.New("scope id too long")
+	}
+
+	payload := make([]byte, 1+len(scopeID)+len(data))
+	payload[0] = byte(len(scopeID))
+	copy(payload[1:], scopeID)
+	copy(payload[1+len(scopeID):], data)
+	return payload, nil
+}
+
+// ParseScopedBinaryPayload parses payload format: [idLen(1)][id][data...]
+func ParseScopedBinaryPayload(payload []byte) (string, []byte, error) {
+	if len(payload) < 1 {
+		return "", nil, errors.New("invalid scoped payload: too short")
+	}
+	idLen := int(payload[0])
+	if idLen <= 0 {
+		return "", nil, errors.New("invalid scoped payload: empty id")
+	}
+	if len(payload) < 1+idLen {
+		return "", nil, errors.New("invalid scoped payload: truncated id")
+	}
+	return string(payload[1 : 1+idLen]), payload[1+idLen:], nil
+}
+
+func loadTunnelMaxMessageSize() uint32 {
+	raw := os.Getenv(maxFrameSizeEnv)
+	if raw == "" {
+		return uint32(defaultMaxMessageSize)
+	}
+
+	mb, err := strconv.Atoi(raw)
+	if err != nil || mb <= 0 {
+		return uint32(defaultMaxMessageSize)
+	}
+
+	bytes := mb * 1024 * 1024
+	if bytes > maxMessageSizeUpperBound {
+		bytes = maxMessageSizeUpperBound
+	}
+	if bytes < minMessageSizeLowerBound {
+		bytes = minMessageSizeLowerBound
+	}
+	return uint32(bytes)
 }

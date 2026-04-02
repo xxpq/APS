@@ -108,8 +108,10 @@ func (htm *HybridTunnelManager) GetEndpointsInfo(tunnelName string, stats *Stats
 
 // MeasureEndpointLatency 测量端点延迟
 func (htm *HybridTunnelManager) MeasureEndpointLatency(tunnelName, endpointName string) (time.Duration, error) {
-	// TODO: Implement latency measurement for TCP tunnel
-	return 0, errors.New("latency measurement not implemented for TCP tunnel")
+	if htm.tcpManager == nil {
+		return 0, errors.New("TCP tunnel manager not initialized")
+	}
+	return htm.tcpManager.MeasureEndpointLatency(tunnelName, endpointName)
 }
 
 // GetPoolStats 获取连接池统计信息
@@ -142,9 +144,8 @@ func (htm *HybridTunnelManager) SendConfigUpdate(tunnelName, endpointName string
 
 // GetAllOnlineEndpoints returns all online endpoints
 func (htm *HybridTunnelManager) GetAllOnlineEndpoints() []EndpointInfo {
-if htm.tcpManager != nil {
-return htm.tcpManager.GetAllOnlineEndpoints()
+	if htm.tcpManager != nil {
+		return htm.tcpManager.GetAllOnlineEndpoints()
+	}
+	return nil
 }
-return nil
-}
-

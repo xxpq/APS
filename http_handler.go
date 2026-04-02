@@ -938,7 +938,7 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 			proxyReq.Header.Set("X-Aps-Insecure", "true")
 		}
 
-		reqBytes, err := httputil.DumpRequest(proxyReq, true)
+		reqHeaderBytes, err := httputil.DumpRequestOut(proxyReq, false)
 		if err != nil {
 			isError = true
 			http.Error(w, "Failed to serialize request for tunnel", http.StatusInternalServerError)
@@ -949,9 +949,10 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		DebugLog("[%s]%s[TUNNEL] Forwarding request for %s via tunnel '%s' to endpoint '%s'", clientIP, clientLocation, originalURL, tunnelName, endpointName)
 
 		reqPayload := &RequestPayload{
-			URL:      proxyReq.URL.String(),
-			SourceIP: clientIP,
-			Data:     reqBytes,
+			URL:        proxyReq.URL.String(),
+			SourceIP:   clientIP,
+			HeaderData: reqHeaderBytes,
+			Body:       proxyReq.Body,
 		}
 
 		bodyStream, headerBytes, err := p.tunnelManager.SendRequestStream(r.Context(), tunnelName, endpointName, reqPayload)

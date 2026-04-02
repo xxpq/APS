@@ -34,6 +34,7 @@ var (
 	mediumBufPool        = sync.Pool{New: func() any { return make([]byte, 64*1024) }}
 	largeBufPool         = sync.Pool{New: func() any { return make([]byte, 256*1024) }}
 	activeTunnelRequests int64
+	requestStreams       sync.Map // map[string]*requestStreamState
 )
 
 func GetMediumBuffer() []byte { return mediumBufPool.Get().([]byte) }
@@ -51,21 +52,27 @@ func PutLargeBuffer(b []byte) {
 
 // TCP Tunnel Protocol Message Types (must match APS side)
 const (
-	MsgTypeRegister        uint8 = 0x01
-	MsgTypeRegisterAck     uint8 = 0x02
-	MsgTypeRequest         uint8 = 0x10
-	MsgTypeResponse        uint8 = 0x11
-	MsgTypeResponseHeader  uint8 = 0x12
-	MsgTypeResponseChunk   uint8 = 0x13
-	MsgTypeResponseEnd     uint8 = 0x14
-	MsgTypeProxyConnect    uint8 = 0x20
-	MsgTypeProxyConnectAck uint8 = 0x21
-	MsgTypeProxyStreamMode uint8 = 0x25
+	MsgTypeRegister         uint8 = 0x01
+	MsgTypeRegisterAck      uint8 = 0x02
+	MsgTypeRequest          uint8 = 0x10
+	MsgTypeResponse         uint8 = 0x11
+	MsgTypeResponseHeader   uint8 = 0x12
+	MsgTypeResponseChunk    uint8 = 0x13
+	MsgTypeResponseEnd      uint8 = 0x14
+	MsgTypeRequestStart     uint8 = 0x15
+	MsgTypeRequestChunkBin  uint8 = 0x16
+	MsgTypeRequestEnd       uint8 = 0x17
+	MsgTypeResponseChunkBin uint8 = 0x18
+	MsgTypeProxyConnect     uint8 = 0x20
+	MsgTypeProxyConnectAck  uint8 = 0x21
+	MsgTypeProxyStreamMode  uint8 = 0x25
 	// MsgTypeProxyData removed
 	MsgTypeProxyClose      uint8 = 0x23
 	MsgTypeProxyDataBinary uint8 = 0x24
 	MsgTypeHeartbeat       uint8 = 0xF0
 	MsgTypeCancel          uint8 = 0xF1
+	MsgTypeProbePing       uint8 = 0xF2
+	MsgTypeProbePong       uint8 = 0xF3
 
 	// Port forwarding between endpoints
 	MsgTypePortForwardRequest  uint8 = 0x30
@@ -89,8 +96,16 @@ const (
 )
 
 const headerSize = 5
-const maxMessageSize = 10 * 1024 * 1024
 const connectHandshakeTimeout = 5 * time.Second
+
+const (
+	defaultMaxMessageSize    = 32 * 1024 * 1024
+	maxMessageSizeUpperBound = 32 * 1024 * 1024
+	minMessageSizeLowerBound = 1 * 1024 * 1024
+	maxFrameSizeEnv          = "APS_TUNNEL_MAX_FRAME_MB"
+)
+
+var maxMessageSize = loadTunnelMaxMessageSize()
 
 // TunnelMessage represents a message in the TCP tunnel protocol
 type TunnelMessage struct {
@@ -125,6 +140,12 @@ type RequestPayloadTCP struct {
 	Data []byte `json:"data"`
 }
 
+type RequestStartPayloadTCP struct {
+	ID     string `json:"id"`
+	URL    string `json:"url"`
+	Header []byte `json:"header"`
+}
+
 // ResponseHeaderPayloadTCP for HTTP response header
 type ResponseHeaderPayloadTCP struct {
 	ID     string `json:"id"`
@@ -137,10 +158,22 @@ type ResponseChunkPayloadTCP struct {
 	Data []byte `json:"data"`
 }
 
+type RequestEndPayloadTCP struct {
+	ID    string `json:"id"`
+	Error string `json:"error,omitempty"`
+}
+
 // ResponseEndPayloadTCP marks end of response
 type ResponseEndPayloadTCP struct {
 	ID    string `json:"id"`
 	Error string `json:"error,omitempty"`
+}
+
+type requestStreamState struct {
+	id         string
+	pipeReader *io.PipeReader
+	pipeWriter *io.PipeWriter
+	km         *SessionKeyManager
 }
 
 // ProxyConnectPayload for TCP proxy connect
@@ -176,6 +209,11 @@ type ProxyClosePayload struct {
 // HeartbeatPayload for keepalive
 type HeartbeatPayload struct {
 	Timestamp int64 `json:"timestamp"`
+}
+
+type ProbePayload struct {
+	Nonce     uint64 `json:"nonce"`
+	Timestamp int64  `json:"timestamp"`
 }
 
 // TunnelConn wraps a net.Conn with protocol read/write
@@ -239,6 +277,10 @@ func (tc *TunnelConn) WriteMessage(msg *TunnelMessage) error {
 	}
 	tc.closedMu.RUnlock()
 
+	if uint32(len(msg.Payload)) > maxMessageSize {
+		return fmt.Errorf("message too large: %d bytes", len(msg.Payload))
+	}
+
 	frame := make([]byte, headerSize+len(msg.Payload))
 	binary.BigEndian.PutUint32(frame[:4], uint32(len(msg.Payload)))
 	frame[4] = msg.Type
@@ -291,6 +333,56 @@ func closeTunnelConnWithReason(tc *TunnelConn, reason string) {
 // ParseJSON unmarshals payload
 func (msg *TunnelMessage) ParseJSON(v interface{}) error {
 	return json.Unmarshal(msg.Payload, v)
+}
+
+func BuildScopedBinaryPayload(scopeID string, data []byte) ([]byte, error) {
+	if len(scopeID) == 0 {
+		return nil, errors.New("scope id is required")
+	}
+	if len(scopeID) > 255 {
+		return nil, errors.New("scope id too long")
+	}
+
+	payload := make([]byte, 1+len(scopeID)+len(data))
+	payload[0] = byte(len(scopeID))
+	copy(payload[1:], scopeID)
+	copy(payload[1+len(scopeID):], data)
+	return payload, nil
+}
+
+func ParseScopedBinaryPayload(payload []byte) (string, []byte, error) {
+	if len(payload) < 1 {
+		return "", nil, errors.New("invalid scoped payload: too short")
+	}
+	idLen := int(payload[0])
+	if idLen <= 0 {
+		return "", nil, errors.New("invalid scoped payload: empty id")
+	}
+	if len(payload) < 1+idLen {
+		return "", nil, errors.New("invalid scoped payload: truncated id")
+	}
+	return string(payload[1 : 1+idLen]), payload[1+idLen:], nil
+}
+
+func loadTunnelMaxMessageSize() uint32 {
+	raw := os.Getenv(maxFrameSizeEnv)
+	if raw == "" {
+		return uint32(defaultMaxMessageSize)
+	}
+
+	mb, err := strconv.Atoi(raw)
+	if err != nil || mb <= 0 {
+		return uint32(defaultMaxMessageSize)
+	}
+
+	bytes := mb * 1024 * 1024
+	if bytes > maxMessageSizeUpperBound {
+		bytes = maxMessageSizeUpperBound
+	}
+	if bytes < minMessageSizeLowerBound {
+		bytes = minMessageSizeLowerBound
+	}
+	return uint32(bytes)
 }
 
 type prefixedConn struct {
@@ -626,7 +718,12 @@ func runTCPTunnelSession(ctx context.Context, connCtx ImmutableConnectionContext
 				DebugLog("[CONN] Control read loop exiting, reconnect required")
 				return
 			}
-			go handleTCPMessage(tc, msg, keyManager, sessionState, controlState)
+			switch msg.Type {
+			case MsgTypeRequestStart, MsgTypeRequestChunkBin, MsgTypeRequestEnd, MsgTypeProbePing, MsgTypeProbePong, MsgTypeHeartbeat, MsgTypeCancel:
+				handleTCPMessage(tc, msg, keyManager, sessionState, controlState)
+			default:
+				go handleTCPMessage(tc, msg, keyManager, sessionState, controlState)
+			}
 		}
 	}()
 
@@ -671,6 +768,12 @@ func handleTCPMessage(tc *TunnelConn, msg *TunnelMessage, km *SessionKeyManager,
 	switch msg.Type {
 	case MsgTypeRequest:
 		handleTCPRequest(tc, msg, km)
+	case MsgTypeRequestStart:
+		handleTCPRequestStart(tc, msg, km)
+	case MsgTypeRequestChunkBin:
+		handleTCPRequestChunkBinary(msg)
+	case MsgTypeRequestEnd:
+		handleTCPRequestEnd(msg)
 	case MsgTypeProxyConnect:
 		handleTCPProxyConnect(tc, msg)
 	case MsgTypeProxyDataBinary:
@@ -687,6 +790,10 @@ func handleTCPMessage(tc *TunnelConn, msg *TunnelMessage, km *SessionKeyManager,
 		// Heartbeat - do nothing
 	case MsgTypeCancel:
 		// TODO: Handle cancellation
+	case MsgTypeProbePing:
+		handleTCPProbePing(tc, msg)
+	case MsgTypeProbePong:
+		// Endpoint currently only responds to probe pings.
 	case MsgTypeConfigUpdate:
 		plainPayload, err := UnwrapControlPlanePayload(km, msg.Type, msg.Payload, controlState)
 		if err != nil {
@@ -711,6 +818,201 @@ func handleTCPMessage(tc *TunnelConn, msg *TunnelMessage, km *SessionKeyManager,
 	case MsgTypeKeyConfirm:
 		handleKeyConfirm(tc, msg, km)
 	}
+}
+
+func handleTCPRequestStart(tc *TunnelConn, msg *TunnelMessage, km *SessionKeyManager) {
+	var reqPayload RequestStartPayloadTCP
+	if err := msg.ParseJSON(&reqPayload); err != nil {
+		log.Printf("Failed to parse request start: %v", err)
+		return
+	}
+
+	requestID := reqPayload.ID
+	if requestID == "" {
+		return
+	}
+
+	decryptedHeader, err := km.Decrypt(reqPayload.Header)
+	if err != nil {
+		log.Printf("[ERROR %s] Decrypt request header failed: %v", requestID, err)
+		sendTCPErrorResponse(tc, requestID, "decryption failed")
+		return
+	}
+
+	req, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(decryptedHeader)))
+	if err != nil {
+		log.Printf("[ERROR %s] Cannot read request header: %v", requestID, err)
+		sendTCPErrorResponse(tc, requestID, "cannot read request header")
+		return
+	}
+
+	targetURL, err := url.Parse(reqPayload.URL)
+	if err != nil {
+		log.Printf("[ERROR %s] Invalid target URL: %v", requestID, err)
+		sendTCPErrorResponse(tc, requestID, "invalid target url")
+		return
+	}
+
+	pipeReader, pipeWriter := io.Pipe()
+	req.URL = targetURL
+	req.RequestURI = ""
+	req.Body = pipeReader
+
+	state := &requestStreamState{
+		id:         requestID,
+		pipeReader: pipeReader,
+		pipeWriter: pipeWriter,
+		km:         km,
+	}
+	if _, loaded := requestStreams.LoadOrStore(requestID, state); loaded {
+		sendTCPErrorResponse(tc, requestID, "duplicate request stream id")
+		return
+	}
+
+	atomic.AddInt64(&activeTunnelRequests, 1)
+	go executeStreamedHTTPRequest(tc, requestID, req, state)
+}
+
+func handleTCPRequestChunkBinary(msg *TunnelMessage) {
+	requestID, encryptedChunk, err := ParseScopedBinaryPayload(msg.Payload)
+	if err != nil {
+		return
+	}
+
+	stateVal, ok := requestStreams.Load(requestID)
+	if !ok {
+		return
+	}
+	state := stateVal.(*requestStreamState)
+
+	plainChunk, err := state.km.Decrypt(encryptedChunk)
+	if err != nil {
+		_ = state.pipeWriter.CloseWithError(err)
+		requestStreams.Delete(requestID)
+		return
+	}
+
+	offset := 0
+	for offset < len(plainChunk) {
+		n, writeErr := state.pipeWriter.Write(plainChunk[offset:])
+		offset += n
+		if writeErr != nil {
+			requestStreams.Delete(requestID)
+			return
+		}
+	}
+}
+
+func handleTCPRequestEnd(msg *TunnelMessage) {
+	var payload RequestEndPayloadTCP
+	if err := msg.ParseJSON(&payload); err != nil {
+		return
+	}
+
+	stateVal, ok := requestStreams.Load(payload.ID)
+	if !ok {
+		return
+	}
+	state := stateVal.(*requestStreamState)
+
+	if payload.Error != "" {
+		_ = state.pipeWriter.CloseWithError(errors.New(payload.Error))
+		return
+	}
+	_ = state.pipeWriter.Close()
+}
+
+func executeStreamedHTTPRequest(tc *TunnelConn, requestID string, req *http.Request, state *requestStreamState) {
+	startAt := time.Now()
+	defer func() {
+		atomic.AddInt64(&activeTunnelRequests, -1)
+		requestStreams.Delete(requestID)
+		_ = state.pipeReader.Close()
+		_ = state.pipeWriter.Close()
+		DebugLog("[REQ %s] Streamed request completed in %v", requestID, time.Since(startAt))
+	}()
+
+	resp, err := sharedClient.Do(req)
+	if err != nil {
+		log.Printf("[ERROR %s] Streamed request failed: %v", requestID, err)
+		sendTCPErrorResponse(tc, requestID, err.Error())
+		return
+	}
+	defer resp.Body.Close()
+
+	headerBytes, err := httputil.DumpResponse(resp, false)
+	if err != nil {
+		log.Printf("[ERROR %s] Failed to dump response: %v", requestID, err)
+		sendTCPErrorResponse(tc, requestID, "failed to dump response")
+		return
+	}
+
+	encryptedHeader, err := state.km.Encrypt(headerBytes)
+	if err != nil {
+		log.Printf("[ERROR %s] Failed to encrypt response header: %v", requestID, err)
+		sendTCPErrorResponse(tc, requestID, "failed to encrypt response header")
+		return
+	}
+
+	if err := tc.SendJSON(MsgTypeResponseHeader, ResponseHeaderPayloadTCP{
+		ID:     requestID,
+		Header: encryptedHeader,
+	}); err != nil {
+		log.Printf("[ERROR %s] Failed to send response header: %v", requestID, err)
+		return
+	}
+
+	buf := GetLargeBuffer()
+	defer PutLargeBuffer(buf)
+
+	for {
+		n, readErr := resp.Body.Read(buf)
+		if n > 0 {
+			encryptedChunk, encErr := state.km.Encrypt(buf[:n])
+			if encErr != nil {
+				log.Printf("[ERROR %s] Failed to encrypt chunk: %v", requestID, encErr)
+				sendTCPErrorResponse(tc, requestID, "failed to encrypt chunk")
+				return
+			}
+
+			if err := sendScopedBinaryMessage(tc, MsgTypeResponseChunkBin, requestID, encryptedChunk); err != nil {
+				log.Printf("[ERROR %s] Failed to send binary chunk: %v", requestID, err)
+				return
+			}
+		}
+
+		if readErr == io.EOF {
+			break
+		}
+		if readErr != nil {
+			log.Printf("[ERROR %s] Response body read error: %v", requestID, readErr)
+			sendTCPErrorResponse(tc, requestID, "read body error")
+			return
+		}
+	}
+
+	if err := tc.SendJSON(MsgTypeResponseEnd, ResponseEndPayloadTCP{ID: requestID}); err != nil {
+		log.Printf("[ERROR %s] Failed to send response end: %v", requestID, err)
+	}
+}
+
+func sendScopedBinaryMessage(tc *TunnelConn, msgType uint8, scopeID string, data []byte) error {
+	payload, err := BuildScopedBinaryPayload(scopeID, data)
+	if err != nil {
+		return err
+	}
+	return tc.WriteMessage(&TunnelMessage{
+		Type:    msgType,
+		Payload: payload,
+	})
+}
+
+func handleTCPProbePing(tc *TunnelConn, msg *TunnelMessage) {
+	var payload ProbePayload
+	if err := msg.ParseJSON(&payload); err != nil {
+		return
+	}
+	_ = tc.SendJSON(MsgTypeProbePong, payload)
 }
 
 // handleTCPRequest handles HTTP request via TCP tunnel
@@ -812,10 +1114,7 @@ func handleTCPRequest(tc *TunnelConn, msg *TunnelMessage, km *SessionKeyManager)
 				return
 			}
 
-			if sendErr := tc.SendJSON(MsgTypeResponseChunk, ResponseChunkPayloadTCP{
-				ID:   requestID,
-				Data: encryptedChunk,
-			}); sendErr != nil {
+			if sendErr := sendScopedBinaryMessage(tc, MsgTypeResponseChunkBin, requestID, encryptedChunk); sendErr != nil {
 				log.Printf("[ERROR %s] Failed to send chunk: %v", requestID, sendErr)
 				return
 			}

@@ -54,23 +54,33 @@ func (t *TunnelRoundTripper) roundTripViaTunnel(req *http.Request, mapping *Mapp
 		endpointName = mapping.endpointNames[rand.Intn(len(mapping.endpointNames))]
 	}
 
-	// Serialize the request
-	reqBytes, err := httputil.DumpRequestOut(req, true)
+	reqHeaderBytes, err := httputil.DumpRequestOut(req, false)
 	if err != nil {
 		return nil, fmt.Errorf("failed to dump request: %w", err)
 	}
 
+	bodyForTunnel := req.Body
+	if req.GetBody != nil {
+		if replayBody, replayErr := req.GetBody(); replayErr == nil {
+			bodyForTunnel = replayBody
+		}
+	}
+
 	// Prepare payload for the tunnel manager
 	reqPayload := &RequestPayload{
-		URL:      req.URL.String(),
-		SourceIP: extractIPFromAddr(req.RemoteAddr),
-		Data:     reqBytes,
+		URL:        req.URL.String(),
+		SourceIP:   extractIPFromAddr(req.RemoteAddr),
+		HeaderData: reqHeaderBytes,
+		Body:       bodyForTunnel,
 	}
 
 	// Send the request via the tunnel manager's gRPC stream
 	DebugLog("[TUNNEL] Sending request for %s via tunnel '%s' to endpoint '%s'", req.URL.String(), tunnelName, endpointName)
 	bodyStream, headerBytes, err := t.tunnelManager.SendRequestStream(req.Context(), tunnelName, endpointName, reqPayload)
 	if err != nil {
+		if bodyForTunnel != nil && bodyForTunnel != req.Body {
+			bodyForTunnel.Close()
+		}
 		log.Printf("[TUNNEL] Request via tunnel failed: %v. Falling back to direct connection.", err)
 		return t.next.RoundTrip(req) // Fallback
 	}

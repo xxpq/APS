@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/xtaci/smux"
@@ -69,6 +70,20 @@ type TCPEndpoint struct {
 	closeOnce   sync.Once // Ensures done channel is closed only once
 	session     *smux.Session
 	closeReason string
+
+	// Scheduling + health
+	activeRequests int64
+	schedMu        sync.RWMutex
+	ewmaLatency    time.Duration
+	lastProbeRTT   time.Duration
+	lastProbeAt    time.Time
+	healthScore    float64
+	probeFailures  int
+
+	// Active probe rendezvous
+	probeMu      sync.Mutex
+	probeWaiters map[uint64]chan struct{}
+	probeNonce   uint64
 }
 
 // tcpPendingRequest represents a pending HTTP request
@@ -521,6 +536,8 @@ func (s *TCPTunnelServer) handleConnection(conn net.Conn) {
 		proxyConns:       make(map[string]*tcpProxyConnection),
 		sendChan:         make(chan *TunnelMessage, 1000), // Increased from 100 to 1000
 		done:             make(chan struct{}),
+		healthScore:      1.0,
+		probeWaiters:     make(map[uint64]chan struct{}),
 	}
 
 	// Initialize per-connection session key manager
@@ -594,6 +611,7 @@ func (s *TCPTunnelServer) handleConnection(conn net.Conn) {
 	// Start goroutines for read/write
 	go endpoint.writeLoop()
 	go endpoint.readLoop(s)
+	go endpoint.probeLoop()
 
 	// Send mirror addresses if configured (non-blocking)
 	go sendMirrorUpdate(s, endpoint)
@@ -730,6 +748,16 @@ func (ep *TCPEndpoint) CloseWithReason(reason string) {
 		}
 		ep.proxyConns = make(map[string]*tcpProxyConnection)
 		ep.mu.Unlock()
+
+		ep.probeMu.Lock()
+		for nonce, ch := range ep.probeWaiters {
+			select {
+			case ch <- struct{}{}:
+			default:
+			}
+			delete(ep.probeWaiters, nonce)
+		}
+		ep.probeMu.Unlock()
 	})
 }
 
@@ -745,6 +773,185 @@ func (ep *TCPEndpoint) IsOnline() bool {
 		return false
 	default:
 		return true
+	}
+}
+
+func (ep *TCPEndpoint) MarkRequestStart() {
+	atomic.AddInt64(&ep.activeRequests, 1)
+}
+
+func (ep *TCPEndpoint) MarkRequestDone(latency time.Duration, err error) {
+	current := atomic.AddInt64(&ep.activeRequests, -1)
+	if current < 0 {
+		atomic.StoreInt64(&ep.activeRequests, 0)
+	}
+
+	ep.schedMu.Lock()
+	defer ep.schedMu.Unlock()
+	ep.updateEWMA(latency)
+	if ep.healthScore <= 0 {
+		ep.healthScore = 1.0
+	}
+	if err != nil {
+		ep.healthScore -= 0.1
+	} else {
+		ep.healthScore += 0.02
+	}
+	if ep.healthScore < 0.1 {
+		ep.healthScore = 0.1
+	}
+	if ep.healthScore > 1.5 {
+		ep.healthScore = 1.5
+	}
+}
+
+func (ep *TCPEndpoint) GetSchedulingSnapshot() (int64, time.Duration, float64) {
+	active := atomic.LoadInt64(&ep.activeRequests)
+
+	ep.schedMu.RLock()
+	latency := ep.ewmaLatency
+	if latency <= 0 {
+		latency = ep.lastProbeRTT
+	}
+	health := ep.healthScore
+	lastProbeAt := ep.lastProbeAt
+	probeFailures := ep.probeFailures
+	ep.schedMu.RUnlock()
+
+	if health <= 0 {
+		health = 1.0
+	}
+	if !lastProbeAt.IsZero() && time.Since(lastProbeAt) > 2*time.Minute {
+		health *= 0.85
+	}
+	if probeFailures > 0 {
+		penalty := 1.0 - float64(probeFailures)*0.1
+		if penalty < 0.5 {
+			penalty = 0.5
+		}
+		health *= penalty
+	}
+	if health < 0.1 {
+		health = 0.1
+	}
+
+	return active, latency, health
+}
+
+func (ep *TCPEndpoint) updateEWMA(sample time.Duration) {
+	if sample <= 0 {
+		return
+	}
+	const alpha = 0.2
+	if ep.ewmaLatency <= 0 {
+		ep.ewmaLatency = sample
+		return
+	}
+	ep.ewmaLatency = time.Duration((1.0-alpha)*float64(ep.ewmaLatency) + alpha*float64(sample))
+}
+
+func (ep *TCPEndpoint) recordProbeSuccess(rtt time.Duration) {
+	ep.schedMu.Lock()
+	defer ep.schedMu.Unlock()
+	if rtt > 0 {
+		ep.lastProbeRTT = rtt
+		ep.lastProbeAt = time.Now()
+		ep.updateEWMA(rtt)
+	}
+	ep.probeFailures = 0
+	if ep.healthScore <= 0 {
+		ep.healthScore = 1.0
+	}
+	ep.healthScore += 0.05
+	if ep.healthScore > 1.5 {
+		ep.healthScore = 1.5
+	}
+}
+
+func (ep *TCPEndpoint) recordProbeFailure() {
+	ep.schedMu.Lock()
+	defer ep.schedMu.Unlock()
+	ep.probeFailures++
+	if ep.healthScore <= 0 {
+		ep.healthScore = 1.0
+	}
+	ep.healthScore *= 0.8
+	if ep.healthScore < 0.1 {
+		ep.healthScore = 0.1
+	}
+}
+
+func (ep *TCPEndpoint) probeLoop() {
+	ticker := time.NewTicker(15 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ep.done:
+			return
+		case <-ticker.C:
+			ep.sendProbe()
+		}
+	}
+}
+
+func (ep *TCPEndpoint) sendProbe() {
+	nonce := atomic.AddUint64(&ep.probeNonce, 1)
+	waitCh := make(chan struct{}, 1)
+
+	ep.probeMu.Lock()
+	ep.probeWaiters[nonce] = waitCh
+	ep.probeMu.Unlock()
+
+	ts := time.Now().UnixNano()
+	if err := ep.SendJSON(MsgTypeProbePing, ProbePayload{
+		Nonce:     nonce,
+		Timestamp: ts,
+	}); err != nil {
+		ep.probeMu.Lock()
+		delete(ep.probeWaiters, nonce)
+		ep.probeMu.Unlock()
+		ep.recordProbeFailure()
+		return
+	}
+
+	select {
+	case <-ep.done:
+		return
+	case <-waitCh:
+		ep.recordProbeSuccess(time.Since(time.Unix(0, ts)))
+	case <-time.After(3 * time.Second):
+		ep.probeMu.Lock()
+		delete(ep.probeWaiters, nonce)
+		ep.probeMu.Unlock()
+		ep.recordProbeFailure()
+	}
+}
+
+func (ep *TCPEndpoint) handleProbePing(msg *TunnelMessage) {
+	var payload ProbePayload
+	if err := msg.ParseJSON(&payload); err != nil {
+		return
+	}
+	_ = ep.SendJSON(MsgTypeProbePong, payload)
+}
+
+func (ep *TCPEndpoint) handleProbePong(msg *TunnelMessage) {
+	var payload ProbePayload
+	if err := msg.ParseJSON(&payload); err != nil {
+		return
+	}
+
+	ep.probeMu.Lock()
+	waitCh := ep.probeWaiters[payload.Nonce]
+	delete(ep.probeWaiters, payload.Nonce)
+	ep.probeMu.Unlock()
+	if waitCh == nil {
+		return
+	}
+	select {
+	case waitCh <- struct{}{}:
+	default:
 	}
 }
 
@@ -799,7 +1006,11 @@ func (ep *TCPEndpoint) readLoop(server *TCPTunnelServer) {
 		switch msg.Type {
 		case MsgTypeHeartbeat:
 			// Heartbeat response - do nothing
-		case MsgTypeResponseHeader, MsgTypeResponseChunk, MsgTypeResponseEnd:
+		case MsgTypeProbePing:
+			ep.handleProbePing(msg)
+		case MsgTypeProbePong:
+			ep.handleProbePong(msg)
+		case MsgTypeResponseHeader, MsgTypeResponseChunk, MsgTypeResponseChunkBin, MsgTypeResponseEnd:
 			ep.handleResponseMessage(msg)
 		case MsgTypeProxyConnectAck:
 			ep.handleProxyConnectAck(msg)
@@ -846,6 +1057,13 @@ func (ep *TCPEndpoint) handleResponseMessage(msg *TunnelMessage) {
 			return
 		}
 		requestID = payload.ID
+	case MsgTypeResponseChunkBin:
+		scopeID, _, err := ParseScopedBinaryPayload(msg.Payload)
+		if err != nil {
+			DebugLog("%s [TCP TUNNEL] Invalid binary response chunk: %v", basePrefix, err)
+			return
+		}
+		requestID = scopeID
 	case MsgTypeResponseEnd:
 		var payload ResponseEndPayloadTCP
 		if err := msg.ParseJSON(&payload); err != nil {

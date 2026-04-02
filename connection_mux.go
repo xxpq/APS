@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"sync"
+	"sync/atomic"
 )
 
 // ConnectionMux multiplexes connections based on protocol detection
@@ -24,14 +25,36 @@ type ConnectionMux struct {
 // RateLimitConn wraps a net.Conn to track connection end
 type RateLimitConn struct {
 	net.Conn
-	onClose func()
+	onClose func(bytes int64)
 	once    sync.Once
+	readN   int64
+	writeN  int64
+}
+
+func (c *RateLimitConn) Read(b []byte) (int, error) {
+	n, err := c.Conn.Read(b)
+	if n > 0 {
+		atomic.AddInt64(&c.readN, int64(n))
+	}
+	return n, err
+}
+
+func (c *RateLimitConn) Write(b []byte) (int, error) {
+	n, err := c.Conn.Write(b)
+	if n > 0 {
+		atomic.AddInt64(&c.writeN, int64(n))
+	}
+	return n, err
+}
+
+func (c *RateLimitConn) totalBytes() int64 {
+	return atomic.LoadInt64(&c.readN) + atomic.LoadInt64(&c.writeN)
 }
 
 func (c *RateLimitConn) Close() error {
 	c.once.Do(func() {
 		if c.onClose != nil {
-			c.onClose()
+			c.onClose(c.totalBytes())
 		}
 	})
 	return c.Conn.Close()
@@ -136,10 +159,8 @@ func (m *ConnectionMux) handleConnection(conn net.Conn) {
 			// Wrap connection to track end
 			conn = &RateLimitConn{
 				Conn: conn,
-				onClose: func() {
-					// We don't know bytes transferred here easily without wrapping Read/Write.
-					// For now pass 0 bytes.
-					rateLimiter.OnRequestEnd(ip, "", bindings, 0)
+				onClose: func(bytes int64) {
+					rateLimiter.OnRequestEnd(ip, "", bindings, bytes)
 				},
 			}
 		}
@@ -209,7 +230,7 @@ func isTunnelProtocol(header []byte) bool {
 
 	// Stricter check for Tunnel Protocol
 	// Our protocol uses a 4-byte Big Endian length prefix.
-	// The maximum message size is 10MB, so the first byte (MSB) MUST be 0.
+	// Registration frames are expected to be small, so requiring MSB=0 is a fast filter.
 	// This effectively filters out TLS (starts with 0x16) and many other protocols.
 	if firstByte != 0x00 {
 		return false
