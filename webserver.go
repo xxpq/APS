@@ -572,34 +572,94 @@ func (h *AdminHandlers) saveConfigLocked() error {
 	return encoder.Encode(h.config)
 }
 
-func mappingSignature(mapping Mapping) (string, error) {
-	payload, err := json.Marshal(mapping)
-	if err != nil {
-		return "", err
+func appendNormalizedFromEntries(dst []string, seen map[string]struct{}, raw interface{}) []string {
+	switch v := raw.(type) {
+	case string:
+		entry := strings.TrimSpace(v)
+		if entry == "" {
+			return dst
+		}
+		if _, ok := seen[entry]; ok {
+			return dst
+		}
+		seen[entry] = struct{}{}
+		return append(dst, entry)
+	case []string:
+		for _, item := range v {
+			dst = appendNormalizedFromEntries(dst, seen, item)
+		}
+		return dst
+	case []interface{}:
+		for _, item := range v {
+			dst = appendNormalizedFromEntries(dst, seen, item)
+		}
+		return dst
+	default:
+		return dst
 	}
-	return string(payload), nil
 }
 
-func findDuplicateMappingIndex(mappings []Mapping, target Mapping, ignoreIndex int) (int, error) {
-	targetSig, err := mappingSignature(target)
+func mappingFromEntries(mapping Mapping) ([]string, error) {
+	seen := make(map[string]struct{})
+	entries := make([]string, 0)
+
+	switch v := mapping.From.(type) {
+	case nil:
+		return nil, nil
+	case string, []string, []interface{}:
+		entries = appendNormalizedFromEntries(entries, seen, v)
+	case map[string]interface{}:
+		if urlVal, ok := v["url"]; ok {
+			entries = appendNormalizedFromEntries(entries, seen, urlVal)
+		}
+		if urlsVal, ok := v["urls"]; ok {
+			entries = appendNormalizedFromEntries(entries, seen, urlsVal)
+		}
+	case EndpointConfig:
+		entries = appendNormalizedFromEntries(entries, seen, v.URL)
+		entries = appendNormalizedFromEntries(entries, seen, v.URLs)
+	case *EndpointConfig:
+		if v != nil {
+			entries = appendNormalizedFromEntries(entries, seen, v.URL)
+			entries = appendNormalizedFromEntries(entries, seen, v.URLs)
+		}
+	default:
+		return nil, fmt.Errorf("unsupported from format: %T", mapping.From)
+	}
+
+	return entries, nil
+}
+
+func findConflictingFromEntry(mappings []Mapping, target Mapping, ignoreIndex int) (int, string, error) {
+	targetEntries, err := mappingFromEntries(target)
 	if err != nil {
-		return -1, err
+		return -1, "", err
+	}
+	if len(targetEntries) == 0 {
+		return -1, "", nil
+	}
+
+	targetSet := make(map[string]struct{}, len(targetEntries))
+	for _, entry := range targetEntries {
+		targetSet[entry] = struct{}{}
 	}
 
 	for idx, existing := range mappings {
 		if idx == ignoreIndex {
 			continue
 		}
-		existingSig, err := mappingSignature(existing)
+		existingEntries, err := mappingFromEntries(existing)
 		if err != nil {
-			return -1, err
+			return -1, "", err
 		}
-		if existingSig == targetSig {
-			return idx, nil
+		for _, entry := range existingEntries {
+			if _, ok := targetSet[entry]; ok {
+				return idx, entry, nil
+			}
 		}
 	}
 
-	return -1, nil
+	return -1, "", nil
 }
 
 // ===== 用户管理 =====
@@ -1149,13 +1209,13 @@ func (h *AdminHandlers) handleRules(w http.ResponseWriter, r *http.Request) {
 		if index != nil {
 			ignoreIndex = *index
 		}
-		duplicateIndex, err := findDuplicateMappingIndex(h.config.Mappings, mapping, ignoreIndex)
+		conflictIndex, conflictFrom, err := findConflictingFromEntry(h.config.Mappings, mapping, ignoreIndex)
 		if err != nil {
-			http.Error(w, "Failed to validate rule uniqueness", http.StatusInternalServerError)
+			http.Error(w, "Failed to validate from-entry uniqueness", http.StatusInternalServerError)
 			return
 		}
-		if duplicateIndex >= 0 {
-			http.Error(w, fmt.Sprintf("duplicate mapping already exists at index %d", duplicateIndex), http.StatusConflict)
+		if conflictIndex >= 0 {
+			http.Error(w, fmt.Sprintf("conflicting from entry '%s' already exists at mapping index %d", conflictFrom, conflictIndex), http.StatusConflict)
 			return
 		}
 
