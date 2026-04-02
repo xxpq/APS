@@ -103,7 +103,7 @@ func FetchConfigFromAPS(apsAddr, configID string) (*EndpointRuntimeConfig, error
 		}
 
 		if configResp.Config == nil {
-			lastErr = fmt.Errorf("no configuration found for ID: %s", configID)
+			lastErr = fmt.Errorf("no configuration found for requested id")
 			continue
 		}
 
@@ -139,7 +139,8 @@ func initializeConfiguration() error {
 
 		if *serverAddr != "" {
 			// Active mode: connect to APS and fetch config
-			log.Printf("Fetching configuration from APS (%s) with ID: %s", *serverAddr, *configID)
+			log.Printf("Fetching configuration from APS (%s)", *serverAddr)
+			DebugLog("[CONFIG] Using encrypted config id flow")
 
 			var config *EndpointRuntimeConfig
 			var err error
@@ -157,7 +158,8 @@ func initializeConfiguration() error {
 			}
 			runtimeConfig = config
 			usingLegacyMode = false
-			log.Printf("Configuration loaded: tunnel=%s, endpoint=%s", config.TunnelName, config.EndpointName)
+			log.Printf("Configuration loaded successfully")
+			DebugLog("[CONFIG] Loaded tunnel=%s endpoint=%s", config.TunnelName, config.EndpointName)
 			return nil
 		}
 

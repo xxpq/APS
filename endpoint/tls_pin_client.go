@@ -12,7 +12,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net"
 	"net/http"
 	"strings"
@@ -184,17 +183,20 @@ func fetchServerSPKIHashOverHTTPS(authority, serverName string) ([]byte, string,
 	reqURL := "https://" + authority + "/.api/tls-pin"
 	resp, err := client.Get(reqURL)
 	if err != nil {
-		return nil, "", fmt.Errorf("bootstrap https request failed: %w", err)
+		DebugLog("[CONN-INIT] Connectivity test request failed for %s: %v", authority, err)
+		return nil, "", errors.New("connectivity test failed")
 	}
 	defer resp.Body.Close()
 
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 8*1024))
 	if resp.StatusCode != http.StatusOK {
-		return nil, "", fmt.Errorf("bootstrap https status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		DebugLog("[CONN-INIT] Connectivity test returned non-200 for %s: status=%d", authority, resp.StatusCode)
+		return nil, "", errors.New("connectivity test failed")
 	}
 
 	if resp.TLS == nil || len(resp.TLS.PeerCertificates) == 0 {
-		return nil, "", errors.New("no peer certificate in bootstrap response")
+		DebugLog("[CONN-INIT] Connectivity test missing peer certificate for %s", authority)
+		return nil, "", errors.New("connectivity test failed")
 	}
 
 	sum := sha256.Sum256(resp.TLS.PeerCertificates[0].RawSubjectPublicKeyInfo)
@@ -207,7 +209,8 @@ func fetchServerSPKIHashOverHTTPS(authority, serverName string) ([]byte, string,
 	}
 	if err := json.Unmarshal(body, &pinResp); err == nil && pinResp.Hash != "" {
 		if !strings.EqualFold(pinResp.Hash, hashHex) {
-			return nil, "", fmt.Errorf("server hash mismatch: tls=%s body=%s", hashHex, pinResp.Hash)
+			DebugLog("[CONN-INIT] Connectivity test hash mismatch for %s", authority)
+			return nil, "", errors.New("connectivity test failed")
 		}
 	}
 
@@ -228,7 +231,8 @@ func newPinnedHTTPClient(pin *endpointTLSPin) *http.Client {
 			ServerName: pin.serverName,
 			VerifyConnection: func(cs tls.ConnectionState) error {
 				if len(cs.PeerCertificates) == 0 {
-					return fmt.Errorf("%w: no peer certificate", errEndpointTLSPinMismatch)
+					DebugLog("[CONN-INIT] Missing peer certificate while verifying %s", pin.serverAddress)
+					return fmt.Errorf("%w: connectivity test failed", errEndpointTLSPinMismatch)
 				}
 				sum := sha256.Sum256(cs.PeerCertificates[0].RawSubjectPublicKeyInfo)
 				hashHex := hex.EncodeToString(sum[:])
@@ -242,7 +246,8 @@ func newPinnedHTTPClient(pin *endpointTLSPin) *http.Client {
 				pin.mu.Unlock()
 
 				if !ok {
-					return fmt.Errorf("%w: expected one of [%s], got %s", errEndpointTLSPinMismatch, summary, hashHex)
+					DebugLog("[CONN-INIT] Pin mismatch for %s. cached=%s got=%s", pin.serverAddress, summary, hashHex)
+					return fmt.Errorf("%w: connectivity test failed", errEndpointTLSPinMismatch)
 				}
 				return nil
 			},
@@ -269,7 +274,7 @@ func ensureEndpointTLSPin(serverAddress string) (*endpointTLSPin, error) {
 	}
 	endpointTLSPins.mu.Unlock()
 
-	hash, hashHex, err := fetchServerSPKIHashOverHTTPS(authority, serverName)
+	hash, _, err := fetchServerSPKIHashOverHTTPS(authority, serverName)
 	if err != nil {
 		return nil, err
 	}
@@ -291,7 +296,7 @@ func ensureEndpointTLSPin(serverAddress string) (*endpointTLSPin, error) {
 	endpointTLSPins.byAddress[cacheKey] = pin
 	endpointTLSPins.mu.Unlock()
 
-	log.Printf("[TLS-PIN] Cached SPKI hash for %s: %s", authority, hashHex)
+	DebugLog("[CONN-INIT] Cached TLS pin for %s", authority)
 	return pin, nil
 }
 
@@ -301,13 +306,13 @@ func refreshEndpointTLSPin(serverAddress string) (*endpointTLSPin, error) {
 		return nil, err
 	}
 
-	hash, hashHex, err := fetchServerSPKIHashOverHTTPS(pin.serverAddress, pin.serverName)
+	hash, _, err := fetchServerSPKIHashOverHTTPS(pin.serverAddress, pin.serverName)
 	if err != nil {
 		return nil, err
 	}
 	added, _ := pin.addAllowedHash(hash)
 	if added {
-		log.Printf("[TLS-PIN] Added rotated SPKI hash for %s: %s", pin.serverAddress, hashHex)
+		DebugLog("[CONN-INIT] Added rotated TLS pin for %s", pin.serverAddress)
 	}
 	return pin, nil
 }
