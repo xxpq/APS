@@ -137,6 +137,20 @@ func (h *AdminHandlers) SetTunnelManager(tm TunnelManagerInterface) {
 	h.tunnelManager = tm
 }
 
+func writeEmbeddedAdminAsset(w http.ResponseWriter, assetName, contentType string) {
+	data, err := Asset(assetName)
+	if err != nil {
+		log.Printf("failed to load embedded admin asset %q: %v", assetName, err)
+		http.Error(w, "Not Found", http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", contentType)
+	if _, err := w.Write(data); err != nil {
+		log.Printf("failed to write embedded admin asset %q: %v", assetName, err)
+	}
+}
+
 // RegisterHandlers registers the admin panel handlers to the given ServeMux.
 func (h *AdminHandlers) RegisterHandlers(mux *http.ServeMux) {
 	mux.HandleFunc("/.api/login", h.handleLogin)
@@ -207,37 +221,29 @@ func (h *AdminHandlers) RegisterHandlers(mux *http.ServeMux) {
 
 	// 管理面板页面
 	mux.HandleFunc("/.admin/", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Write([]byte(admin_page_content))
+		writeEmbeddedAdminAsset(w, "index.html", "text/html; charset=utf-8")
 	})
 	mux.HandleFunc("/.admin/style.css", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/css; charset=utf-8")
-		w.Write([]byte(admin_page_css))
+		writeEmbeddedAdminAsset(w, "style.css", "text/css; charset=utf-8")
 	})
 	mux.HandleFunc("/.admin/script.js", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
-		w.Write([]byte(admin_page_js))
+		writeEmbeddedAdminAsset(w, "script.js", "application/javascript; charset=utf-8")
 	})
 
 	mux.HandleFunc("/.admin/carbon.js", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
-		w.Write([]byte(admin_page_carbon_components_js))
+		writeEmbeddedAdminAsset(w, "carbon.js", "application/javascript; charset=utf-8")
 	})
 	mux.HandleFunc("/.admin/carbon.css", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/css; charset=utf-8")
-		w.Write([]byte(admin_page_carbon_components_css))
+		writeEmbeddedAdminAsset(w, "carbon.css", "text/css; charset=utf-8")
 	})
 	mux.HandleFunc("/.admin/ibm-plex.css", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/css; charset=utf-8")
-		w.Write([]byte(admin_page_carbon_font_css))
+		writeEmbeddedAdminAsset(w, "ibm-plex.css", "text/css; charset=utf-8")
 	})
 	mux.HandleFunc("/.admin/carbon/charts.js", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
-		w.Write([]byte(admin_page_carbon_charts_js))
+		writeEmbeddedAdminAsset(w, "carbon/charts.js", "application/javascript; charset=utf-8")
 	})
 	mux.HandleFunc("/.admin/carbon/charts.css", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/css; charset=utf-8")
-		w.Write([]byte(admin_page_carbon_charts_css))
+		writeEmbeddedAdminAsset(w, "carbon/charts.css", "text/css; charset=utf-8")
 	})
 
 	log.Println("Admin panel API available at '/.api' and UI at '/.admin/'")
@@ -564,6 +570,36 @@ func (h *AdminHandlers) saveConfigLocked() error {
 	encoder := json.NewEncoder(file)
 	encoder.SetIndent("", "  ")
 	return encoder.Encode(h.config)
+}
+
+func mappingSignature(mapping Mapping) (string, error) {
+	payload, err := json.Marshal(mapping)
+	if err != nil {
+		return "", err
+	}
+	return string(payload), nil
+}
+
+func findDuplicateMappingIndex(mappings []Mapping, target Mapping, ignoreIndex int) (int, error) {
+	targetSig, err := mappingSignature(target)
+	if err != nil {
+		return -1, err
+	}
+
+	for idx, existing := range mappings {
+		if idx == ignoreIndex {
+			continue
+		}
+		existingSig, err := mappingSignature(existing)
+		if err != nil {
+			return -1, err
+		}
+		if existingSig == targetSig {
+			return idx, nil
+		}
+	}
+
+	return -1, nil
 }
 
 // ===== 用户管理 =====
@@ -1107,6 +1143,23 @@ func (h *AdminHandlers) handleRules(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, "index out of range", http.StatusBadRequest)
 				return
 			}
+		}
+
+		ignoreIndex := -1
+		if index != nil {
+			ignoreIndex = *index
+		}
+		duplicateIndex, err := findDuplicateMappingIndex(h.config.Mappings, mapping, ignoreIndex)
+		if err != nil {
+			http.Error(w, "Failed to validate rule uniqueness", http.StatusInternalServerError)
+			return
+		}
+		if duplicateIndex >= 0 {
+			http.Error(w, fmt.Sprintf("duplicate mapping already exists at index %d", duplicateIndex), http.StatusConflict)
+			return
+		}
+
+		if index != nil {
 			h.config.Mappings[*index] = mapping
 		} else {
 			h.config.Mappings = append(h.config.Mappings, mapping)

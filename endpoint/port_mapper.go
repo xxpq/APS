@@ -124,10 +124,10 @@ func (pm *PortMapper) handleConnection(conn net.Conn, mapping PortMappingConfig)
 	}
 
 	clientAddr := conn.RemoteAddr().String()
-	log.Printf("[PORT-MAP] New connection from %s on port %d -> %s via endpoint %s",
+	DebugLog("[PORT-MAP] New connection from %s on port %d -> %s via endpoint %s",
 		clientAddr, mapping.LocalPort, mapping.RemoteTarget, mapping.TargetEndpoint)
 
-	log.Printf("[PORT-MAP] Using APS tunnel for %s", mapping.TargetEndpoint)
+	DebugLog("[PORT-MAP] Using APS tunnel for %s", mapping.TargetEndpoint)
 	pm.handleTunnelStreamForward(conn, tc, mapping, clientAddr)
 }
 
@@ -174,7 +174,7 @@ func (pm *PortMapper) Stop() {
 	pm.mu.Lock()
 	for port, listener := range pm.listeners {
 		listener.Close()
-		log.Printf("[PORT-MAP] Stopped listener on port %d", port)
+		DebugLog("[PORT-MAP] Stopped listener on port %d", port)
 	}
 	pm.listeners = make(map[int]net.Listener)
 	pm.mu.Unlock()
@@ -197,7 +197,7 @@ func (pm *PortMapper) UpdateMappings(newMappings []PortMappingConfig) {
 		if !newPorts[port] {
 			listener.Close()
 			delete(pm.listeners, port)
-			log.Printf("[PORT-MAP] Removed listener on port %d", port)
+			DebugLog("[PORT-MAP] Removed listener on port %d", port)
 		}
 	}
 	pm.mu.Unlock()
@@ -283,7 +283,7 @@ func getPortForwardDoneChan(id string) <-chan struct{} {
 func handlePortForwardData(connectionID string, data []byte) {
 	pfc, ok := getPortForwardConnection(connectionID)
 	if !ok {
-		log.Printf("[PORT-MAP] Connection %s not found for data", connectionID)
+		DebugLog("[PORT-MAP] Connection %s not found for data", connectionID)
 		return
 	}
 
@@ -354,7 +354,7 @@ func handlePortForwardResponse(tc *TunnelConn, msg *TunnelMessage) {
 
 	pfc, ok := getPortForwardConnection(payload.ConnectionID)
 	if !ok {
-		log.Printf("[PORT-MAP] Connection %s not found for response", payload.ConnectionID)
+		DebugLog("[PORT-MAP] Connection %s not found for response", payload.ConnectionID)
 		return
 	}
 
@@ -364,7 +364,7 @@ func handlePortForwardResponse(tc *TunnelConn, msg *TunnelMessage) {
 		return
 	}
 
-	log.Printf("[PORT-MAP] Port forward established for %s", payload.ConnectionID)
+	DebugLog("[PORT-MAP] Port forward established for %s", payload.ConnectionID)
 
 	// Start reading from local connection and forwarding to tunnel
 	go startPortForwardReadLoop(tc, payload.ConnectionID, pfc.LocalConn)
@@ -389,6 +389,6 @@ func handlePortForwardCloseMsg(msg *TunnelMessage) {
 		return
 	}
 
-	log.Printf("[PORT-MAP] Connection %s closed: %s", payload.ConnectionID, payload.Reason)
+	DebugLog("[PORT-MAP] Connection %s closed: %s", payload.ConnectionID, payload.Reason)
 	handlePortForwardClose(payload.ConnectionID)
 }

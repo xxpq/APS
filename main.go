@@ -583,6 +583,41 @@ func createServerHandler(serverName string, mappings []*Mapping, serverConfig *L
 	// 添加重放端点（始终可用）
 	mux.HandleFunc("/.replay", replayManager.ServeHTTP)
 
+	// HTTP CONNECT tunnel entry on the same listener/port.
+	mux.HandleFunc("/.tunnel", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodConnect {
+			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		log.Printf("[TCP TUNNEL] CONNECT /.tunnel request from %s", r.RemoteAddr)
+
+		hijacker, ok := w.(http.Hijacker)
+		if !ok {
+			http.Error(w, "Hijacking not supported", http.StatusInternalServerError)
+			return
+		}
+
+		conn, rw, err := hijacker.Hijack()
+		if err != nil {
+			log.Printf("[TCP TUNNEL] Failed to hijack CONNECT /.tunnel: %v", err)
+			return
+		}
+
+		if _, err := rw.WriteString("HTTP/1.1 200 Connection Established\r\n\r\n"); err != nil {
+			log.Printf("[TCP TUNNEL] Failed to write CONNECT /.tunnel response: %v", err)
+			conn.Close()
+			return
+		}
+		if err := rw.Flush(); err != nil {
+			log.Printf("[TCP TUNNEL] Failed to flush CONNECT /.tunnel response: %v", err)
+			conn.Close()
+			return
+		}
+		log.Printf("[TCP TUNNEL] CONNECT /.tunnel upgraded for %s", r.RemoteAddr)
+
+		go tunnelManager.HandleTunnelConnection(conn)
+	})
+
 	// 根据 panel 控制 /.api 与 /.admin 的注册
 	if serverConfig.Panel != nil && *serverConfig.Panel {
 		// 添加统计数据端点
@@ -597,16 +632,16 @@ func createServerHandler(serverName string, mappings []*Mapping, serverConfig *L
 
 	// 创建一个统一的处理器来处理所有请求
 	var baseHandler http.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// 代理请求 (CONNECT)
-		if r.Method == http.MethodConnect {
-			proxy.ServeHTTP(w, r)
-			return
-		}
-
 		// 检查 mux 中是否有更具体的匹配 (例如证书下载页面或相对路径)
 		handler, pattern := mux.Handler(r)
 		if pattern != "" {
 			handler.ServeHTTP(w, r)
+			return
+		}
+
+		// 代理请求 (CONNECT)
+		if r.Method == http.MethodConnect {
+			proxy.ServeHTTP(w, r)
 			return
 		}
 
@@ -644,6 +679,7 @@ func startServer(name string, config *ListenConfig, handler http.Handler, tunnel
 		// WriteTimeout:      30 * time.Second, // Kill stuck writes after 30s
 		ReadHeaderTimeout: 100 * time.Second, // Already set elsewhere, consolidating here
 		IdleTimeout:       100 * time.Second, // Close idle connections
+		ErrorLog:          newHTTPServerErrorLogger(log.Writer()),
 	}
 
 	log.Printf("Starting server '%s' on %s", name, addr)

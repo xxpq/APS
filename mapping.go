@@ -91,13 +91,15 @@ func (c *routeCache) size() int {
 
 func (p *MapRemoteProxy) mapRequest(r *http.Request) (string, bool, *Mapping, string) {
 	originalURL := p.buildOriginalURL(r)
+	isWebSocketUpgrade := isWebSocketUpgradeRequest(r)
 
-	// Build cache key: serverName|originalURL|method
+	// Build cache key: serverName|originalURL|method|isWebSocketUpgrade
 	// Method is included because same URL with different methods may match different rules
-	cacheKey := p.serverName + "|" + originalURL + "|" + r.Method
+	cacheKey := p.serverName + "|" + originalURL + "|" + r.Method + "|" + boolCachePart(isWebSocketUpgrade)
 
 	// Check cache first
 	if cached, found := globalRouteCache.get(cacheKey); found {
+		logMatchSuccess(originalURL, cached.matchedFromURL, cached.finalURL)
 		return cached.finalURL, true, cached.mapping, cached.matchedFromURL
 	}
 
@@ -112,7 +114,7 @@ func (p *MapRemoteProxy) mapRequest(r *http.Request) (string, bool, *Mapping, st
 	for i := range mappings {
 		mapping := &mappings[i]
 
-		score, newURL, fromURL := p.calculateMatchScore(mapping, r, originalURL)
+		score, newURL, fromURL := p.calculateMatchScore(mapping, r, originalURL, isWebSocketUpgrade)
 
 		if score > bestScore {
 			bestScore = score
@@ -125,13 +127,15 @@ func (p *MapRemoteProxy) mapRequest(r *http.Request) (string, bool, *Mapping, st
 	if bestMatch != nil {
 		// Cache the successful match
 		globalRouteCache.set(cacheKey, finalURL, bestMatch, matchedFromURL)
+		logMatchSuccess(originalURL, matchedFromURL, finalURL)
 		return finalURL, true, bestMatch, matchedFromURL
 	}
 
+	logMatchFailure(originalURL, "no_rule_matched")
 	return originalURL, false, nil, ""
 }
 
-func (p *MapRemoteProxy) calculateMatchScore(mapping *Mapping, r *http.Request, originalURL string) (int, string, string) {
+func (p *MapRemoteProxy) calculateMatchScore(mapping *Mapping, r *http.Request, originalURL string, isWebSocketUpgrade bool) (int, string, string) {
 	// Check if the mapping is for the current server
 	isForThisServer := false
 	for _, name := range mapping.serverNames {
@@ -162,6 +166,22 @@ func (p *MapRemoteProxy) calculateMatchScore(mapping *Mapping, r *http.Request, 
 		} else {
 			// Fallback if not pre-parsed (shouldn't happen if config loaded correctly)
 			parsedFromURL, _ = url.Parse(fromURL)
+		}
+
+		// ws/wss mappings are only valid for real WebSocket upgrade requests.
+		// This prevents plain HTTP(S) requests from being rewritten to ws(s) targets.
+		if parsedFromURL != nil {
+			switch parsedFromURL.Scheme {
+			case "ws", "wss":
+				if !isWebSocketUpgrade {
+					continue
+				}
+			}
+		} else {
+			lowFromURL := strings.ToLower(fromURL)
+			if (strings.HasPrefix(lowFromURL, "ws://") || strings.HasPrefix(lowFromURL, "wss://")) && !isWebSocketUpgrade {
+				continue
+			}
 		}
 
 		toURL := mapping.GetToURL()
@@ -272,9 +292,32 @@ func (p *MapRemoteProxy) calculateMatchScore(mapping *Mapping, r *http.Request, 
 	return -1, "", ""
 }
 
-func (p *MapRemoteProxy) matchAndReplace(parsedOriginal *url.URL, parsedFrom *url.URL, originalURL, fromPattern, toPattern string) (bool, string) {
-	DebugLog("[DEBUG] Trying to match: %s with pattern: %s", originalURL, fromPattern)
+func isWebSocketUpgradeRequest(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	if !strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
+		return false
+	}
+	return strings.Contains(strings.ToLower(r.Header.Get("Connection")), "upgrade")
+}
 
+func boolCachePart(v bool) string {
+	if v {
+		return "ws1"
+	}
+	return "ws0"
+}
+
+func logMatchSuccess(originalURL, fromPattern, newURL string) {
+	DebugLog("[DEBUG] MATCH OK: %s (pattern=%s) -> %s", originalURL, fromPattern, newURL)
+}
+
+func logMatchFailure(originalURL, reason string) {
+	DebugLog("[DEBUG] MATCH FAIL: %s (reason=%s)", originalURL, reason)
+}
+
+func (p *MapRemoteProxy) matchAndReplace(parsedOriginal *url.URL, parsedFrom *url.URL, originalURL, fromPattern, toPattern string) (bool, string) {
 	if matched, newURL := p.tryRegexMatch(originalURL, fromPattern, toPattern); matched {
 		return true, newURL
 	}
@@ -283,7 +326,6 @@ func (p *MapRemoteProxy) matchAndReplace(parsedOriginal *url.URL, parsedFrom *ur
 		var err error
 		parsedOriginal, err = url.Parse(originalURL)
 		if err != nil {
-			DebugLog("[DEBUG] Failed to parse original URL: %v", err)
 			return false, originalURL
 		}
 	}
@@ -292,15 +334,9 @@ func (p *MapRemoteProxy) matchAndReplace(parsedOriginal *url.URL, parsedFrom *ur
 		var err error
 		parsedFrom, err = url.Parse(fromPattern)
 		if err != nil {
-			DebugLog("[DEBUG] Failed to parse from pattern: %v", err)
 			return false, originalURL
 		}
 	}
-
-	DebugLog("[DEBUG] Original - Scheme: %s, Host: %s, Path: %s",
-		parsedOriginal.Scheme, parsedOriginal.Host, parsedOriginal.Path)
-	DebugLog("[DEBUG] Pattern  - Scheme: %s, Host: %s, Path: %s",
-		parsedFrom.Scheme, parsedFrom.Host, parsedFrom.Path)
 
 	// Scheme match
 	schemeMatch := false
@@ -316,18 +352,15 @@ func (p *MapRemoteProxy) matchAndReplace(parsedOriginal *url.URL, parsedFrom *ur
 	}
 
 	if !schemeMatch {
-		DebugLog("[DEBUG] Scheme mismatch: original=%s, pattern=%s", parsedOriginal.Scheme, parsedFrom.Scheme)
 		return false, originalURL
 	}
 
 	if parsedOriginal.Host != parsedFrom.Host {
-		DebugLog("[DEBUG] Host mismatch: %s != %s", parsedOriginal.Host, parsedFrom.Host)
 		return false, originalURL
 	}
 
 	fromPath := parsedFrom.Path
 	originalPath := parsedOriginal.Path
-
 	if originalPath == "" {
 		originalPath = "/"
 	}
@@ -335,15 +368,8 @@ func (p *MapRemoteProxy) matchAndReplace(parsedOriginal *url.URL, parsedFrom *ur
 	if strings.HasSuffix(fromPath, "*") {
 		fromPathPrefix := strings.TrimSuffix(fromPath, "*")
 
-		if fromPathPrefix == "" || fromPathPrefix == "/" {
-			DebugLog("[DEBUG] Root wildcard match - matches any path")
-		} else {
-			DebugLog("[DEBUG] Wildcard match - checking if %s starts with %s", originalPath, fromPathPrefix)
-		}
-
 		if fromPathPrefix == "" || fromPathPrefix == "/" || strings.HasPrefix(originalPath, fromPathPrefix) {
 			toPath := strings.TrimSuffix(toPattern, "*")
-
 			parsedTo, err := url.Parse(toPath)
 			if err != nil {
 				return false, originalURL
@@ -374,11 +400,9 @@ func (p *MapRemoteProxy) matchAndReplace(parsedOriginal *url.URL, parsedFrom *ur
 				Fragment: parsedOriginal.Fragment,
 			}
 
-			DebugLog("[DEBUG] ✓ Wildcard matched! New URL: %s", newURL.String())
 			return true, newURL.String()
 		}
 	} else {
-		DebugLog("[DEBUG] Exact match - checking if %s == %s", originalPath, fromPath)
 		if originalPath == fromPath || (originalPath == "/" && fromPath == "") || (originalPath == "" && fromPath == "/") {
 			parsedTo, err := url.Parse(toPattern)
 			if err != nil {
@@ -393,12 +417,10 @@ func (p *MapRemoteProxy) matchAndReplace(parsedOriginal *url.URL, parsedFrom *ur
 				Fragment: parsedOriginal.Fragment,
 			}
 
-			DebugLog("[DEBUG] ✓ Exact matched! New URL: %s", newURL.String())
 			return true, newURL.String()
 		}
 	}
 
-	DebugLog("[DEBUG] ✗ No match")
 	return false, originalURL
 }
 
@@ -479,7 +501,6 @@ func (p *MapRemoteProxy) tryRegexMatch(originalURL, fromPattern, toPattern strin
 
 	re, err := regexp.Compile(fromPattern)
 	if err != nil {
-		DebugLog("[DEBUG] Not a valid regex pattern: %v", err)
 		return false, originalURL
 	}
 
@@ -488,7 +509,6 @@ func (p *MapRemoteProxy) tryRegexMatch(originalURL, fromPattern, toPattern strin
 	}
 
 	newURL := re.ReplaceAllString(originalURL, toPattern)
-	DebugLog("[DEBUG] ✓ Regex matched! %s -> %s", originalURL, newURL)
 	return true, newURL
 }
 

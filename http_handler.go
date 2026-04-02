@@ -949,8 +949,9 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		DebugLog("[%s]%s[TUNNEL] Forwarding request for %s via tunnel '%s' to endpoint '%s'", clientIP, clientLocation, originalURL, tunnelName, endpointName)
 
 		reqPayload := &RequestPayload{
-			URL:  proxyReq.URL.String(),
-			Data: reqBytes,
+			URL:      proxyReq.URL.String(),
+			SourceIP: clientIP,
+			Data:     reqBytes,
 		}
 
 		bodyStream, headerBytes, err := p.tunnelManager.SendRequestStream(r.Context(), tunnelName, endpointName, reqPayload)

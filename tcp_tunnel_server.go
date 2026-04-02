@@ -55,16 +55,19 @@ type TCPEndpoint struct {
 	proxyConns      map[string]*tcpProxyConnection // connectionID -> proxy
 
 	// Control channels
-	sendChan  chan *TunnelMessage
-	done      chan struct{}
-	closeOnce sync.Once // Ensures done channel is closed only once
-	session   *smux.Session
+	sendChan    chan *TunnelMessage
+	done        chan struct{}
+	closeOnce   sync.Once // Ensures done channel is closed only once
+	session     *smux.Session
+	closeReason string
 }
 
 // tcpPendingRequest represents a pending HTTP request
 type tcpPendingRequest struct {
 	responseChan chan *TunnelMessage
 	pipeWriter   *io.PipeWriter
+	sourceIP     string
+	targetAddr   string
 }
 
 // tcpProxyConnection represents an active TCP proxy connection
@@ -316,13 +319,21 @@ func (s *TCPTunnelServer) handleConnection(conn net.Conn) {
 	go sendMirrorUpdate(s, endpoint)
 
 	// Start auto key rotation (APS initiates first key negotiation after a delay)
-	go func() {
-		time.Sleep(5 * time.Second) // Wait for connection to stabilize
-		endpoint.initiateKeyRotation()
-		endpoint.KeyManager.StartAutoRotation(func() error {
-			return endpoint.initiateKeyRotation()
+	go func(ep *TCPEndpoint) {
+		select {
+		case <-ep.done:
+			return
+		case <-time.After(5 * time.Second):
+			// Wait for connection to stabilize
+		}
+		if !ep.IsOnline() {
+			return
+		}
+		ep.initiateKeyRotation()
+		ep.KeyManager.StartAutoRotation(func() error {
+			return ep.initiateKeyRotation()
 		})
-	}()
+	}(endpoint)
 
 	// Wait for endpoint to disconnect
 	<-endpoint.done
@@ -387,42 +398,64 @@ func (ep *TCPEndpoint) SendJSON(msgType uint8, data interface{}) error {
 	return ep.Send(&TunnelMessage{Type: msgType, Payload: payload})
 }
 
-// Close closes the endpoint connection
-func (ep *TCPEndpoint) Close() {
+// CloseWithReason closes the endpoint connection and records the trigger reason once.
+func (ep *TCPEndpoint) CloseWithReason(reason string) {
+	if reason == "" {
+		reason = "unspecified"
+	}
+
 	// Use sync.Once to ensure done channel is closed exactly once
 	ep.closeOnce.Do(func() {
+		ep.closeReason = reason
+
+		ep.mu.Lock()
+		pendingCount := len(ep.pendingRequests)
+		proxyCount := len(ep.proxyConns)
+		ep.mu.Unlock()
+
+		log.Printf("[TCP TUNNEL] Closing endpoint '%s' (id=%s, remote=%s): %s (pending_requests=%d, proxy_conns=%d)",
+			ep.EndpointName, ep.ID, ep.RemoteAddr, ep.closeReason, pendingCount, proxyCount)
 		close(ep.done)
-	})
 
-	ep.Conn.Close()
-	if ep.session != nil {
-		ep.session.Close()
-	}
-
-	// Close all pending requests
-	ep.mu.Lock()
-	for _, pr := range ep.pendingRequests {
-		if pr.pipeWriter != nil {
-			pr.pipeWriter.CloseWithError(errors.New("endpoint disconnected"))
+		if ep.KeyManager != nil {
+			ep.KeyManager.StopAutoRotation()
 		}
-		close(pr.responseChan)
-	}
-	ep.pendingRequests = make(map[string]*tcpPendingRequest)
 
-	// Close all proxy connections
-	for _, pc := range ep.proxyConns {
-		pc.mu.Lock()
-		if !pc.closed {
-			pc.closed = true
-			close(pc.done)
-			if pc.clientConn != nil {
-				pc.clientConn.Close()
+		ep.Conn.Close()
+		if ep.session != nil {
+			ep.session.Close()
+		}
+
+		// Close all pending requests
+		ep.mu.Lock()
+		for _, pr := range ep.pendingRequests {
+			if pr.pipeWriter != nil {
+				pr.pipeWriter.CloseWithError(errors.New("endpoint disconnected"))
 			}
+			close(pr.responseChan)
 		}
-		pc.mu.Unlock()
-	}
-	ep.proxyConns = make(map[string]*tcpProxyConnection)
-	ep.mu.Unlock()
+		ep.pendingRequests = make(map[string]*tcpPendingRequest)
+
+		// Close all proxy connections
+		for _, pc := range ep.proxyConns {
+			pc.mu.Lock()
+			if !pc.closed {
+				pc.closed = true
+				close(pc.done)
+				if pc.clientConn != nil {
+					pc.clientConn.Close()
+				}
+			}
+			pc.mu.Unlock()
+		}
+		ep.proxyConns = make(map[string]*tcpProxyConnection)
+		ep.mu.Unlock()
+	})
+}
+
+// Close closes the endpoint connection with a default reason.
+func (ep *TCPEndpoint) Close() {
+	ep.CloseWithReason("Close() called")
 }
 
 // IsOnline returns true if the endpoint is online
@@ -444,8 +477,9 @@ func (ep *TCPEndpoint) writeLoop() {
 		select {
 		case msg := <-ep.sendChan:
 			if err := ep.Conn.WriteMessage(msg); err != nil {
-				DebugLog("[TCP TUNNEL] Write error to endpoint %s: %v", ep.ID, err)
-				ep.Close()
+				log.Printf("[TCP TUNNEL] Write error to endpoint '%s' (id=%s, remote=%s): %v",
+					ep.EndpointName, ep.ID, ep.RemoteAddr, err)
+				ep.CloseWithReason("writeLoop write error")
 				return
 			}
 		case <-heartbeatTicker.C:
@@ -459,16 +493,20 @@ func (ep *TCPEndpoint) writeLoop() {
 
 // readLoop reads messages from the endpoint
 func (ep *TCPEndpoint) readLoop(server *TCPTunnelServer) {
-	defer ep.Close()
-
 	for {
 		// Set read deadline to detect dead connections
 		// Client sends heartbeat every 30s, use 120s for large transfers
 		ep.Conn.UnderlyingConn().SetReadDeadline(time.Now().Add(120 * time.Second))
 		msg, err := ep.Conn.ReadMessage()
 		if err != nil {
-			if err != io.EOF {
-				DebugLog("[TCP TUNNEL] Read error from endpoint %s: %v", ep.ID, err)
+			if err == io.EOF {
+				log.Printf("[TCP TUNNEL] Endpoint '%s' (id=%s, remote=%s) closed control stream (EOF)",
+					ep.EndpointName, ep.ID, ep.RemoteAddr)
+				ep.CloseWithReason("readLoop EOF from endpoint")
+			} else {
+				log.Printf("[TCP TUNNEL] Read error from endpoint '%s' (id=%s, remote=%s): %v",
+					ep.EndpointName, ep.ID, ep.RemoteAddr, err)
+				ep.CloseWithReason("readLoop read error")
 			}
 			return
 		}
@@ -509,7 +547,7 @@ func (ep *TCPEndpoint) readLoop(server *TCPTunnelServer) {
 
 // handleResponseMessage handles response messages
 func (ep *TCPEndpoint) handleResponseMessage(msg *TunnelMessage) {
-	DebugLog("[TCP TUNNEL] Endpoint %s received response message type %d", ep.ID, msg.Type)
+	basePrefix := buildTCPTunnelRoutePrefix("", ep.EndpointName, ep.ID, "")
 
 	// Parse based on message type
 	var requestID string
@@ -517,48 +555,106 @@ func (ep *TCPEndpoint) handleResponseMessage(msg *TunnelMessage) {
 	case MsgTypeResponseHeader:
 		var payload ResponseHeaderPayloadTCP
 		if err := msg.ParseJSON(&payload); err != nil {
-			DebugLog("[TCP TUNNEL] Invalid response header: %v", err)
+			DebugLog("%s [TCP TUNNEL] Invalid response header: %v", basePrefix, err)
 			return
 		}
 		requestID = payload.ID
 	case MsgTypeResponseChunk:
 		var payload ResponseChunkPayloadTCP
 		if err := msg.ParseJSON(&payload); err != nil {
-			DebugLog("[TCP TUNNEL] Invalid response chunk: %v", err)
+			DebugLog("%s [TCP TUNNEL] Invalid response chunk: %v", basePrefix, err)
 			return
 		}
 		requestID = payload.ID
 	case MsgTypeResponseEnd:
 		var payload ResponseEndPayloadTCP
 		if err := msg.ParseJSON(&payload); err != nil {
-			DebugLog("[TCP TUNNEL] Invalid response end: %v", err)
+			DebugLog("%s [TCP TUNNEL] Invalid response end: %v", basePrefix, err)
 			return
 		}
 		requestID = payload.ID
 	}
 
-	DebugLog("[TCP TUNNEL] Routing response message type %d for request %s", msg.Type, requestID)
-
 	ep.mu.Lock()
 	pending, ok := ep.pendingRequests[requestID]
 	ep.mu.Unlock()
 
+	logPrefix := basePrefix
+	scopeSourceIP := ""
+	scopeTargetAddr := ""
+	if ok {
+		logPrefix = buildTCPTunnelRoutePrefix(pending.sourceIP, ep.EndpointName, ep.ID, pending.targetAddr)
+		scopeSourceIP = pending.sourceIP
+		scopeTargetAddr = pending.targetAddr
+	}
+
+	debugLogTCPTunnelThrottled(
+		scopeSourceIP,
+		ep.EndpointName,
+		ep.ID,
+		scopeTargetAddr,
+		tcpTunnelEventKey("endpoint_received_response_type", msg.Type),
+		"%s [TCP TUNNEL] Endpoint %s received response message type %d",
+		logPrefix,
+		ep.ID,
+		msg.Type,
+	)
+	debugLogTCPTunnelThrottled(
+		scopeSourceIP,
+		ep.EndpointName,
+		ep.ID,
+		scopeTargetAddr,
+		tcpTunnelEventKey("routing_response_type", msg.Type),
+		"%s [TCP TUNNEL] Routing response message type %d for request %s",
+		logPrefix,
+		msg.Type,
+		requestID,
+	)
+
 	if !ok {
-		DebugLog("[TCP TUNNEL] WARNING: No pending request found for %s, message dropped", requestID)
+		debugLogTCPTunnelThrottled(
+			scopeSourceIP,
+			ep.EndpointName,
+			ep.ID,
+			scopeTargetAddr,
+			"no_pending_request",
+			"%s [TCP TUNNEL] WARNING: No pending request found for %s, message dropped",
+			logPrefix,
+			requestID,
+		)
 		return
 	}
 
 	defer func() {
 		if r := recover(); r != nil {
-			DebugLog("[TCP TUNNEL] Recovered from panic in handleResponseMessage (likely closed channel): %v", r)
+			DebugLog("%s [TCP TUNNEL] Recovered from panic in handleResponseMessage (likely closed channel): %v", logPrefix, r)
 		}
 	}()
 
 	select {
 	case pending.responseChan <- msg:
-		DebugLog("[TCP TUNNEL] Successfully routed message type %d for request %s", msg.Type, requestID)
+		debugLogTCPTunnelThrottled(
+			scopeSourceIP,
+			ep.EndpointName,
+			ep.ID,
+			scopeTargetAddr,
+			tcpTunnelEventKey("successfully_routed_response_type", msg.Type),
+			"%s [TCP TUNNEL] Successfully routed message type %d for request %s",
+			logPrefix,
+			msg.Type,
+			requestID,
+		)
 	default:
-		DebugLog("[TCP TUNNEL] Response channel full for request %s", requestID)
+		debugLogTCPTunnelThrottled(
+			scopeSourceIP,
+			ep.EndpointName,
+			ep.ID,
+			scopeTargetAddr,
+			"response_channel_full",
+			"%s [TCP TUNNEL] Response channel full for request %s",
+			logPrefix,
+			requestID,
+		)
 	}
 }
 
@@ -934,6 +1030,18 @@ func (ep *TCPEndpoint) handlePortForwardCloseRoute(server *TCPTunnelServer, msg 
 // initiateKeyRotation initiates a new key rotation by sending a key request
 func (ep *TCPEndpoint) initiateKeyRotation() error {
 	if ep.KeyManager == nil {
+		return nil
+	}
+
+	// Avoid rotating keys while requests/proxy streams are active.
+	// This keeps control-plane key negotiation away from peak data transfer windows.
+	ep.mu.Lock()
+	pendingReqs := len(ep.pendingRequests)
+	activeProxyConns := len(ep.proxyConns)
+	ep.mu.Unlock()
+	if pendingReqs > 0 || activeProxyConns > 0 {
+		log.Printf("[KEY] Deferring key rotation for endpoint %s (pending_requests=%d, proxy_conns=%d)",
+			ep.EndpointName, pendingReqs, activeProxyConns)
 		return nil
 	}
 

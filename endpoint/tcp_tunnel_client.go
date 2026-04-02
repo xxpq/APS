@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/xtaci/smux"
@@ -23,8 +24,9 @@ import (
 
 // Local buffer pools for the endpoint client
 var (
-	mediumBufPool = sync.Pool{New: func() any { return make([]byte, 64*1024) }}
-	largeBufPool  = sync.Pool{New: func() any { return make([]byte, 256*1024) }}
+	mediumBufPool        = sync.Pool{New: func() any { return make([]byte, 64*1024) }}
+	largeBufPool         = sync.Pool{New: func() any { return make([]byte, 256*1024) }}
+	activeTunnelRequests int64
 )
 
 func GetMediumBuffer() []byte { return mediumBufPool.Get().([]byte) }
@@ -76,6 +78,7 @@ const (
 
 const headerSize = 5
 const maxMessageSize = 10 * 1024 * 1024
+const connectHandshakeTimeout = 1200 * time.Millisecond
 
 // TunnelMessage represents a message in the TCP tunnel protocol
 type TunnelMessage struct {
@@ -222,8 +225,20 @@ func (tc *TunnelConn) WriteMessage(msg *TunnelMessage) error {
 	frame[4] = msg.Type
 	copy(frame[headerSize:], msg.Payload)
 
-	_, err := tc.conn.Write(frame)
-	return err
+	totalWritten := 0
+	for totalWritten < len(frame) {
+		n, err := tc.conn.Write(frame[totalWritten:])
+		if n > 0 {
+			totalWritten += n
+		}
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return io.ErrShortWrite
+		}
+	}
+	return nil
 }
 
 // SendJSON marshals and sends
@@ -243,28 +258,127 @@ func (tc *TunnelConn) Close() error {
 	return tc.conn.Close()
 }
 
+func closeTunnelConnWithReason(tc *TunnelConn, reason string) {
+	if tc == nil {
+		return
+	}
+	if err := tc.Close(); err != nil {
+		log.Printf("[CONN] Close requested (%s), close error: %v", reason, err)
+		return
+	}
+	DebugLog("[CONN] Close requested (%s)", reason)
+}
+
 // ParseJSON unmarshals payload
 func (msg *TunnelMessage) ParseJSON(v interface{}) error {
 	return json.Unmarshal(msg.Payload, v)
 }
 
+type prefixedConn struct {
+	net.Conn
+	prefix []byte
+}
+
+func (c *prefixedConn) Read(b []byte) (int, error) {
+	if len(c.prefix) > 0 {
+		n := copy(b, c.prefix)
+		c.prefix = c.prefix[n:]
+		return n, nil
+	}
+	return c.Conn.Read(b)
+}
+
+func connectWithHTTPTunnelHandshake(conn net.Conn, serverAddress string) (net.Conn, error) {
+	handshakeReq := fmt.Sprintf(
+		"CONNECT /.tunnel HTTP/1.1\r\nHost: %s\r\nUser-Agent: aps-endpoint/%s\r\nConnection: keep-alive\r\nProxy-Connection: keep-alive\r\n\r\n",
+		serverAddress,
+		endpointVersion,
+	)
+
+	if err := conn.SetDeadline(time.Now().Add(connectHandshakeTimeout)); err != nil {
+		return nil, err
+	}
+	defer conn.SetDeadline(time.Time{})
+
+	if _, err := io.WriteString(conn, handshakeReq); err != nil {
+		return nil, err
+	}
+
+	reader := bufio.NewReader(conn)
+	req := &http.Request{Method: http.MethodConnect}
+	resp, err := http.ReadResponse(reader, req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
+		return nil, fmt.Errorf("unexpected status %d: %s", resp.StatusCode, strings.TrimSpace(string(bodyBytes)))
+	}
+
+	if _, err := io.Copy(io.Discard, resp.Body); err != nil {
+		return nil, err
+	}
+
+	buffered := reader.Buffered()
+	if buffered == 0 {
+		return conn, nil
+	}
+	prefixBytes, err := reader.Peek(buffered)
+	if err != nil {
+		return nil, err
+	}
+	prefix := make([]byte, len(prefixBytes))
+	copy(prefix, prefixBytes)
+	return &prefixedConn{Conn: conn, prefix: prefix}, nil
+}
+
+func dialTunnelServer(serverAddress string) (net.Conn, error) {
+	conn, err := net.DialTimeout("tcp", serverAddress, 30*time.Second)
+	if err != nil {
+		return nil, err
+	}
+
+	upgradedConn, err := connectWithHTTPTunnelHandshake(conn, serverAddress)
+	if err == nil {
+		DebugLog("[CONN] CONNECT /.tunnel handshake succeeded")
+		return upgradedConn, nil
+	}
+
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		// APS already accepted CONNECT in some network paths, but the response line can
+		// be delayed/dropped. Continue on the same socket and attempt tunnel registration.
+		DebugLog("[CONN] CONNECT /.tunnel handshake timed out waiting for response (%v); assuming upgrade and continuing on same connection", err)
+		_ = conn.SetDeadline(time.Time{})
+		return conn, nil
+	}
+
+	DebugLog("[CONN] CONNECT /.tunnel handshake failed (%v), falling back to raw TCP tunnel", err)
+	conn.Close()
+
+	return net.DialTimeout("tcp", serverAddress, 30*time.Second)
+}
+
 // runTCPTunnelSession connects to APS via TCP tunnel protocol
 func runTCPTunnelSession(ctx context.Context) bool {
-	log.Printf("Connecting to TCP tunnel server at %s", *serverAddr)
+	DebugLog("Connecting to TCP tunnel server at %s", *serverAddr)
+	DebugLog("[CONN] Tunnel transport mode: CONNECT /.tunnel first, fallback to raw TCP")
 
 	// 如果serverAddr不包含端口，则添加默认端口
 	if !strings.Contains(*serverAddr, ":") {
 		*serverAddr += ":80"
 	}
 
-	conn, err := net.DialTimeout("tcp", *serverAddr, 30*time.Second)
+	conn, err := dialTunnelServer(*serverAddr)
 	if err != nil {
 		log.Printf("Failed to connect: %v", err)
 		return true
 	}
 
 	tc := NewTunnelConn(conn)
-	defer tc.Close()
+	defer closeTunnelConnWithReason(tc, "runTCPTunnelSession exiting")
 
 	// Optimize TCP connection for better throughput
 	if tcpConn, ok := conn.(*net.TCPConn); ok {
@@ -338,7 +452,7 @@ func runTCPTunnelSession(ctx context.Context) bool {
 		log.Printf("Failed to open control stream: %v", err)
 		return false
 	}
-	log.Printf("Control stream established")
+	DebugLog("Control stream established")
 
 	// Use control stream for TunnelConn
 	tc = NewTunnelConn(controlStream)
@@ -359,6 +473,7 @@ func runTCPTunnelSession(ctx context.Context) bool {
 				if err != io.EOF {
 					log.Printf("Read error: %v", err)
 				}
+				DebugLog("[CONN] Control read loop exiting, reconnect required")
 				return
 			}
 			go handleTCPMessage(tc, msg, keyManager)
@@ -367,7 +482,17 @@ func runTCPTunnelSession(ctx context.Context) bool {
 
 	// Start auto key rotation (endpoint can also initiate)
 	go func() {
-		time.Sleep(5 * time.Second) // Wait for connection to stabilize
+		select {
+		case <-done:
+			return
+		case <-time.After(5 * time.Second):
+			// Wait for connection to stabilize
+		}
+		select {
+		case <-done:
+			return
+		default:
+		}
 		keyManager.StartAutoRotation(func() error {
 			return initiateKeyRotation(tc, keyManager)
 		})
@@ -398,6 +523,7 @@ func handleTCPMessage(tc *TunnelConn, msg *TunnelMessage, km *SessionKeyManager)
 		handleTCPRequest(tc, msg, km)
 	case MsgTypeProxyConnect:
 		handleTCPProxyConnect(tc, msg)
+	case MsgTypeProxyDataBinary:
 		handleTCPProxyDataBinary(msg)
 	case MsgTypeProxyClose:
 		handleTCPProxyClose(msg)
@@ -429,6 +555,9 @@ func handleTCPMessage(tc *TunnelConn, msg *TunnelMessage, km *SessionKeyManager)
 
 // handleTCPRequest handles HTTP request via TCP tunnel
 func handleTCPRequest(tc *TunnelConn, msg *TunnelMessage, km *SessionKeyManager) {
+	atomic.AddInt64(&activeTunnelRequests, 1)
+	defer atomic.AddInt64(&activeTunnelRequests, -1)
+
 	var reqPayload RequestPayloadTCP
 	if err := msg.ParseJSON(&reqPayload); err != nil {
 		log.Printf("Failed to parse request: %v", err)
@@ -436,9 +565,9 @@ func handleTCPRequest(tc *TunnelConn, msg *TunnelMessage, km *SessionKeyManager)
 	}
 
 	requestID := reqPayload.ID
-	if *debug {
-		log.Printf("[DEBUG %s] Handling TCP request, URL: %s", requestID, reqPayload.URL)
-	}
+	startAt := time.Now()
+	DebugLog("[REQ %s] Started: %s", requestID, reqPayload.URL)
+	DebugLog("[DEBUG %s] Handling TCP request, URL: %s", requestID, reqPayload.URL)
 
 	// Use KeyManager.Decrypt instead of password-based decrypt
 	// This will try both currentKey and previousKey during grace period
@@ -473,9 +602,7 @@ func handleTCPRequest(tc *TunnelConn, msg *TunnelMessage, km *SessionKeyManager)
 	req.URL = targetURL
 	req.RequestURI = "" // RequestURI must be empty for client requests
 
-	if *debug {
-		log.Printf("[DEBUG %s] Sending request to backend: %s", requestID, req.URL.String())
-	}
+	DebugLog("[DEBUG %s] Sending request to backend: %s", requestID, req.URL.String())
 
 	resp, err := sharedClient.Do(req)
 	if err != nil {
@@ -485,9 +612,7 @@ func handleTCPRequest(tc *TunnelConn, msg *TunnelMessage, km *SessionKeyManager)
 	}
 	defer resp.Body.Close()
 
-	if *debug {
-		log.Printf("[DEBUG %s] Got response: %d %s", requestID, resp.StatusCode, resp.Status)
-	}
+	DebugLog("[DEBUG %s] Got response: %d %s", requestID, resp.StatusCode, resp.Status)
 
 	// Send response header
 	headerBytes, err := httputil.DumpResponse(resp, false)
@@ -512,9 +637,7 @@ func handleTCPRequest(tc *TunnelConn, msg *TunnelMessage, km *SessionKeyManager)
 		return
 	}
 
-	if *debug {
-		log.Printf("[DEBUG %s] Sent response header", requestID)
-	}
+	DebugLog("[DEBUG %s] Sent response header", requestID)
 
 	// Stream body
 	buf := GetLargeBuffer()
@@ -553,9 +676,8 @@ func handleTCPRequest(tc *TunnelConn, msg *TunnelMessage, km *SessionKeyManager)
 		return
 	}
 
-	if *debug {
-		log.Printf("[DEBUG %s] Request completed successfully", requestID)
-	}
+	DebugLog("[REQ %s] Completed in %v", requestID, time.Since(startAt))
+	DebugLog("[DEBUG %s] Request completed successfully", requestID)
 }
 
 // handleTCPProxyConnect handles TCP proxy connect via TCP tunnel
@@ -568,7 +690,7 @@ func handleTCPProxyConnect(tc *TunnelConn, msg *TunnelMessage) {
 
 	connID := payload.ConnectionID
 	address := net.JoinHostPort(payload.Host, fmt.Sprintf("%d", payload.Port))
-	log.Printf("[PROXY %s] Connecting to %s (client: %s)", connID, address, payload.ClientIP)
+	DebugLog("[PROXY %s] Connecting to %s (client: %s)", connID, address, payload.ClientIP)
 
 	// Connect to target
 	conn, err := net.DialTimeout("tcp", address, 30*time.Second)
@@ -591,19 +713,19 @@ func handleTCPProxyConnect(tc *TunnelConn, msg *TunnelMessage) {
 		ack.Error = err.Error()
 		log.Printf("[PROXY %s] Connection failed: %v", connID, err)
 	} else {
-		log.Printf("[PROXY %s] TCP connection established to %s", connID, address)
+		DebugLog("[PROXY %s] TCP connection established to %s", connID, address)
 		proxyConnections.Store(connID, conn)
 
 		if payload.StreamMode {
-			log.Printf("[PROXY %s] Stream mode requested, waiting for switch signal", connID)
+			DebugLog("[PROXY %s] Stream mode requested, waiting for switch signal", connID)
 			// Do not start read loop, wait for MsgTypeProxyStreamMode
 		} else {
-			log.Printf("[PROXY %s] Starting read loop", connID)
+			DebugLog("[PROXY %s] Starting read loop", connID)
 			go tcpProxyReadLoop(tc, connID, conn)
 		}
 	}
 
-	log.Printf("[PROXY %s] Sending ack (success=%v)", connID, ack.Success)
+	DebugLog("[PROXY %s] Sending ack (success=%v)", connID, ack.Success)
 	tc.SendJSON(MsgTypeProxyConnectAck, ack)
 }
 
@@ -645,7 +767,7 @@ func handleTCPProxyClose(msg *TunnelMessage) {
 		return
 	}
 
-	log.Printf("[PROXY %s] Closing: %s", payload.ConnectionID, payload.Reason)
+	DebugLog("[PROXY %s] Closing: %s", payload.ConnectionID, payload.Reason)
 	if connVal, ok := proxyConnections.Load(payload.ConnectionID); ok {
 		connVal.(net.Conn).Close()
 		proxyConnections.Delete(payload.ConnectionID)
@@ -654,12 +776,12 @@ func handleTCPProxyClose(msg *TunnelMessage) {
 
 // tcpProxyReadLoop reads from target and sends to APS
 func tcpProxyReadLoop(tc *TunnelConn, connID string, conn net.Conn) {
-	log.Printf("[PROXY %s] Read loop started", connID)
+	DebugLog("[PROXY %s] Read loop started", connID)
 	defer func() {
-		log.Printf("[PROXY %s] Read loop ending, closing connection", connID)
+		DebugLog("[PROXY %s] Read loop ending, closing connection", connID)
 		conn.Close()
 		proxyConnections.Delete(connID)
-		log.Printf("[PROXY %s] Sending close message to APS", connID)
+		DebugLog("[PROXY %s] Sending close message to APS", connID)
 		tc.SendJSON(MsgTypeProxyClose, ProxyClosePayload{
 			ConnectionID: connID,
 			Reason:       "connection closed",
@@ -671,7 +793,7 @@ func tcpProxyReadLoop(tc *TunnelConn, connID string, conn net.Conn) {
 	for {
 		n, err := conn.Read(buf)
 		if n > 0 {
-			log.Printf("[PROXY %s] Read %d bytes from backend, sending to APS", connID, n)
+			DebugLog("[PROXY %s] Read %d bytes from backend, sending to APS", connID, n)
 
 			// Send data to APS using binary format
 			connIDBytes := []byte(connID)
@@ -692,7 +814,7 @@ func tcpProxyReadLoop(tc *TunnelConn, connID string, conn net.Conn) {
 			if err != io.EOF {
 				log.Printf("[PROXY %s] Read error: %v", connID, err)
 			} else {
-				log.Printf("[PROXY %s] Connection closed by backend (EOF)", connID)
+				DebugLog("[PROXY %s] Connection closed by backend (EOF)", connID)
 			}
 			return
 		}
@@ -717,7 +839,7 @@ type ConfigUpdatePayload struct {
 
 // MirrorUpdatePayload is sent by APS to inform endpoint of mirror addresses
 type MirrorUpdatePayload struct {
-	Mirrors []string `json:"mirrors\"` // Format: ["addr:port", "cid@addr:port", ...]
+	Mirrors []string `json:"mirrors"` // Format: ["addr:port", "cid@addr:port", ...]
 }
 
 // handleConfigUpdate handles configuration update pushed from APS
@@ -728,20 +850,22 @@ func handleConfigUpdate(tc *TunnelConn, msg *TunnelMessage) {
 		return
 	}
 
-	log.Printf("[CONFIG] Received config update from APS")
+	DebugLog("[CONFIG] Received config update from APS")
 
 	// Update runtime config
 	runtimeConfigMu.Lock()
 	if runtimeConfig == nil {
 		runtimeConfig = &EndpointRuntimeConfig{}
 	}
+	oldTunnel := runtimeConfig.TunnelName
+	oldEndpoint := runtimeConfig.EndpointName
 
 	// Check for critical changes that require reconnection
 	shouldReconnect := false
-	if payload.TunnelName != "" && payload.TunnelName != runtimeConfig.TunnelName {
+	if payload.TunnelName != "" && payload.TunnelName != oldTunnel {
 		shouldReconnect = true
 	}
-	if payload.EndpointName != "" && payload.EndpointName != runtimeConfig.EndpointName {
+	if payload.EndpointName != "" && payload.EndpointName != oldEndpoint {
 		shouldReconnect = true
 	}
 
@@ -762,12 +886,13 @@ func handleConfigUpdate(tc *TunnelConn, msg *TunnelMessage) {
 	runtimeConfigMu.Unlock()
 
 	if shouldReconnect {
-		log.Printf("[CONFIG] Critical configuration changed (tunnel/endpoint name), reconnecting...")
-		tc.Close()
+		log.Printf("[CONFIG] Critical configuration changed (runtime tunnel=%s endpoint=%s -> update tunnel=%s endpoint=%s), reconnecting...",
+			oldTunnel, oldEndpoint, payload.TunnelName, payload.EndpointName)
+		closeTunnelConnWithReason(tc, "config update requires reconnect")
 		return
 	}
 
-	log.Printf("[CONFIG] Updated runtime config: tunnel=%s, endpoint=%s, portMappings=%d",
+	DebugLog("[CONFIG] Updated runtime config: tunnel=%s, endpoint=%s, portMappings=%d",
 		payload.TunnelName, payload.EndpointName, len(payload.PortMappings))
 }
 
@@ -784,7 +909,7 @@ func handleMirrorUpdate(tc *TunnelConn, msg *TunnelMessage) {
 		return
 	}
 
-	log.Printf("[MIRROR] Received %d mirror address(es) from APS", len(payload.Mirrors))
+	DebugLog("[MIRROR] Received %d mirror address(es) from APS", len(payload.Mirrors))
 
 	// Process each mirror address
 	for _, mirror := range payload.Mirrors {
@@ -793,18 +918,23 @@ func handleMirrorUpdate(tc *TunnelConn, msg *TunnelMessage) {
 
 		// Add as dynamic server if not already connected
 		if connectionManager.AddDynamicServer(cfg) {
-			log.Printf("[MIRROR] Starting connection to new mirror: %s (cid: %s)", cfg.Address, cfg.ConfigID)
+			DebugLog("[MIRROR] Starting connection to new mirror: %s (cid: %s)", cfg.Address, cfg.ConfigID)
 
 			// Start connection in a new goroutine
 			go runServerConnection(context.Background(), cfg.Address)
 		} else {
-			log.Printf("[MIRROR] Already connected to mirror: %s", cfg.Address)
+			DebugLog("[MIRROR] Already connected to mirror: %s", cfg.Address)
 		}
 	}
 }
 
 // initiateKeyRotation initiates a new key rotation by sending a key request
 func initiateKeyRotation(tc *TunnelConn, km *SessionKeyManager) error {
+	if n := atomic.LoadInt64(&activeTunnelRequests); n > 0 {
+		DebugLog("[KEY] Deferring key rotation while %d request(s) are active", n)
+		return nil
+	}
+
 	req, err := km.GenerateKeyRequest()
 	if err != nil {
 		log.Printf("[KEY] Failed to generate key request: %v", err)
@@ -822,7 +952,7 @@ func initiateKeyRotation(tc *TunnelConn, km *SessionKeyManager) error {
 		return err
 	}
 
-	log.Printf("[KEY] Key rotation initiated")
+	DebugLog("[KEY] Key rotation initiated")
 	return nil
 }
 
@@ -851,7 +981,7 @@ func handleKeyRequest(tc *TunnelConn, msg *TunnelMessage, km *SessionKeyManager)
 		return
 	}
 
-	log.Printf("[KEY] Key response sent")
+	DebugLog("[KEY] Key response sent")
 }
 
 // handleKeyResponse handles a key response and sends confirmation
@@ -885,7 +1015,7 @@ func handleKeyResponse(tc *TunnelConn, msg *TunnelMessage, km *SessionKeyManager
 		return
 	}
 
-	log.Printf("[KEY] Key rotation completed (initiator)")
+	DebugLog("[KEY] Key rotation completed (initiator)")
 }
 
 // handleKeyConfirm handles key confirmation and activates the new key
@@ -901,7 +1031,7 @@ func handleKeyConfirm(tc *TunnelConn, msg *TunnelMessage, km *SessionKeyManager)
 		return
 	}
 
-	log.Printf("[KEY] Key rotation completed (responder)")
+	DebugLog("[KEY] Key rotation completed (responder)")
 }
 
 // acceptStreams handles incoming streams from SMUX session
@@ -941,7 +1071,7 @@ func handleIncomingStream(stream *smux.Stream, controlTc *TunnelConn) {
 
 	connID := payload.ConnectionID
 	address := net.JoinHostPort(payload.Host, fmt.Sprintf("%d", payload.Port))
-	log.Printf("[PROXY %s] Connecting to %s (client: %s)", connID, address, payload.ClientIP)
+	DebugLog("[PROXY %s] Connecting to %s (client: %s)", connID, address, payload.ClientIP)
 
 	// Dial backend
 	backendConn, err := net.DialTimeout("tcp", address, 30*time.Second)
@@ -954,7 +1084,7 @@ func handleIncomingStream(stream *smux.Stream, controlTc *TunnelConn) {
 		ack.Error = err.Error()
 		log.Printf("[PROXY %s] Connection failed: %v", connID, err)
 	} else {
-		log.Printf("[PROXY %s] TCP connection established to %s", connID, address)
+		DebugLog("[PROXY %s] TCP connection established to %s", connID, address)
 	}
 
 	// Send Ack on control channel
@@ -973,7 +1103,7 @@ func handleIncomingStream(stream *smux.Stream, controlTc *TunnelConn) {
 	defer backendConn.Close()
 
 	// Bidirectional copy
-	log.Printf("[PROXY %s] Starting stream copy", connID)
+	DebugLog("[PROXY %s] Starting stream copy", connID)
 	var wg sync.WaitGroup
 	wg.Add(2)
 
@@ -988,5 +1118,5 @@ func handleIncomingStream(stream *smux.Stream, controlTc *TunnelConn) {
 	}()
 
 	wg.Wait()
-	log.Printf("[PROXY %s] Stream copy finished", connID)
+	DebugLog("[PROXY %s] Stream copy finished", connID)
 }

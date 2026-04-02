@@ -474,7 +474,7 @@ func runServerConnection(ctx context.Context, serverAddress string) {
 	for {
 		select {
 		case <-ctx.Done():
-			log.Printf("[%s] Context cancelled, shutting down.", serverAddress)
+			DebugLog("[%s] Context cancelled, shutting down.", serverAddress)
 			return
 		default:
 			// Check if we should retry
@@ -518,16 +518,16 @@ func runServerConnection(ctx context.Context, serverAddress string) {
 
 			// Re-fetch configuration if using CID mode (ensures fresh config after any disruption)
 			if cfg.ConfigID != "" {
-				log.Printf("[%s] Re-fetching configuration before reconnect", serverAddress)
+				DebugLog("[%s] Re-fetching configuration before reconnect", serverAddress)
 				newConfig, err := FetchConfigFromAPS(cfg.Address, cfg.ConfigID)
 				if err == nil {
 					runtimeConfigMu.Lock()
 					runtimeConfig = newConfig
 					runtimeConfigMu.Unlock()
-					log.Printf("[%s] Configuration refreshed: tunnel=%s, endpoint=%s",
+					DebugLog("[%s] Configuration refreshed: tunnel=%s, endpoint=%s",
 						serverAddress, newConfig.TunnelName, newConfig.EndpointName)
 				} else {
-					log.Printf("[%s] Failed to refresh config (will use existing): %v", serverAddress, err)
+					DebugLog("[%s] Failed to refresh config (will use existing): %v", serverAddress, err)
 				}
 			}
 

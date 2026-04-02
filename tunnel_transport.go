@@ -62,8 +62,9 @@ func (t *TunnelRoundTripper) roundTripViaTunnel(req *http.Request, mapping *Mapp
 
 	// Prepare payload for the tunnel manager
 	reqPayload := &RequestPayload{
-		URL:  req.URL.String(),
-		Data: reqBytes,
+		URL:      req.URL.String(),
+		SourceIP: extractIPFromAddr(req.RemoteAddr),
+		Data:     reqBytes,
 	}
 
 	// Send the request via the tunnel manager's gRPC stream

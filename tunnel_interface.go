@@ -9,12 +9,13 @@ import (
 
 // RequestPayload represents an HTTP request payload
 type RequestPayload struct {
-	ID      string
-	Method  string
-	URL     string
-	Header  map[string][]string
-	Data    []byte
-	Timeout time.Duration
+	ID       string
+	Method   string
+	URL      string
+	SourceIP string
+	Header   map[string][]string
+	Data     []byte
+	Timeout  time.Duration
 }
 
 // EndpointInfo contains information about a connected endpoint

@@ -1,0 +1,3588 @@
+
+    // 简易状态
+    let autoRefresh = true;
+    let authToken = ""; // Authorization: Bearer
+    let currentTab = "tab-stats"; // 当前激活的标签页
+    const statsUrl = "/.api/stats";
+    const configUrl = "/.api/config";
+    const loginUrl = "/.api/login";
+    const logoutUrl = "/.api/logout";
+    const rulesUrl = "/.api/rules";
+    const serversUrl = "/.api/servers";
+    const tunnelsUrl = "/.api/tunnels";
+    const proxiesUrl = "/.api/proxies";
+    const usersUrl = "/.api/users";
+    const firewallsUrl = "/.api/firewalls";
+    const authProvidersUrl = "/.api/auth_providers";
+    const logsUrl = "/.api/logs";
+    const rateLimitRulesUrl = "/.api/rate_limit_rules";
+    const onlineEndpointsUrl = "/.api/online_endpoints";
+
+    // Cookie 工具函数
+    function setCookie(name, value, days) {
+      let expires = "";
+      if (days) {
+        const date = new Date();
+        date.setTime(date.getTime() + (days * 24 * 60 * 60 * 1000));
+        expires = "; expires=" + date.toUTCString();
+      }
+      document.cookie = name + "=" + (value || "") + expires + "; path=/; SameSite=Strict";
+    }
+
+    function getCookie(name) {
+      const nameEQ = name + "=";
+      const ca = document.cookie.split(';');
+      for (let i = 0; i < ca.length; i++) {
+        let c = ca[i];
+        while (c.charAt(0) === ' ') c = c.substring(1, c.length);
+        if (c.indexOf(nameEQ) === 0) return c.substring(nameEQ.length, c.length);
+      }
+      return null;
+    }
+
+    function deleteCookie(name) {
+      document.cookie = name + '=; Max-Age=-99999999; path=/; SameSite=Strict';
+    }
+
+    // Wait for DOM to be ready
+    document.addEventListener("DOMContentLoaded", function() {
+      
+      // Tab 切换
+      document.querySelectorAll(".bx--header__menu-item").forEach(a => {
+        a.addEventListener("click", (e) => {
+          e.preventDefault();
+          const tabId = a.getAttribute("data-tab");
+          document.querySelectorAll("section.bx--tab-content").forEach(s => s.classList.add("hidden"));
+          document.getElementById(tabId).classList.remove("hidden");
+        });
+      });
+
+    // Helper functions
+    function closeSidebar() {
+      var sidebar = document.getElementById("mobile-sidebar");
+      var overlay = document.getElementById("sidebar-overlay");
+      if (sidebar) sidebar.classList.remove("open");
+      if (overlay) overlay.classList.remove("show");
+    }
+    
+    // 切换tab并自动加载数据
+    function switchTab(tabId) {
+      // 更新当前tab
+      currentTab = tabId;
+      
+      // 隐藏所有tab内容
+      document.querySelectorAll(".bx--tab-content").forEach(function(t) { 
+        t.classList.add("hidden"); 
+      });
+      var target = document.getElementById(tabId);
+      if (target) target.classList.remove("hidden");
+      
+      // 更新桌面端导航active状态
+      document.querySelectorAll(".bx--header__menu-item").forEach(function(item) {
+        if (item.getAttribute("data-tab") === tabId) {
+          item.classList.add("active");
+        } else {
+          item.classList.remove("active");
+        }
+      });
+      
+      // 更新移动端导航active状态
+      document.querySelectorAll(".mobile-nav-item").forEach(function(item) {
+        if (item.getAttribute("data-tab") === tabId) {
+          item.classList.add("active");
+        } else {
+          item.classList.remove("active");
+        }
+      });
+      
+      // 自动加载对应tab的数据
+      setTimeout(function() {
+        if (tabId === "tab-stats") {
+          refreshStats();
+          loadTimeSeriesData();
+        }
+        else if (tabId === "tab-users") loadUsers();
+        else if (tabId === "tab-proxies") loadProxies();
+        else if (tabId === "tab-tunnels") loadTunnels();
+        else if (tabId === "tab-servers") {
+          loadServers();
+          populateFirewallSelectors();
+        }
+        else if (tabId === "tab-rules") {
+          loadRules();
+          populateFirewallSelectors();
+          populateAuthProviderSelectors();
+        }
+        else if (tabId === "tab-rate-limits") loadRateLimitRules();
+        else if (tabId === "tab-firewalls") loadFirewalls();
+        else if (tabId === "tab-auth-providers") loadAuthProviders();
+        else if (tabId === "tab-endpoints") {
+          loadEndpoints();
+          populateTunnelSelectorsForEndpoints();
+        }
+        else if (tabId === "tab-logs") loadLogs();
+        else if (tabId === "tab-act") { /* No auto-load needed, manual connect */ }
+        else if (tabId === "tab-config") loadConfig();
+      }, 100);
+    }
+    
+    // 移动端侧边栏控制
+    var hamburger = document.getElementById("hamburger-btn");
+    if (hamburger) {
+      hamburger.addEventListener("click", function() {
+        var sidebar = document.getElementById("mobile-sidebar");
+        var overlay = document.getElementById("sidebar-overlay");
+        if (sidebar) sidebar.classList.toggle("open");
+        if (overlay) overlay.classList.toggle("show");
+      });
+    }
+    var overlay = document.getElementById("sidebar-overlay");
+    if (overlay) overlay.addEventListener("click", closeSidebar);
+    
+    document.querySelectorAll(".mobile-nav-item").forEach(function(item) {
+      item.addEventListener("click", function(e) {
+        e.preventDefault();
+        var tabId = this.getAttribute("data-tab");
+        switchTab(tabId);
+        closeSidebar();
+      });
+    });
+    
+    // 桌面端导航
+    document.querySelectorAll(".bx--header__menu-item").forEach(function(item) {
+      item.addEventListener("click", function(e) {
+        e.preventDefault();
+        var tabId = this.getAttribute("data-tab");
+        switchTab(tabId);
+      });
+    });
+    
+    // 桌面端 Auth 链接
+    var headerAuthLink = document.querySelector(".header-auth-link");
+    if (headerAuthLink) {
+      headerAuthLink.addEventListener("click", function(e) {
+        e.preventDefault();
+        var tabId = this.getAttribute("data-tab");
+        switchTab(tabId);
+      });
+    }
+
+    // 页面加载时检查登录状态
+    const savedToken = getCookie("aps-auth-token");
+    const isLoggedIn = getCookie("aps-logged-in");
+    if (savedToken && isLoggedIn === "true") {
+      authToken = savedToken;
+      document.getElementById("api-token").value = savedToken;
+      setAuthStatus(true);
+    }
+
+    // Initialize Act (Dynamic Logs)
+    if (typeof initAct === "function") initAct();
+    
+    // 初始化默认tab的active状态
+    setTimeout(function() {
+      document.querySelectorAll(".bx--header__menu-item").forEach(function(item) {
+        if (item.getAttribute("data-tab") === "tab-stats") {
+          item.classList.add("active");
+        }
+      });
+      document.querySelectorAll(".mobile-nav-item").forEach(function(item) {
+        if (item.getAttribute("data-tab") === "tab-stats") {
+          item.classList.add("active");
+        }
+      });
+    }, 100);
+
+    // 登录/退出
+    document.getElementById("btn-login").addEventListener("click", async () => {
+      const username = document.getElementById("username").value.trim();
+      const password = document.getElementById("password").value.trim();
+      try {
+        const res = await authFetch(loginUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ username, password })
+        });
+        if (!res.ok) {
+          const text = await res.text();
+          throw new Error("登录失败: " + text);
+        }
+        const data = await res.json();
+        // 后端会设置 HttpOnly Cookie，这里可选保存 token 用于 Authorization 请求
+        if (data && data.token) {
+          authToken = data.token;
+          document.getElementById("api-token").value = data.token;
+          // 保存登录状态到cookie (7天有效期)
+          setCookie("aps-auth-token", data.token, 7);
+          setCookie("aps-logged-in", "true", 7);
+        }
+        setAuthStatus(true);
+        showNotification('success', '登录成功', '欢迎回来!');
+        // 登录成功后自动跳转到统计界面
+        switchTab('tab-stats');
+      } catch (err) {
+        showNotification('error', '登录失败', err.message || err);
+      }
+    });
+
+    // Header auth link click handler - login or logout based on state
+    function handleAuthLinkClick(e) {
+      var isLoggedIn = getCookie("aps-logged-in") === "true";
+      if (isLoggedIn) {
+        e.preventDefault();
+        // Perform logout
+        (async function() {
+          try {
+            var headers = {};
+            var tokenInput = document.getElementById("api-token").value.trim();
+            var token = tokenInput || authToken;
+            if (token) headers["Authorization"] = "Bearer " + token;
+
+            var res = await authFetch(logoutUrl, { method: "POST", headers: headers });
+            if (!res.ok) {
+              var text = await res.text();
+              throw new Error("退出失败: " + text);
+            }
+            authToken = "";
+            document.getElementById("api-token").value = "";
+            deleteCookie("aps-auth-token");
+            deleteCookie("aps-logged-in");
+            setAuthStatus(false);
+            showNotification('success', '退出成功', '已退出登录');
+            switchTab('tab-auth');
+          } catch (err) {
+            showNotification('error', '退出失败', err.message || err);
+          }
+        })();
+      } else {
+        e.preventDefault();
+        switchTab('tab-auth');
+        closeSidebar();
+      }
+    }
+
+    // Attach to header auth links
+    document.querySelectorAll('.header-auth-link, .mobile-nav-item[data-tab="tab-auth"]').forEach(function(link) {
+      link.addEventListener('click', handleAuthLinkClick);
+    });
+
+    function setAuthStatus(isAuthed) {
+      // Update header auth link text and color
+      document.querySelectorAll('.header-auth-link, .mobile-nav-item[data-tab="tab-auth"]').forEach(function(link) {
+        if (isAuthed) {
+          link.textContent = "退出登录";
+          link.style.color = "#da1e28"; // Red color for logout
+        } else {
+          link.textContent = "用户登录";
+          link.style.color = ""; // Reset to default
+        }
+      });
+      
+      // 控制需要登录才能访问的菜单项显示/隐藏
+      document.querySelectorAll(".auth-required").forEach(function(item) {
+        if (isAuthed) {
+          item.classList.add("show");
+        } else {
+          item.classList.remove("show");
+        }
+      });
+    }
+
+    // 配置读取/保存
+    document.getElementById("btn-load-config").addEventListener("click", loadConfig);
+    document.getElementById("btn-save-config").addEventListener("click", saveConfig);
+
+    async function loadConfig() {
+      const msg = document.getElementById("config-msg");
+      msg.textContent = "";
+      try {
+        const headers = {};
+        const tokenInput = document.getElementById("api-token").value.trim();
+        const token = tokenInput || authToken;
+        if (token) headers["Authorization"] = "Bearer " + token;
+
+        const res = await authFetch(configUrl, { headers });
+        if (!res.ok) {
+          const text = await res.text();
+          throw new Error("读取配置失败: " + text);
+        }
+        const data = await res.json();
+        document.getElementById("config-editor").value = JSON.stringify(data, null, 2);
+        msg.textContent = "配置已加载";
+      } catch (err) {
+        msg.textContent = err.message || err;
+      }
+    }
+
+    async function saveConfig() {
+      const msg = document.getElementById("config-msg");
+      msg.textContent = "";
+      try {
+        const headers = { "Content-Type": "application/json" };
+        const tokenInput = document.getElementById("api-token").value.trim();
+        const token = tokenInput || authToken;
+        if (token) headers["Authorization"] = "Bearer " + token;
+
+        const text = document.getElementById("config-editor").value;
+        let obj;
+        try {
+          obj = JSON.parse(text);
+        } catch (e) {
+          throw new Error("JSON 解析失败，请检查格式");
+        }
+        const res = await authFetch(configUrl, { method: "POST", headers, body: JSON.stringify(obj) });
+        const out = await res.text();
+        if (!res.ok) {
+          throw new Error("保存失败: " + out);
+        }
+        msg.textContent = "保存成功，已触发热重载";
+      } catch (err) {
+        msg.textContent = err.message || err;
+      }
+    }
+
+    // 统计自动刷新
+    let statsTimer = null;
+    function startAutoRefresh() {
+      if (statsTimer) clearInterval(statsTimer);
+      statsTimer = setInterval(() => { 
+        // 仅在统计页面且autoRefresh为true时刷新
+        if (autoRefresh && currentTab === "tab-stats") {
+          refreshStats();
+          loadTimeSeriesData();
+        }
+      }, 3000);
+    }
+    startAutoRefresh();
+
+    document.getElementById("btn-refresh-now").addEventListener("click", refreshStats);
+    document.getElementById("btn-toggle-auto").addEventListener("click", () => {
+      autoRefresh = !autoRefresh;
+      document.getElementById("btn-toggle-auto").textContent = autoRefresh ? "暂停自动刷新" : "恢复自动刷新";
+    });
+
+    async function refreshStats() {
+      try {
+        const res = await authFetch(statsUrl);
+        if (!res.ok) {
+          const text = await res.text();
+          throw new Error("获取统计失败: " + text);
+        }
+        const stats = await res.json();
+        renderStatsSummary(stats);
+        renderStatsTable(stats);
+        renderRaw(stats);
+      } catch (err) {
+        console.warn(err.message || err);
+      }
+    }
+
+    function renderStatsSummary(stats) {
+      setText("stat-totalRequests", stats.totalRequests);
+      setText("stat-activeConnections", stats.activeConnections);
+      setText("stat-totalBytesSent", fmtBytes(stats.totalBytesSent));
+      setText("stat-totalBytesRecv", fmtBytes(stats.totalBytesRecv));
+    }
+
+    function setText(id, v) {
+      const el = document.getElementById(id);
+      if (el) el.textContent = v == null ? "-" : String(v);
+    }
+
+    function renderStatsTable(stats) {
+      const tbody = document.getElementById("stats-tbody");
+      tbody.innerHTML = "";
+
+      const dims = [
+        ["rules", stats.rules],
+        ["users", stats.users],
+        ["servers", stats.servers],
+        ["tunnels", stats.tunnels],
+        ["proxies", stats.proxies],
+      ];
+
+      for (const [dim, map] of dims) {
+        if (!map) continue;
+        for (const key of Object.keys(map)) {
+          const m = map[key];
+          const tr = document.createElement("tr");
+          tr.innerHTML = `
+            <td>${dim}</td>
+            <td>${key}</td>
+            <td>${m.requestCount ?? "-"}</td>
+            <td>${m.errors ?? "-"}</td>
+            <td>${m.intercepted ?? "-"}</td>
+            <td>${fmtQPS(m.qps)}</td>
+            <td>${fmtBytes(m.bytesRecv?.avg)} / ${fmtBytes(m.bytesRecv?.min)} / ${fmtBytes(m.bytesRecv?.max)}</td>
+            <td>${fmtBytes(m.bytesSent?.avg)} / ${fmtBytes(m.bytesSent?.min)} / ${fmtBytes(m.bytesSent?.max)}</td>
+            <td>${fmtNum(m.responseTime?.avgMs)} / ${m.responseTime?.minMs ?? "-"} / ${m.responseTime?.maxMs ?? "-"}</td>
+          `;
+          tbody.appendChild(tr);
+        }
+      }
+    }
+
+    function fmtNum(n) {
+      if (n == null || isNaN(n)) return "-";
+      if (typeof n === "number") {
+        if (!Number.isInteger(n)) return n.toFixed(2);
+      }
+      return String(n);
+    }
+
+    // 字节格式化函数 - 转换为K, M, G, T, P单位
+    function fmtBytes(bytes) {
+      if (bytes == null || isNaN(bytes)) return "-"; // Keep "-" for null/NaN
+      if (bytes === 0) return "0.00 B"; // Handle 0 explicitly with two decimal places
+
+      const units = ['B', 'K', 'M', 'G', 'T', 'P'];
+      const threshold = 1024;
+      let unitIndex = 0;
+      let value = parseFloat(bytes);
+      
+      while (value >= threshold && unitIndex < units.length - 1) {
+        value /= threshold;
+        unitIndex++;
+      }
+      
+      // Apply toFixed(2) consistently for all units
+      return value.toFixed(2) + ' ' + units[unitIndex];
+    }
+
+    function fmtQPS(qps) {
+      if (!qps || typeof qps !== 'object') return "-";
+      const avg = qps.avg;
+      const min = qps.min;
+      const max = qps.max;
+      if (avg == null || min == null || max == null) return "-";
+      return fmtNum(avg) + " (min:" + fmtNum(min) + ", max:" + fmtNum(max) + ")";
+    }
+
+    function renderRaw(stats) {
+      const el = document.getElementById("stats-raw");
+      if (el) el.textContent = JSON.stringify(stats, null, 2);
+    }
+
+// ===== 管理 API 常量与工具 =====
+var usersUrl = "/.api/users";
+var proxiesUrl = "/.api/proxies";
+var tunnelsUrl = "/.api/tunnels";
+var serversUrl = "/.api/servers";
+var rulesUrl = "/.api/rules";
+var firewallsUrl = "/.api/firewalls";
+var authProvidersUrl = "/.api/auth_providers";
+var logsUrl = "/.api/log";
+var endpointsUrl = "/.api/endpoints";
+
+
+function buildAuthHeaders(base) {
+  var headers = base ? JSON.parse(JSON.stringify(base)) : {};
+  var tokenInputEl = document.getElementById("api-token");
+  var token = "";
+  if (tokenInputEl && tokenInputEl.value) token = tokenInputEl.value.trim();
+  if (!token && typeof authToken !== "undefined" && authToken) token = authToken;
+  if (token) headers["Authorization"] = "Bearer " + token;
+  return headers;
+}
+
+// Global 401 handler - auto logout
+function handleUnauthorized() {
+  console.warn("401 Unauthorized - session expired");
+  
+  // Clear all authentication-related cookies immediately
+  deleteCookie("APS-Admin-Token");     // Server-set HttpOnly cookie
+  deleteCookie("aps-auth-token");       // Client-saved token
+  deleteCookie("aps-logged-in");        // Login status flag
+  authToken = "";
+  
+  // Clear API token input field
+  var tokenInput = document.getElementById("api-token");
+  if (tokenInput) tokenInput.value = "";
+  
+  // Update auth status display to show logged out
+  if (typeof setAuthStatus === "function") {
+    setAuthStatus(false);
+  }
+  
+  // Hide all auth-required menu items (use same method as setAuthStatus)
+  document.querySelectorAll(".auth-required").forEach(function(el) {
+    el.classList.remove("show");
+  });
+  
+  // Switch to auth tab to show login
+  if (typeof switchTab === "function") {
+    switchTab("tab-auth");
+  }
+  
+  showNotification("error", "Session Expired", "Please log in again");
+}
+
+// Unified API fetch wrapper with 401 handling  
+async function authFetch(url, options) {
+  var response = await fetch(url, options);
+  if (response.status === 401) {
+    handleUnauthorized();
+    throw new Error("Unauthorized");
+  }
+  return response;
+}
+
+
+// ===== Notification \u901a\u77e5\u7cfb\u7edf =====
+function showNotification(type, title, subtitle) {
+  var container = document.getElementById('notification-container');
+  if (!container) {
+    container = document.createElement('div');
+    container.id = 'notification-container';
+    container.style.position = 'fixed';
+    container.style.top = '3rem';
+    container.style.right = '1rem';
+    container.style.zIndex = '9999';
+    container.style.maxWidth = '400px';
+    document.body.appendChild(container);
+  }
+
+  var notification = document.createElement("div");
+  notification.className = "bx--inline-notification bx--inline-notification--" + type;
+  notification.setAttribute("role", "alert");
+  notification.style.marginBottom = '0.5rem';
+  
+  var iconPath = '';
+  if (type === 'success') iconPath = 'M14 1a1 1 0 011 1v12a1 1 0 01-1 1H2a1 1 0 01-1-1V2a1 1 0 011-1h12zm0 1H2v12h12V2zm-2.5 7.5l-3 3-1.5-1.5-.7.7 2.2 2.2 3.7-3.7-.7-.7z';
+  else if (type === 'error') iconPath = 'M8 1C4.1 1 1 4.1 1 8s3.1 7 7 7 7-3.1 7-7-3.1-7-7-7zm3.5 9.5l-1 1L8 9l-2.5 2.5-1-1L7 8 4.5 5.5l1-1L8 7l2.5-2.5 1 1L9 8l2.5 2.5z';
+  else if (type === 'warning') iconPath = 'M8 1l7 14H1L8 1zm0 3L3.2 13h9.6L8 4zm0 6h.5v2H7.5V10H8zm0-5h.5v4H7.5V5H8z';
+  else iconPath = 'M8 1C4.1 1 1 4.1 1 8s3.1 7 7 7 7-3.1 7-7-3.1-7-7-7zm0 13c-3.3 0-6-2.7-6-6s2.7-6 6-6 6 2.7 6 6-2.7 6-6 6zm-.5-7H8v5H7.5V7zm0-2H8v1H7.5V5z';
+
+  notification.innerHTML = 
+    '<div class="bx--inline-notification__details">' +
+      '<svg class="bx--inline-notification__icon" width="16" height="16" viewBox="0 0 16 16">' +
+        '<path d="' + iconPath + '"/>' +
+      '</svg>' +
+      '<div class="bx--inline-notification__text-wrapper">' +
+        '<p class="bx--inline-notification__title">' + title + '</p>' +
+        (subtitle ? '<p class="bx--inline-notification__subtitle">' + subtitle + '</p>' : '') +
+      '</div>' +
+    '</div>' +
+    '<button class="bx--inline-notification__close-button" type="button" aria-label="\u5173\u95ed">' +
+      '<svg class="bx--inline-notification__close-icon" width="16" height="16" viewBox="0 0 16 16">' +
+        '<path d="M12 4.7L11.3 4 8 7.3 4.7 4 4 4.7 7.3 8 4 11.3 4.7 12 8 8.7 11.3 12 12 11.3 8.7 8z"/>' +
+      '</svg>' +
+    '</button>';
+
+  container.appendChild(notification);
+  
+  var closeBtn = notification.querySelector('.bx--inline-notification__close-button');
+  if (closeBtn) {
+    closeBtn.addEventListener('click', function() {
+      notification.remove();
+    });
+  }
+  
+  setTimeout(function() {
+    if (notification.parentNode) notification.remove();
+  }, 5000);
+}
+
+
+// ===== 实时动态 (SSE) =====
+var actSource = null;
+
+function initAct() {
+    var btnConnect = document.getElementById("btn-act-connect");
+    var btnClear = document.getElementById("btn-act-clear");
+    
+    if (btnConnect) btnConnect.addEventListener("click", toggleActConnection);
+    if (btnClear) btnClear.addEventListener("click", function() {
+        var actTerminal = document.getElementById("act-terminal");
+        if (actTerminal) actTerminal.innerHTML = "";
+    });
+}
+
+function toggleActConnection() {
+    var btn = document.getElementById("btn-act-connect");
+    var actTerminal = document.getElementById("act-terminal");
+    
+    if (actSource) {
+        // Disconnect
+        actSource.close();
+        actSource = null;
+        if (btn) {
+            btn.textContent = "连接";
+            btn.classList.remove("bx--btn--danger");
+            btn.classList.add("bx--btn--primary");
+        }
+        appendActLog("Disconnected.");
+    } else {
+        // Connect
+        if (actTerminal) actTerminal.innerHTML = "";
+        appendActLog("Connecting to log stream...");
+        
+        var url = "/.api/act";
+        
+        actSource = new EventSource(url);
+        
+        actSource.onopen = function() {
+            if (btn) {
+                btn.textContent = "断开";
+                btn.classList.remove("bx--btn--primary");
+                btn.classList.add("bx--btn--danger");
+            }
+            appendActLog("Connected.");
+        };
+        
+        actSource.onmessage = function(event) {
+            appendActLog(event.data);
+        };
+        
+        actSource.onerror = function(err) {
+            console.error("SSE Error:", err);
+            // Don't show error on normal close or retry
+            if (actSource && actSource.readyState === EventSource.CLOSED) {
+                 appendActLog("Connection closed.");
+                 if (btn) {
+                     btn.textContent = "连接";
+                     btn.classList.remove("bx--btn--danger");
+                     btn.classList.add("bx--btn--primary");
+                 }
+                 actSource = null;
+            } else {
+                // Keep trying or show minimal error
+                // appendActLog("Connection error...");
+            }
+        };
+    }
+}
+
+function appendActLog(msg) {
+    var actTerminal = document.getElementById("act-terminal");
+    var actAutoScroll = document.getElementById("act-autoscroll");
+    
+    if (!actTerminal) return;
+    var div = document.createElement("div");
+    div.textContent = msg;
+    actTerminal.appendChild(div);
+    
+    // Limit buffer
+    if (actTerminal.childElementCount > 500) {
+        actTerminal.removeChild(actTerminal.firstChild);
+    }
+
+    if (actAutoScroll && actAutoScroll.checked) {
+        actTerminal.scrollTop = actTerminal.scrollHeight;
+    }
+}
+
+
+// ===== 用户 =====
+// Carbon Modal实例
+var userAddModal, userEditModal;
+
+// 初始化Carbon Modal
+function initUserModals() {
+  // 手动处理Modal关闭按钮
+  var addModal = document.querySelector('#user-add-modal');
+  var editModal = document.querySelector('#user-edit-modal');
+  
+  if (addModal) {
+    addModal.addEventListener('click', function(e) {
+      if (e.target.closest('[data-modal-close]')) {
+        addModal.classList.remove('is-visible');
+      }
+    });
+  }
+  
+  if (editModal) {
+    editModal.addEventListener('click', function(e) {
+      if (e.target.closest('[data-modal-close]')) {
+        editModal.classList.remove('is-visible');
+      }
+    });
+  }
+  
+  // 尝试使用Carbon组件API
+  if (typeof CarbonComponents !== 'undefined' && CarbonComponents.Modal) {
+    if (addModal && !userAddModal) userAddModal = CarbonComponents.Modal.create(addModal);
+    if (editModal && !userEditModal) userEditModal = CarbonComponents.Modal.create(editModal);
+  }
+}
+
+async function loadUsers() {
+  var msg = document.getElementById("users-msg");
+  if (msg) msg.textContent = "";
+  try {
+    var res = await authFetch(usersUrl, { headers: buildAuthHeaders({}) });
+    if (!res.ok) throw new Error(await res.text());
+    var data = await res.json();
+    var tbody = document.getElementById("users-tbody");
+    if (tbody) tbody.innerHTML = "";
+    Object.keys(data || {}).forEach(function(name){
+      var u = data[name] || {};
+      var tr = document.createElement("tr");
+      tr.innerHTML =
+        "<td>" + name + "</td>" +
+        "<td>" + (u.admin ? "是" : "否") + "</td>" +
+        "<td>" + ((u.groups && u.groups.join ? u.groups.join(",") : "")) + "</td>" +
+        "<td>" + (u.token || "") + "</td>" +
+        "<td><button class='bx--btn bx--btn--sm bx--btn--ghost' onclick='openEditUserModal(\"" + name.replace(/"/g, '&quot;') + "\")'\u003e编辑</button> " +
+        "<button class='bx--btn bx--btn--sm bx--btn--danger--ghost' onclick='deleteUser(\"" + name.replace(/"/g, '&quot;') + "\")'\u003e删除</button></td>";
+      if (tbody) tbody.appendChild(tr);
+    });
+    if (msg) msg.textContent = "用户列表已加载";
+  } catch (e) {
+    if (msg) msg.textContent = "加载失败: " + (e.message || e);
+  }
+}
+
+function openAddUserModal() {
+  document.getElementById("add-user-name").value = "";
+  document.getElementById("add-user-password").value = "";
+  document.getElementById("add-user-admin").checked = false;
+  document.getElementById("add-user-proxy").checked = false;
+  document.getElementById("add-user-groups").value = "";
+  document.getElementById("add-user-token").value = "";
+  document.getElementById("add-user-log-level").value = "";
+  document.getElementById("add-user-log-retention").value = "";
+  document.getElementById("add-user-rate-limit-rules").value = "";
+  var modal = document.querySelector('#user-add-modal');
+  if (modal) modal.classList.add('is-visible');
+}
+
+async function openEditUserModal(username) {
+  try {
+    var res = await authFetch(usersUrl, { headers: buildAuthHeaders({}) });
+    if (!res.ok) throw new Error(await res.text());
+    var data = await res.json();
+    var u = data[username] || {};
+    
+    document.getElementById("edit-user-original-name").value = username;
+    document.getElementById("edit-user-name").value = username;
+    document.getElementById("edit-user-password").value = "";
+    document.getElementById("edit-user-admin").checked = !!u.admin;
+    document.getElementById("edit-user-proxy").checked = !!u.proxy;
+    document.getElementById("edit-user-groups").value = (u.groups && u.groups.join ? u.groups.join(",") : "");
+    document.getElementById("edit-user-token").value = u.token || "";
+    document.getElementById("edit-user-log-level").value = (u.logLevel !== undefined && u.logLevel !== null) ? u.logLevel : "";
+    document.getElementById("edit-user-log-retention").value = (u.logRetentionHours !== undefined && u.logRetentionHours !== null) ? u.logRetentionHours : "";
+    document.getElementById("edit-user-rate-limit-rules").value = (u.rateLimitRules || []).join(", ");
+    
+    var modal = document.querySelector('#user-edit-modal');
+    if (modal) modal.classList.add('is-visible');
+  } catch (e) {
+    var msg = document.getElementById("users-msg");
+    if (msg) msg.textContent = "加载用户数据失败: " + (e.message || e);
+  }
+}
+
+async function confirmAddUser() {
+  var msg = document.getElementById("users-msg");
+  if (msg) msg.textContent = "";
+  var name = document.getElementById("add-user-name").value.trim();
+  var password = document.getElementById("add-user-password").value.trim();
+  var admin = document.getElementById("add-user-admin").checked;
+  var proxy = document.getElementById("add-user-proxy").checked;
+  var groups = document.getElementById("add-user-groups").value.trim();
+  var token = document.getElementById("add-user-token").value.trim();
+  
+  if (!name) { if (msg) msg.textContent = "用户名必填"; return; }
+  if (!password) { if (msg) msg.textContent = "密码必填"; return; }
+  
+  var payload = { 
+    admin: admin, 
+    proxy: proxy,
+    password: password,
+    token: token || undefined, 
+    groups: groups ? groups.split(",").map(function(s){return s.trim();}).filter(function(s){return s;}) : [] 
+  };
+  
+  var logLevel = document.getElementById("add-user-log-level").value;
+  if (logLevel !== "") payload.logLevel = parseInt(logLevel, 10);
+  var logRetention = document.getElementById("add-user-log-retention").value;
+  if (logRetention !== "") payload.logRetentionHours = parseInt(logRetention, 10);
+
+  var rateLimitRulesStr = document.getElementById("add-user-rate-limit-rules").value.trim();
+  if (rateLimitRulesStr) {
+    payload.rateLimitRules = rateLimitRulesStr.split(",").map(function(s){return s.trim();}).filter(function(s){return s;});
+  }
+
+  try {
+    var res = await authFetch(usersUrl, { 
+      method: "POST", 
+      headers: buildAuthHeaders({ "Content-Type": "application/json" }), 
+      body: JSON.stringify({ name: name, user: payload }) 
+    });
+    var text = await res.text();
+    if (!res.ok) throw new Error(text);
+    if (msg) msg.textContent = "新增成功";
+    var modal = document.querySelector('#user-add-modal');
+    if (modal) modal.classList.remove('is-visible');
+    loadUsers();
+  } catch (e) {
+    if (msg) msg.textContent = "新增失败: " + (e.message || e);
+  }
+}
+
+async function confirmEditUser() {
+  var msg = document.getElementById("users-msg");
+  if (msg) msg.textContent = "";
+  var name = document.getElementById("edit-user-name").value.trim();
+  var password = document.getElementById("edit-user-password").value.trim();
+  var admin = document.getElementById("edit-user-admin").checked;
+  var proxy = document.getElementById("edit-user-proxy").checked;
+  var groups = document.getElementById("edit-user-groups").value.trim();
+  var token = document.getElementById("edit-user-token").value.trim();
+  
+  if (!name) { if (msg) msg.textContent = "用户名必填"; return; }
+  
+  var payload = { 
+    admin: admin, 
+    proxy: proxy,
+    token: token || undefined, 
+    groups: groups ? groups.split(",").map(function(s){return s.trim();}).filter(function(s){return s;}) : [] 
+  };
+  // 只有密码非空时才包含在payload中
+  if (password && password.length > 0) payload.password = password;
+  
+  var logLevel = document.getElementById("edit-user-log-level").value;
+  if (logLevel !== "") payload.logLevel = parseInt(logLevel, 10);
+  var logRetention = document.getElementById("edit-user-log-retention").value;
+  if (logRetention !== "") payload.logRetentionHours = parseInt(logRetention, 10);
+
+  var rateLimitRulesStr = document.getElementById("edit-user-rate-limit-rules").value.trim();
+  if (rateLimitRulesStr) {
+    payload.rateLimitRules = rateLimitRulesStr.split(",").map(function(s){return s.trim();}).filter(function(s){return s;});
+  }
+
+  try {
+    var res = await authFetch(usersUrl, { 
+      method: "POST", 
+      headers: buildAuthHeaders({ "Content-Type": "application/json" }), 
+      body: JSON.stringify({ name: name, user: payload }) 
+    });
+    var text = await res.text();
+    if (!res.ok) throw new Error(text);
+    if (msg) msg.textContent = "更新成功";
+    var modal = document.querySelector('#user-edit-modal');
+    if (modal) modal.classList.remove('is-visible');
+    loadUsers();
+  } catch (e) {
+    if (msg) msg.textContent = "更新失败: " + (e.message || e);
+  }
+}
+
+async function deleteUser(username) {
+  if (!confirm("确定要删除用户 '" + username + "' 吗?")) return;
+  
+  var msg = document.getElementById("users-msg");
+  if (msg) msg.textContent = "";
+  try {
+    var res = await authFetch(usersUrl + "?name=" + encodeURIComponent(username), { 
+      method: "DELETE", 
+      headers: buildAuthHeaders({}) 
+    });
+    var text = await res.text();
+    if (!res.ok) throw new Error(text);
+    if (msg) msg.textContent = "删除成功";
+    loadUsers();
+  } catch (e) {
+    if (msg) msg.textContent = "删除失败: " + (e.message || e);
+  }
+}
+
+// ===== 代理 =====
+// 初始化代理Modals
+function initProxyModals() {
+  var addModal = document.querySelector('#proxy-add-modal');
+  var editModal = document.querySelector('#proxy-edit-modal');
+  if (addModal) {
+    addModal.querySelectorAll('[data-modal-close]').forEach(function(btn) {
+      btn.addEventListener('click', function() { addModal.classList.remove('is-visible'); });
+    });
+  }
+  if (editModal) {
+    editModal.querySelectorAll('[data-modal-close]').forEach(function(btn) {
+      btn.addEventListener('click', function() { editModal.classList.remove('is-visible'); });
+    });
+  }
+}
+
+async function loadProxies() {
+  var msg = document.getElementById("proxies-msg");
+  if (msg) msg.textContent = "";
+  try {
+    var res = await authFetch(proxiesUrl, { headers: buildAuthHeaders({}) });
+    if (!res.ok) throw new Error(await res.text());
+    var data = await res.json();
+    var tbody = document.getElementById("proxies-tbody");
+    if (tbody) tbody.innerHTML = "";
+    Object.keys(data || {}).forEach(function(name){
+      var p = data[name] || {};
+      var urls = p.urls || [];
+      var tr = document.createElement("tr");
+      tr.innerHTML = "<td>" + name + "</td><td>" + urls.join(", ") + "</td>" +
+        "<td><button class='bx--btn bx--btn--sm bx--btn--ghost' onclick='openEditProxyModal(\"" + name.replace(/"/g, '&quot;') + "\")'>编辑</button> " +
+        "<button class='bx--btn bx--btn--sm bx--btn--danger--ghost' onclick='deleteProxy(\"" + name.replace(/"/g, '&quot;') + "\")'>删除</button></td>";
+      if (tbody) tbody.appendChild(tr);
+    });
+    if (msg) msg.textContent = "代理列表已加载";
+  } catch (e) {
+    if (msg) msg.textContent = "加载失败: " + (e.message || e);
+  }
+}
+
+function openAddProxyModal() {
+  document.getElementById("add-proxy-name").value = "";
+  document.getElementById("add-proxy-urls").value = "";
+  document.getElementById("add-proxy-log-level").value = "";
+  document.getElementById("add-proxy-log-retention").value = "";
+  var modal = document.querySelector('#proxy-add-modal');
+  if (modal) modal.classList.add('is-visible');
+}
+
+async function openEditProxyModal(name) {
+  try {
+    var res = await authFetch(proxiesUrl, { headers: buildAuthHeaders({}) });
+    if (!res.ok) throw new Error(await res.text());
+    var data = await res.json();
+    var p = data[name] || {};
+    document.getElementById("edit-proxy-original-name").value = name;
+    document.getElementById("edit-proxy-name").value = name;
+    document.getElementById("edit-proxy-urls").value = (p.urls || []).join("\n");
+    document.getElementById("edit-proxy-log-level").value = (p.logLevel !== undefined && p.logLevel !== null) ? p.logLevel : "";
+    document.getElementById("edit-proxy-log-retention").value = (p.logRetentionHours !== undefined && p.logRetentionHours !== null) ? p.logRetentionHours : "";
+    var modal = document.querySelector('#proxy-edit-modal');
+    if (modal) modal.classList.add('is-visible');
+  } catch (e) {
+    var msg = document.getElementById("proxies-msg");
+    if (msg) msg.textContent = "加载代理失败: " + (e.message || e);
+  }
+}
+
+async function confirmAddProxy() {
+  var msg = document.getElementById("proxies-msg");
+  if (msg) msg.textContent = "";
+  var name = document.getElementById("add-proxy-name").value.trim();
+  var raw = document.getElementById("add-proxy-urls").value.trim();
+  if (!name) { if (msg) msg.textContent = "代理名必填"; return; }
+  var urls = raw ? raw.split(/\n|,/).map(function(s){return s.trim();}).filter(function(s){return s;}) : [];
+  try {
+    var res = await authFetch(proxiesUrl, { method: "POST", headers: buildAuthHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ name: name, proxy: { urls: urls } }) });
+    var text = await res.text();
+    if (!res.ok) throw new Error(text);
+    if (msg) msg.textContent = "新增成功";
+    var modal = document.querySelector('#proxy-add-modal');
+    if (modal) modal.classList.remove('is-visible');
+    loadProxies();
+  } catch (e) {
+    if (msg) msg.textContent = "新增失败: " + (e.message || e);
+  }
+}
+
+async function confirmEditProxy() {
+  var msg = document.getElementById("proxies-msg");
+  if (msg) msg.textContent = "";
+  if (!name) { if (msg) msg.textContent = "代理名必填"; return; }
+  var urls = raw ? raw.split(/\n|,/).map(function(s){return s.trim();}).filter(function(s){return s;}) : [];
+  
+  var payload = { urls: urls };
+  var logLevel = document.getElementById("edit-proxy-log-level").value;
+  if (logLevel !== "") payload.logLevel = parseInt(logLevel, 10);
+  var logRetention = document.getElementById("edit-proxy-log-retention").value;
+  if (logRetention !== "") payload.logRetentionHours = parseInt(logRetention, 10);
+
+  try {
+    var res = await authFetch(proxiesUrl, { method: "POST", headers: buildAuthHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ name: name, proxy: payload }) });
+    var text = await res.text();
+    if (!res.ok) throw new Error(text);
+    if (msg) msg.textContent = "更新成功";
+    var modal = document.querySelector('#proxy-edit-modal');
+    if (modal) modal.classList.remove('is-visible');
+    loadProxies();
+  } catch (e) {
+    if (msg) msg.textContent = "更新失败: " + (e.message || e);
+  }
+}
+
+async function deleteProxy(name) {
+  if (!confirm("确定要删除代理 '" + name + "' 吗?")) return;
+  var msg = document.getElementById("proxies-msg");
+  if (msg) msg.textContent = "";
+  try {
+    var res = await authFetch(proxiesUrl + "?name=" + encodeURIComponent(name), { method: "DELETE", headers: buildAuthHeaders({}) });
+    var text = await res.text();
+    if (!res.ok) throw new Error(text);
+    if (msg) msg.textContent = "删除成功";
+    loadProxies();
+  } catch (e) {
+    if (msg) msg.textContent = "删除失败: " + (e.message || e);
+  }
+}
+
+// ===== 隧道 =====
+// 初始化隧道Modals
+function initTunnelModals() {
+  var addModal = document.querySelector('#tunnel-add-modal');
+  var editModal = document.querySelector('#tunnel-edit-modal');
+  if (addModal) {
+    addModal.querySelectorAll('[data-modal-close]').forEach(function(btn) {
+      btn.addEventListener('click', function() { addModal.classList.remove('is-visible'); });
+    });
+  }
+  if (editModal) {
+    editModal.querySelectorAll('[data-modal-close]').forEach(function(btn) {
+      btn.addEventListener('click', function() { editModal.classList.remove('is-visible'); });
+    });
+  }
+}
+var tunnelEndpointsUrl = "/.api/tunnels/endpoints";
+
+async function loadTunnelEndpoints(tunnelName) {
+  var tbody = document.getElementById("tunnel-endpoints-tbody");
+  if (!tbody) return;
+  tbody.innerHTML = "";
+
+  try {
+    // 如果没有选择隧道，则查询所有在线节点
+    var url = tunnelName ? 
+      tunnelEndpointsUrl + "?tunnel=" + encodeURIComponent(tunnelName) : 
+      tunnelEndpointsUrl;
+    
+    var res = await authFetch(url, { headers: buildAuthHeaders({}) });
+    if (!res.ok) throw new Error(await res.text());
+    var data = await res.json();
+    (data.endpoints || []).forEach(function(ep){
+      var tr = document.createElement("tr");
+      var status = ep.online ? '<span class="pill" style="background:#a7f0ba;color:#0e6027;">在线</span>' : '<span class="pill">离线</span>';
+      var stats = ep.stats || {};
+      var bytesSent = stats.bytesSent || {};
+      var bytesRecv = stats.bytesRecv || {};
+      var responseTime = stats.responseTime || {};
+      tr.innerHTML = "<td>" + (ep.name || "-") + "</td>" +
+        "<td>" + (ep.remoteAddr || "-") + "</td>" +
+        "<td>" + (ep.onlineTime || "-") + "</td>" +
+        "<td>" + (ep.lastActivity || "-") + "</td>" +
+        "<td>" + (ep.latency || "-") + "</td>" +
+        "<td>" + (stats.requestCount ?? "-") + "</td>" +
+        "<td>" + (stats.errors ?? "-") + "</td>" +
+        "<td>" + (stats.intercepted || 0) + "</td>" +
+        "<td>" + fmtQPS(stats.qps) + "</td>" +
+        "<td>" + fmtBytes(bytesSent.total) + " / " + fmtBytes(bytesSent.avg) + " / " + fmtBytes(bytesSent.min) + " / " + fmtBytes(bytesSent.max) + "</td>" +
+        "<td>" + fmtBytes(bytesRecv.total) + " / " + fmtBytes(bytesRecv.avg) + " / " + fmtBytes(bytesRecv.min) + " / " + fmtBytes(bytesRecv.max) + "</td>" +
+        "<td>" + fmtNum(responseTime.avgMs) + " / " + (responseTime.minMs ?? "-") + " / " + (responseTime.maxMs ?? "-") + "</td>";
+      tbody.appendChild(tr);
+    });
+  } catch (e) {
+    var tr = document.createElement("tr");
+    tr.innerHTML = '<td colspan="12">加载失败: ' + (e.message || e) + '</td>';
+    tbody.appendChild(tr);
+  }
+}
+
+async function loadTunnels() {
+  var msg = document.getElementById("tunnels-msg");
+  if (msg) msg.textContent = "";
+  try {
+    var res = await authFetch(tunnelsUrl, { headers: buildAuthHeaders({}) });
+    if (!res.ok) throw new Error(await res.text());
+    var data = await res.json();
+    var tbody = document.getElementById("tunnels-tbody");
+    if (tbody) tbody.innerHTML = "";
+    Object.keys(data || {}).forEach(function(name){
+      var t = data[name] || {};
+      var servers = t.servers || [];
+      var tr = document.createElement("tr");
+      tr.innerHTML = "<td>" + name + "</td><td>" + (t.password ? "******" : "") + "</td><td>" + servers.join(",") + "</td>" +
+        "<td><button class='bx--btn bx--btn--sm bx--btn--ghost' onclick='openEditTunnelModal(\"" + name.replace(/"/g, '&quot;') +  "\")'>编辑</button> " +
+        "<button class='bx--btn bx--btn--sm bx--btn--danger--ghost' onclick='deleteTunnel(\"" + name.replace(/"/g, '&quot;') + "\")'>删除</button></td>";
+      tr.style.cursor = "pointer";
+      tr.addEventListener("click", function(e) {
+        if (e.target.tagName === "BUTTON") return;
+        loadTunnelEndpoints(name);
+      });
+      if (tbody) tbody.appendChild(tr);
+    });
+    if (msg) msg.textContent = "隧道列表已加载";
+    // 加载所有在线节点
+    loadTunnelEndpoints();
+  } catch (e) {
+    if (msg) msg.textContent = "加载失败: " + (e.message || e);
+  }
+}
+
+function openAddTunnelModal() {
+  document.getElementById("add-tunnel-name").value = "";
+  document.getElementById("add-tunnel-password").value = "";
+  document.getElementById("add-tunnel-servers").value = "";
+  document.getElementById("add-tunnel-log-level").value = "";
+  document.getElementById("add-tunnel-log-retention").value = "";
+  var modal = document.querySelector('#tunnel-add-modal');
+  if (modal) modal.classList.add('is-visible');
+}
+
+async function openEditTunnelModal(name) {
+  try {
+    var res = await authFetch(tunnelsUrl, { headers: buildAuthHeaders({}) });
+    if (!res.ok) throw new Error(await res.text());
+    var data = await res.json();
+    var t = data[name] || {};
+    document.getElementById("edit-tunnel-original-name").value = name;
+    document.getElementById("edit-tunnel-name").value = name;
+    document.getElementById("edit-tunnel-password").value = "";
+    document.getElementById("edit-tunnel-servers").value = (t.servers || []).join(",");
+    document.getElementById("edit-tunnel-log-level").value = (t.logLevel !== undefined && t.logLevel !== null) ? t.logLevel : "";
+    document.getElementById("edit-tunnel-log-retention").value = (t.logRetentionHours !== undefined && t.logRetentionHours !== null) ? t.logRetentionHours : "";
+    var modal = document.querySelector('#tunnel-edit-modal');
+    if (modal) modal.classList.add('is-visible');
+  } catch (e) {
+    var msg = document.getElementById("tunnels-msg");
+    if (msg) msg.textContent = "加载隧道失败: " + (e.message || e);
+  }
+}
+
+async function confirmAddTunnel() {
+  var msg = document.getElementById("tunnels-msg");
+  if (msg) msg.textContent = "";
+  var name = document.getElementById("add-tunnel-name").value.trim();
+  var password = document.getElementById("add-tunnel-password").value.trim();
+  var serversRaw = document.getElementById("add-tunnel-servers").value.trim();
+  if (!name) { if (msg) msg.textContent = "隧道名必填"; return; }
+  var servers = serversRaw ? serversRaw.split(",").map(function(s){return s.trim();}).filter(function(s){return s;}) : [];
+  
+  var payload = { password: password || undefined, servers: servers };
+  var logLevel = document.getElementById("add-tunnel-log-level").value;
+  if (logLevel !== "") payload.logLevel = parseInt(logLevel, 10);
+  var logRetention = document.getElementById("add-tunnel-log-retention").value;
+  if (logRetention !== "") payload.logRetentionHours = parseInt(logRetention, 10);
+
+  try {
+    var res = await authFetch(tunnelsUrl, { method: "POST", headers: buildAuthHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ name: name, tunnel: payload }) });
+    var text = await res.text();
+    if (!res.ok) throw new Error(text);
+    if (msg) msg.textContent = "新增成功";
+    var modal = document.querySelector('#tunnel-add-modal');
+    if (modal) modal.classList.remove('is-visible');
+    loadTunnels();
+  } catch (e) {
+    if (msg) msg.textContent = "新增失败: " + (e.message || e);
+  }
+}
+
+async function confirmEditTunnel() {
+  var msg = document.getElementById("tunnels-msg");
+  if (msg) msg.textContent = "";
+  var name = document.getElementById("edit-tunnel-name").value.trim();
+  var password = document.getElementById("edit-tunnel-password").value.trim();
+  var serversRaw = document.getElementById("edit-tunnel-servers").value.trim();
+  if (!name) { if (msg) msg.textContent = "隧道名必填"; return; }
+  var servers = serversRaw ? serversRaw.split(",").map(function(s){return s.trim();}).filter(function(s){return s;}) : [];
+  
+  var payload = { password: password && password.length > 0 ? password : undefined, servers: servers };
+  var logLevel = document.getElementById("edit-tunnel-log-level").value;
+  if (logLevel !== "") payload.logLevel = parseInt(logLevel, 10);
+  var logRetention = document.getElementById("edit-tunnel-log-retention").value;
+  if (logRetention !== "") payload.logRetentionHours = parseInt(logRetention, 10);
+
+  try {
+    var res = await authFetch(tunnelsUrl, { method: "POST", headers: buildAuthHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ name: name, tunnel: payload }) });
+    var text = await res.text();
+    if (!res.ok) throw new Error(text);
+    if (msg) msg.textContent = "更新成功";
+    var modal = document.querySelector('#tunnel-edit-modal');
+    if (modal) modal.classList.remove('is-visible');
+    loadTunnels();
+  } catch (e) {
+    if (msg) msg.textContent = "更新失败: " + (e.message || e);
+  }
+}
+
+async function deleteTunnel(name) {
+  if (!confirm("确定要删除隧道 '" + name + "' 吗?")) return;
+  var msg = document.getElementById("tunnels-msg");
+  if (msg) msg.textContent = "";
+  try {
+    var res = await authFetch(tunnelsUrl + "?name=" + encodeURIComponent(name), { method: "DELETE", headers: buildAuthHeaders({}) });
+    var text = await res.text();
+    if (!res.ok) throw new Error(text);
+    if (msg) msg.textContent = "删除成功";
+    loadTunnels();
+  } catch (e) {
+    if (msg) msg.textContent = "删除失败: " + (e.message || e);
+  }
+}
+
+// ===== 服务 =====
+function initServerModals() {
+  var addModal = document.querySelector('#server-add-modal');
+  var editModal = document.querySelector('#server-edit-modal');
+  if (addModal) {
+    addModal.querySelectorAll('[data-modal-close]').forEach(function(btn) {
+      btn.addEventListener('click', function() { addModal.classList.remove('is-visible'); });
+    });
+  }
+  if (editModal) {
+    editModal.querySelectorAll('[data-modal-close]').forEach(function(btn) {
+      btn.addEventListener('click', function() { editModal.classList.remove('is-visible'); });
+    });
+  }
+}
+
+// ===== 规则 =====
+function initRuleModals() {
+  var addModal = document.querySelector('#rule-add-modal');
+  var editModal = document.querySelector('#rule-edit-modal');
+  if (addModal) {
+    addModal.querySelectorAll('[data-modal-close]').forEach(function(btn) {
+      btn.addEventListener('click', function() { addModal.classList.remove('is-visible'); });
+    });
+  }
+  if (editModal) {
+    editModal.querySelectorAll('[data-modal-close]').forEach(function(btn) {
+      btn.addEventListener('click', function() { editModal.classList.remove('is-visible'); });
+    });
+  }
+}
+
+// ===== 规则 =====
+async function loadRules() {
+  var msg = document.getElementById("rules-msg");
+  if (msg) msg.textContent = "";
+  try {
+    var res = await authFetch(rulesUrl, { headers: buildAuthHeaders({}) });
+    if (!res.ok) throw new Error(await res.text());
+    var data = await res.json();
+    var tbody = document.getElementById("rules-tbody");
+    if (tbody) tbody.innerHTML = "";
+    
+    (data || []).forEach(function(rule, index) {
+      var fromSummary = typeof rule.from === 'string' ? rule.from : (rule.from && rule.from.url ? rule.from.url : JSON.stringify(rule.from || {}));
+      var toSummary = typeof rule.to === 'string' ? rule.to : (rule.to && rule.to.url ? rule.to.url : JSON.stringify(rule.to || {}));
+      var serversSummary = '';
+      if (rule.servers) {
+        if (typeof rule.servers === 'string') {
+          serversSummary = rule.servers;
+        } else if (Array.isArray(rule.servers)) {
+          serversSummary = rule.servers.join(', ');
+        }
+      }
+      
+      var viaSummary = '';
+      if (rule.via && rule.via.endpoints) {
+        viaSummary = Array.isArray(rule.via.endpoints) ? rule.via.endpoints.join(', ') : rule.via.endpoints;
+      }
+
+      // Truncate if too long
+      if (fromSummary.length > 30) fromSummary = fromSummary.substring(0, 27) + "...";
+      if (toSummary.length > 30) toSummary = toSummary.substring(0, 27) + "...";
+      if (viaSummary.length > 30) viaSummary = viaSummary.substring(0, 27) + "...";
+      if (serversSummary.length > 30) serversSummary = serversSummary.substring(0, 27) + "...";
+      
+      var tr = document.createElement("tr");
+      tr.innerHTML = "<td>" + index + "</td>" +
+        "<td>" + fromSummary + "</td>" +
+        "<td>" + toSummary + "</td>" +
+        "<td>" + (viaSummary || "-") + "</td>" +
+        "<td>" + (serversSummary || "-") + "</td>" +
+        "<td><button class='bx--btn bx--btn--sm bx--btn--ghost' onclick='openEditRuleModal(" + index + ")'>编辑</button> " +
+        "<button class='bx--btn bx--btn--sm bx--btn--danger--ghost' onclick='deleteRule(" + index + ")'>删除</button></td>";
+      if (tbody) tbody.appendChild(tr);
+    });
+    
+    if (msg) msg.textContent = "路由列表已加载 (" + (data || []).length + " 条规则)";
+  } catch (e) {
+    if (msg) msg.textContent = "加载失败: " + (e.message || e);
+  }
+}
+
+function openAddRuleModal() {
+  var addFrom = document.getElementById("add-rule-from");
+  var addTo = document.getElementById("add-rule-to");
+  var addServers = document.getElementById("add-rule-servers");
+  var addVia = document.getElementById("add-rule-via-endpoints");
+  
+  if (addFrom) addFrom.value = "";
+  if (addTo) addTo.value = "";
+  if (addServers) addServers.value = "";
+  if (addVia) addVia.value = "";
+  document.getElementById("add-rule-auth-provider").value = "";
+  document.getElementById("add-rule-log-level").value = "";
+  document.getElementById("add-rule-log-retention").value = "";
+  
+  var modal = document.querySelector('#rule-add-modal');
+  if (modal) modal.classList.add('is-visible');
+}
+
+function openEditRuleModal(index) {
+  authFetch(rulesUrl, { headers: buildAuthHeaders({}) })
+    .then(function(res) { return res.json(); })
+    .then(function(data) {
+      var rule = (data || [])[index];
+      if (!rule) {
+        showNotification('error', '错误', '规则不存在');
+        return;
+      }
+      
+      document.getElementById("edit-rule-index").value = index;
+      
+      // 填充from
+      populateFromFields(rule.from, 'edit');
+      
+      // 填充to
+      populateToFields(rule.to, 'edit');
+      
+      // 填充via
+      if (rule.via && rule.via.endpoints) {
+        document.getElementById("edit-rule-via-endpoints").value = rule.via.endpoints;
+      } else {
+        document.getElementById("edit-rule-via-endpoints").value = "";
+      }
+      
+      // 填充authProvider
+      var authProvider = "";
+      if (rule.auth && rule.auth.authProvider) {
+        authProvider = rule.auth.authProvider;
+      }
+      document.getElementById("edit-rule-auth-provider").value = authProvider;
+      
+      // 填充servers
+      var servers = '';
+      if (rule.servers) {
+        servers = Array.isArray(rule.servers) ? rule.servers.join(', ') : rule.servers;
+      }
+      document.getElementById("edit-rule-servers").value = servers;
+      document.getElementById("edit-rule-log-level").value = (rule.logLevel !== undefined && rule.logLevel !== null) ? rule.logLevel : "";
+      document.getElementById("edit-rule-log-retention").value = (rule.logRetentionHours !== undefined && rule.logRetentionHours !== null) ? rule.logRetentionHours : "";
+      
+      var modal = document.querySelector('#rule-edit-modal');
+      if (modal) modal.classList.add('is-visible');
+    })
+    .catch(function(e) {
+      showNotification('error', '加载失败', e.message || e);
+    });
+}
+
+// ===== 防火墙 =====
+function initFirewallModals() {
+  var addModal = document.querySelector('#firewall-add-modal');
+  var editModal = document.querySelector('#firewall-edit-modal');
+  if (addModal) {
+    addModal.querySelectorAll('[data-modal-close]').forEach(function(btn) {
+      btn.addEventListener('click', function() { addModal.classList.remove('is-visible'); });
+    });
+  }
+  if (editModal) {
+    editModal.querySelectorAll('[data-modal-close]').forEach(function(btn) {
+      btn.addEventListener('click', function() { editModal.classList.remove('is-visible'); });
+    });
+  }
+}
+
+// ===== 服务 =====
+async function loadServers() {
+  var msg = document.getElementById("servers-msg");
+  if (msg) msg.textContent = "";
+  try {
+    var res = await authFetch(serversUrl, { headers: buildAuthHeaders({}) });
+    if (!res.ok) throw new Error(await res.text());
+    var data = await res.json();
+    var tbody = document.getElementById("servers-tbody");
+    if (tbody) tbody.innerHTML = "";
+    Object.keys(data || {}).forEach(function(name){
+      var s = data[name] || {};
+      var certStr = "";
+      if (typeof s.cert === "string") certStr = s.cert;
+      else if (s.cert && s.cert.cert) certStr = "files";
+      
+      // Format type display
+      var typeStr = "";
+      var typeMap = {
+        1: "1 - TCP",
+        2: "2 - HTTP",
+        3: "3 - UDP",
+        4: "4 - TCP+UDP",
+        5: "5 - HTTP+UDP"
+      };
+      typeStr = (s.type !== undefined && s.type !== null) ? (typeMap[s.type] || s.type) : "2 - HTTP";
+      
+      var tr = document.createElement("tr");
+      tr.innerHTML =
+        "<td>" + name + "</td>" +
+        "<td>" + (s.port != null ? s.port : "") + "</td>" +
+        "<td>" + typeStr + "</td>" +
+        "<td>" + certStr + "</td>" +
+        "<td>" + (s.firewall || "无") + "</td>" +
+        "<td><button class='bx--btn bx--btn--sm bx--btn--ghost' onclick='openEditServerModal(\"" + name.replace(/"/g, '&quot;') + "\")'>编辑</button> " +
+        "<button class='bx--btn bx--btn--sm bx--btn--danger--ghost' onclick='deleteServer(\"" + name.replace(/"/g, '&quot;') + "\")'>删除</button></td>";
+      if (tbody) tbody.appendChild(tr);
+    });
+    if (msg) msg.textContent = "服务列表已加载";
+  } catch (e) {
+    if (msg) msg.textContent = "加载失败: " + (e.message || e);
+  }
+}
+
+function openAddServerModal() {
+  document.getElementById("add-server-name").value = "";
+  document.getElementById("add-server-port").value = "";
+  document.getElementById("add-server-cert").value = "";
+  document.getElementById("add-server-firewall").value = "";
+  document.getElementById("add-server-type").value = "2";  // default to HTTP (2)
+  document.getElementById("add-server-public").checked = true;  // default true
+  document.getElementById("add-server-panel").checked = false;
+  document.getElementById("add-server-proxy").checked = false;
+  document.getElementById("add-server-log-level").value = "";
+  document.getElementById("add-server-log-retention").value = "";
+  document.getElementById("add-server-rate-limit-rules").value = "";
+  populateFirewallSelectors();
+  var modal = document.querySelector('#server-add-modal');
+  if (modal) modal.classList.add('is-visible');
+}
+
+function openEditServerModal(name) {
+  fetch(serversUrl, { headers: buildAuthHeaders({}) })
+    .then(function(res) { return res.json(); })
+    .then(function(data) {
+      var s = data[name] || {};
+      document.getElementById("edit-server-original-name").value = name;
+      document.getElementById("edit-server-name").value = name;
+      document.getElementById("edit-server-port").value = (s.port != null ? s.port : "");
+      var certStr = (typeof s.cert === "string" ? s.cert : "");
+      document.getElementById("edit-server-cert").value = certStr;
+      
+      // Populate firewall options and set current value
+      populateFirewallSelectors().then(function() {
+        document.getElementById("edit-server-firewall").value = (s.firewall || "");
+      });
+      
+      // Populate boolean fields
+      document.getElementById("edit-server-type").value = (s.type !== undefined ? s.type : 2);  // default to HTTP (2)
+      document.getElementById("edit-server-public").checked = (s.public !== undefined ? s.public : true);  // default true
+      document.getElementById("edit-server-panel").checked = s.panel || false;
+      document.getElementById("edit-server-proxy").checked = s.proxy || false;
+      document.getElementById("edit-server-log-level").value = (s.logLevel !== undefined && s.logLevel !== null) ? s.logLevel : "";
+      document.getElementById("edit-server-log-retention").value = (s.logRetentionHours !== undefined && s.logRetentionHours !== null) ? s.logRetentionHours : "";
+      document.getElementById("edit-server-rate-limit-rules").value = (s.rateLimitRules || []).join(", ");
+      
+      var modal = document.querySelector('#server-edit-modal');
+      if (modal) modal.classList.add('is-visible');
+    })
+    .catch(function(e) {
+      var msg = document.getElementById("servers-msg");
+      if (msg) msg.textContent = "加载服务失败: " + (e.message || e);
+    });
+}
+
+async function deleteServer(name) {
+  if (!confirm("确定要删除服务 '" + name + "' 吗?")) return;
+  var msg = document.getElementById("servers-msg");
+  if (msg) msg.textContent = "";
+  try {
+    var res = await authFetch(serversUrl + "?name=" + encodeURIComponent(name), { method: "DELETE", headers: buildAuthHeaders({}) });
+    var text = await res.text();
+    if (!res.ok) throw new Error(text);
+    if (msg) msg.textContent = "删除成功";
+    loadServers();
+  } catch (e) {
+    if (msg) msg.textContent = "删除失败: " + (e.message || e);
+  }
+}
+
+async function deleteSelectedServer() {
+  var msg = document.getElementById("servers-msg");
+  if (msg) msg.textContent = "";
+  var nameEl = document.getElementById("server-name");
+  var name = nameEl ? nameEl.value.trim() : "";
+  if (!name) { if (msg) msg.textContent = "请先选择服务"; return; }
+  try {
+    var res = await authFetch(serversUrl + "?name=" + encodeURIComponent(name), { method: "DELETE", headers: buildAuthHeaders({}) });
+    var text = await res.text();
+    if (!res.ok) throw new Error(text);
+    if (msg) msg.textContent = "删除成功";
+    loadServers();
+  } catch (e) {
+    if (msg) msg.textContent = "删除失败: " + (e.message || e);
+  }
+}
+
+async function confirmAddServer() {
+  var msg = document.getElementById("servers-msg");
+  if (msg) msg.textContent = "";
+  var name = document.getElementById("add-server-name").value.trim();
+  var port = document.getElementById("add-server-port").value.trim();
+  var cert = document.getElementById("add-server-cert").value.trim();
+  var firewall = document.getElementById("add-server-firewall").value.trim();
+  
+  if (!name) { if (msg) msg.textContent = "服务名必填"; return; }
+  if (!port) { if (msg) msg.textContent = "端口必填"; return; }
+  
+  var payload = {
+    port: parseInt(port, 10),
+    type: parseInt(document.getElementById("add-server-type").value, 10)
+  };
+  if (cert) payload.cert = cert;
+  if (firewall) payload.firewall = firewall;
+  payload.public = document.getElementById("add-server-public").checked;
+  payload.panel = document.getElementById("add-server-panel").checked;
+  payload.proxy = document.getElementById("add-server-proxy").checked;
+  
+  var logLevel = document.getElementById("add-server-log-level").value;
+  if (logLevel !== "") payload.logLevel = parseInt(logLevel, 10);
+  var logRetention = document.getElementById("add-server-log-retention").value;
+  if (logRetention !== "") payload.logRetentionHours = parseInt(logRetention, 10);
+  
+  var rateLimitRulesStr = document.getElementById("add-server-rate-limit-rules").value.trim();
+  if (rateLimitRulesStr) {
+    payload.rateLimitRules = rateLimitRulesStr.split(",").map(function(s){return s.trim();}).filter(function(s){return s;});
+  }
+  
+  try {
+    var res = await authFetch(serversUrl, {
+      method: "POST",
+      headers: buildAuthHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ name: name, server: payload })
+    });
+    var text = await res.text();
+    if (!res.ok) throw new Error(text);
+    if (msg) msg.textContent = "新增成功";
+    var modal = document.querySelector('#server-add-modal');
+    if (modal) modal.classList.remove('is-visible');
+    loadServers();
+  } catch (e) {
+    if (msg) msg.textContent = "新增失败: " + (e.message || e);
+  }
+}
+
+async function confirmEditServer() {
+  var msg = document.getElementById("servers-msg");
+  if (msg) msg.textContent = "";
+  var name = document.getElementById("edit-server-name").value.trim();
+  var port = document.getElementById("edit-server-port").value.trim();
+  var cert = document.getElementById("edit-server-cert").value.trim();
+  var firewall = document.getElementById("edit-server-firewall").value.trim();
+  
+  if (!name) { if (msg) msg.textContent = "服务名必填"; return; }
+  if (!port) { if (msg) msg.textContent = "端口必填"; return; }
+  
+  var payload = {
+    port: parseInt(port, 10),
+    type: parseInt(document.getElementById("edit-server-type").value, 10)
+  };
+  if (cert) payload.cert = cert;
+  if (firewall) payload.firewall = firewall;
+  payload.public = document.getElementById("edit-server-public").checked;
+  payload.panel = document.getElementById("edit-server-panel").checked;
+  payload.proxy = document.getElementById("edit-server-proxy").checked;
+  
+  var logLevel = document.getElementById("edit-server-log-level").value;
+  if (logLevel !== "") payload.logLevel = parseInt(logLevel, 10);
+  var logRetention = document.getElementById("edit-server-log-retention").value;
+  if (logRetention !== "") payload.logRetentionHours = parseInt(logRetention, 10);
+  
+  var rateLimitRulesStr = document.getElementById("edit-server-rate-limit-rules").value.trim();
+  if (rateLimitRulesStr) {
+    payload.rateLimitRules = rateLimitRulesStr.split(",").map(function(s){return s.trim();}).filter(function(s){return s;});
+  }
+  
+  try {
+    var res = await authFetch(serversUrl, {
+      method: "POST",
+      headers: buildAuthHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ name: name, server: payload })
+    });
+    var text = await res.text();
+    if (!res.ok) throw new Error(text);
+    if (msg) msg.textContent = "更新成功";
+    var modal = document.querySelector('#server-edit-modal');
+    if (modal) modal.classList.remove('is-visible');
+    setTimeout(function() { loadServers(); }, 1500);
+  } catch (e) {
+    if (msg) msg.textContent = "更新失败: " + (e.message || e);
+  }
+}
+
+// ===== 规则 =====
+async function loadRules() {
+  var msg = document.getElementById("rules-msg");
+  if (msg) msg.textContent = "";
+  try {
+    var res = await authFetch(rulesUrl, { headers: buildAuthHeaders({}) });
+    if (!res.ok) throw new Error(await res.text());
+    var data = await res.json();
+    var tbody = document.getElementById("rules-tbody");
+    if (tbody) tbody.innerHTML = "";
+    
+    (data || []).forEach(function(rule, index) {
+      var fromSummary = typeof rule.from === 'string' ? rule.from : (rule.from && rule.from.url ? rule.from.url : JSON.stringify(rule.from || {}));
+      var toSummary = typeof rule.to === 'string' ? rule.to : (rule.to && rule.to.url ? rule.to.url : JSON.stringify(rule.to || {}));
+      var serversSummary = '';
+      if (rule.servers) {
+        if (typeof rule.servers === 'string') {
+          serversSummary = rule.servers;
+        } else if (Array.isArray(rule.servers)) {
+          serversSummary = rule.servers.join(', ');
+        }
+      }
+      
+      var viaSummary = '';
+      if (rule.via && rule.via.endpoints) {
+        viaSummary = Array.isArray(rule.via.endpoints) ? rule.via.endpoints.join(', ') : rule.via.endpoints;
+      }
+
+      // Truncate if too long
+      if (fromSummary.length > 30) fromSummary = fromSummary.substring(0, 27) + "...";
+      if (toSummary.length > 30) toSummary = toSummary.substring(0, 27) + "...";
+      if (viaSummary.length > 30) viaSummary = viaSummary.substring(0, 27) + "...";
+      if (serversSummary.length > 30) serversSummary = serversSummary.substring(0, 27) + "...";
+      
+      var tr = document.createElement("tr");
+      tr.innerHTML = "<td>" + index + "</td>" +
+        "<td>" + fromSummary + "</td>" +
+        "<td>" + toSummary + "</td>" +
+        "<td>" + (viaSummary || "-") + "</td>" +
+        "<td>" + (serversSummary || "-") + "</td>" +
+        "<td><button class='bx--btn bx--btn--sm bx--btn--ghost' onclick='openEditRuleModal(" + index + ")'>编辑</button> " +
+        "<button class='bx--btn bx--btn--sm bx--btn--danger--ghost' onclick='deleteRule(" + index + ")'>删除</button></td>";
+      if (tbody) tbody.appendChild(tr);
+    });
+    
+    if (msg) msg.textContent = "路由列表已加载 (" + (data || []).length + " 条规则)";
+  } catch (e) {
+    if (msg) msg.textContent = "加载失败: " + (e.message || e);
+  }
+}
+
+function openAddRuleModal() {
+  var addFrom = document.getElementById("add-rule-from");
+  var addTo = document.getElementById("add-rule-to");
+  var addServers = document.getElementById("add-rule-servers");
+  var addVia = document.getElementById("add-rule-via-endpoints");
+  
+  if (addFrom) addFrom.value = "";
+  if (addTo) addTo.value = "";
+  if (addServers) addServers.value = "";
+  if (addVia) addVia.value = "";
+  document.getElementById("add-rule-auth-provider").value = "";
+  document.getElementById("add-rule-log-level").value = "";
+  document.getElementById("add-rule-log-retention").value = "";
+  document.getElementById("add-rule-rate-limit-rules").value = "";
+  
+  var modal = document.querySelector('#rule-add-modal');
+  if (modal) modal.classList.add('is-visible');
+}
+
+function openEditRuleModal(index) {
+  authFetch(rulesUrl, { headers: buildAuthHeaders({}) })
+    .then(function(res) { return res.json(); })
+    .then(function(data) {
+      var rule = (data || [])[index];
+      if (!rule) {
+        showNotification('error', '错误', '规则不存在');
+        return;
+      }
+      
+      document.getElementById("edit-rule-index").value = index;
+      
+      // 填充from
+      populateFromFields(rule.from, 'edit');
+      
+      // 填充to
+      populateToFields(rule.to, 'edit');
+      
+      // 填充via
+      if (rule.via && rule.via.endpoints) {
+        document.getElementById("edit-rule-via-endpoints").value = rule.via.endpoints;
+      } else {
+        document.getElementById("edit-rule-via-endpoints").value = "";
+      }
+      
+      // 填充authProvider
+      var authProvider = "";
+      if (rule.auth && rule.auth.authProvider) {
+        authProvider = rule.auth.authProvider;
+      }
+      document.getElementById("edit-rule-auth-provider").value = authProvider;
+      
+      // 填充servers
+      var servers = '';
+      if (rule.servers) {
+        servers = Array.isArray(rule.servers) ? rule.servers.join(', ') : rule.servers;
+      }
+      document.getElementById("edit-rule-servers").value = servers;
+      document.getElementById("edit-rule-log-level").value = (rule.logLevel !== undefined && rule.logLevel !== null) ? rule.logLevel : "";
+      document.getElementById("edit-rule-log-retention").value = (rule.logRetentionHours !== undefined && rule.logRetentionHours !== null) ? rule.logRetentionHours : "";
+      document.getElementById("edit-rule-rate-limit-rules").value = (rule.rateLimitRules || []).join(", ");
+      
+      var modal = document.querySelector('#rule-edit-modal');
+      if (modal) modal.classList.add('is-visible');
+    })
+    .catch(function(e) {
+      showNotification('error', '加载失败', e.message || e);
+    });
+}
+
+function populateFromFields(from, prefix) {
+  var fromInput = document.getElementById(prefix + "-rule-from");
+  if (!fromInput) return;
+  
+  if (typeof from === 'string') {
+    fromInput.value = from;
+  } else if (Array.isArray(from)) {
+    fromInput.value = from.join('\n');
+  } else if (typeof from === 'object') {
+    var urls = Array.isArray(from.url) ? from.url : [from.url];
+    fromInput.value = urls.join('\n');
+  }
+}
+
+function populateToFields(to, prefix) {
+  var toInput = document.getElementById(prefix + "-rule-to");
+  if (!toInput) return;
+  
+  if (typeof to === 'string') {
+    toInput.value = to;
+  } else if (typeof to === 'object') {
+    toInput.value = to.url || "";
+  }
+}
+
+async function deleteRule(index) {
+  if (!confirm('确认删除规则 #' + index + ' ?')) return;
+  
+  var msg = document.getElementById('rules-msg');
+  if (msg) msg.textContent = '';
+  
+  try {
+    var res = await authFetch(rulesUrl + '?index=' + index, { 
+      method: 'DELETE', 
+      headers: buildAuthHeaders({}) 
+    });
+    if (!res.ok) throw new Error(await res.text());
+    
+    showNotification('success', '删除成功', '规则已删除');
+    loadRules();
+  } catch (e) {
+    showNotification('error', '删除失败', e.message || e);
+  }
+}
+
+function buildFromConfig(prefix) {
+  var fromText = document.getElementById(prefix + '-rule-from').value.trim();
+  
+  if (!fromText) {
+    showNotification('error', '验证失败', '源路径不能为空');
+    return null;
+  }
+  
+  var urlList = fromText.split('\n').map(function(s) { return s.trim(); }).filter(function(s) { return s; });
+  return urlList.length === 1 ? urlList[0] : urlList;
+}
+
+function buildToConfig(prefix) {
+  var toUrl = document.getElementById(prefix + '-rule-to').value.trim();
+  
+  if (!toUrl) {
+    showNotification('error', '验证失败', '目标路径不能为空');
+    return null;
+  }
+  
+  return toUrl;
+}
+
+async function confirmAddRule() {
+  var msg = document.getElementById('rules-msg');
+  if (msg) msg.textContent = '';
+  
+  // 构建from
+  var from = buildFromConfig('add');
+  if (!from) return; // 验证失败
+  
+  // 构建to
+  var to = buildToConfig('add');
+  if (!to) return; // 验证失败
+  
+  var rule = { from: from, to: to };
+  
+  // Via
+  var viaEndpoints = document.getElementById('add-rule-via-endpoints').value.trim();
+  if (viaEndpoints) {
+    rule.via = { endpoints: viaEndpoints };
+  }
+  
+  var authProvider = document.getElementById("add-rule-auth-provider").value;
+  if (authProvider) {
+    if (!rule.auth) rule.auth = {};
+    rule.auth.authProvider = authProvider;
+  }
+  
+  // Servers
+  var serversStr = document.getElementById('add-rule-servers').value.trim();
+  if (serversStr) {
+    var serversList = serversStr.split(',').map(function(s) { return s.trim(); }).filter(function(s) { return s; });
+    if (serversList.length === 1) {
+      rule.servers = serversList[0];
+    } else if (serversList.length > 1) {
+      rule.servers = serversList;
+    }
+  }
+  
+  var logLevel = document.getElementById("add-rule-log-level").value;
+  if (logLevel !== "") rule.logLevel = parseInt(logLevel, 10);
+  var logRetention = document.getElementById("add-rule-log-retention").value;
+  if (logRetention !== "") rule.logRetentionHours = parseInt(logRetention, 10);
+
+  var rateLimitRulesStr = document.getElementById("add-rule-rate-limit-rules").value.trim();
+  if (rateLimitRulesStr) {
+    rule.rateLimitRules = rateLimitRulesStr.split(",").map(function(s){return s.trim();}).filter(function(s){return s;});
+  }
+
+  try {
+    var res = await authFetch(rulesUrl, {
+      method: 'POST',
+      headers: buildAuthHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify(rule)
+    });
+    
+    if (!res.ok) throw new Error(await res.text());
+    
+    showNotification('success', '新增成功', '规则已添加');
+    var modal = document.querySelector('#rule-add-modal');
+    if (modal) modal.classList.remove('is-visible');
+    loadRules();
+  } catch (e) {
+    showNotification('error', '新增失败', e.message || e);
+  }
+}
+
+async function confirmEditRule() {
+  var msg = document.getElementById('rules-msg');
+  if (msg) msg.textContent = '';
+  
+  var index = document.getElementById('edit-rule-index').value;
+  
+  // 构建from
+  var from = buildFromConfig('edit');
+  if (!from) return; // 验证失败
+  
+  // 构建to
+  var to = buildToConfig('edit');
+  if (!to) return; // 验证失败
+  
+  var rule = { from: from, to: to };
+  
+  // Via
+  var viaEndpoints = document.getElementById('edit-rule-via-endpoints').value.trim();
+  if (viaEndpoints) {
+    rule.via = { endpoints: viaEndpoints };
+  }
+  
+  var authProvider = document.getElementById("edit-rule-auth-provider").value;
+  if (authProvider) {
+    if (!rule.auth) rule.auth = {};
+    rule.auth.authProvider = authProvider;
+  }
+  
+  // Servers
+  var serversStr = document.getElementById('edit-rule-servers').value.trim();
+  if (serversStr) {
+    var serversList = serversStr.split(',').map(function(s) { return s.trim(); }).filter(function(s) { return s; });
+    if (serversList.length === 1) {
+      rule.servers = serversList[0];
+    } else if (serversList.length > 1) {
+      rule.servers = serversList;
+    }
+  }
+  
+  var logLevel = document.getElementById("edit-rule-log-level").value;
+  if (logLevel !== "") rule.logLevel = parseInt(logLevel, 10);
+  var logRetention = document.getElementById("edit-rule-log-retention").value;
+  if (logRetention !== "") rule.logRetentionHours = parseInt(logRetention, 10);
+
+  var rateLimitRulesStr = document.getElementById("edit-rule-rate-limit-rules").value.trim();
+  if (rateLimitRulesStr) {
+    rule.rateLimitRules = rateLimitRulesStr.split(",").map(function(s){return s.trim();}).filter(function(s){return s;});
+  }
+
+  try {
+    // 删除旧规则
+    var delRes = await authFetch(rulesUrl + '?index=' + index, {
+      method: 'DELETE',
+      headers: buildAuthHeaders({})
+    });
+    if (!delRes.ok) throw new Error(await delRes.text());
+    
+    // 添加新规则
+    var addRes = await authFetch(rulesUrl, {
+      method: 'POST',
+      headers: buildAuthHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify(rule)
+    });
+    
+    if (!addRes.ok) throw new Error(await addRes.text());
+    
+    showNotification('success', '更新成功', '规则已更新');
+    var modal = document.querySelector('#rule-edit-modal');
+    if (modal) modal.classList.remove('is-visible');
+    loadRules();
+  } catch (e) {
+    showNotification('error', '更新失败', e.message || e);
+  }
+}
+
+
+// ===== 防火墙 =====
+// Unified data format parser
+// =====标签输入管理 Tag Input Management =====
+function setupTagInput(inputId, tagsContainerId) {
+  var input = document.getElementById(inputId);
+  var container = document.getElementById(tagsContainerId);
+  if (!input || !container) return;
+  
+  // Remove existing listeners to avoid duplicates
+  input.onkeydown = null;
+  
+  input.onkeydown = function(e) {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      var value = input.value.trim();
+      if (value) {
+        addTag(tagsContainerId, value);
+        input.value = '';
+      }
+    }
+  };
+}
+
+function addTag(containerId, value) {
+  var container = document.getElementById(containerId);
+  if (!container) return;
+  
+  // Check if tag already exists
+  var existingTags = getTags(containerId);
+  if (existingTags.indexOf(value) !== -1) return;
+  
+  var tag = document.createElement('span');
+  tag.className = 'tag-item';
+  tag.style.cssText = 'display: inline-block; padding: 4px 8px; margin: 2px; background: #0f62fe; color: white; border-radius: 4px; font-size: 12px;';
+  tag.setAttribute('data-value', value);
+  
+  var text = document.createElement('span');
+  text.textContent = value;
+  text.style.marginRight = '6px';
+  
+  var removeBtn = document.createElement('button');
+  removeBtn.textContent = '×';
+  removeBtn.style.cssText = 'border: none; background: transparent; color: white; cursor: pointer; font-size: 16px; padding: 0; margin-left: 4px;';
+  removeBtn.onclick = function() {
+    removeTag(containerId, value);
+  };
+  
+  tag.appendChild(text);
+  tag.appendChild(removeBtn);
+  container.appendChild(tag);
+}
+
+function removeTag(containerId, value) {
+  var container = document.getElementById(containerId);
+  if (!container) return;
+  
+  var tags = container.querySelectorAll('.tag-item');
+  for (var i = 0; i < tags.length; i++) {
+    if (tags[i].getAttribute('data-value') === value) {
+      container.removeChild(tags[i]);
+      break;
+    }
+  }
+}
+
+function getTags(containerId) {
+  var container = document.getElementById(containerId);
+  if (!container) return [];
+  
+  var tags = container.querySelectorAll('.tag-item');
+  var values = [];
+  for (var i = 0; i < tags.length; i++) {
+    values.push(tags[i].getAttribute('data-value'));
+  }
+  return values;
+}
+
+function clearTags(containerId) {
+  var container = document.getElementById(containerId);
+  if (container) container.innerHTML = '';
+}
+
+function setTags(containerId, values) {
+  clearTags(containerId);
+  if (values && values.length) {
+    for (var i = 0; i < values.length; i++) {
+      addTag(containerId, values[i]);
+    }
+  }
+}
+
+function parseFirewallRules(rules) {
+  if (!rules) return [];
+  // Handle array format
+  if (Array.isArray(rules)) {
+    // Single element with newlines: ["ip1\nip2\nip3"]
+    if (rules.length === 1 && typeof rules[0] === 'string' && rules[0].includes('\n')) {
+      return rules[0].split('\n').map(function(s){ return s.trim(); }).filter(Boolean);
+    }
+    // Regular array: ["ip1", "ip2"]
+    return rules;
+  }
+  // Handle string format: "ip1\nip2\nip3"
+  if (typeof rules === 'string') {
+    return rules.split('\n').map(function(s){ return s.trim(); }).filter(Boolean);
+  }
+  return [];
+}
+
+async function loadFirewalls() {
+  var msg = document.getElementById("firewalls-msg");
+  if (msg) msg.textContent = "";
+  try {
+    var res = await authFetch(firewallsUrl, { headers: buildAuthHeaders({}) });
+    if (!res.ok) throw new Error(await res.text());
+    var data = await res.json();
+    
+    var tbody = document.getElementById("firewalls-tbody");
+    if (tbody) tbody.innerHTML = "";
+    
+    Object.keys(data || {}).forEach(function(name) {
+      var fw = data[name] || {};
+      
+      var getRules = function(ruleSet) {
+        var list = [];
+        if (!ruleSet) return list;
+        
+        if (typeof ruleSet === 'object' && !Array.isArray(ruleSet)) {
+          if (ruleSet.networks) list = list.concat(parseFirewallRules(ruleSet.networks));
+          if (ruleSet.regions && Array.isArray(ruleSet.regions)) {
+            list = list.concat(ruleSet.regions.map(function(r) { return "Region:" + r; }));
+          }
+        } else {
+          list = parseFirewallRules(ruleSet);
+        }
+        return list;
+      };
+
+      var allowList = getRules(fw.allow);
+      var blockList = getRules(fw.block);
+      
+      var mode = allowList.length > 0 ? "白名单" : (blockList.length > 0 ? "黑名单" : "无规则");
+      var count = allowList.length + blockList.length;
+      var preview = allowList.length > 0 ? allowList.slice(0, 2).join(", ") : blockList.slice(0, 2).join(", ");
+      if (count > 2) preview += "...";
+      
+      var tr = document.createElement("tr");
+      tr.innerHTML = "<td>" + name + "</td>" +
+        "<td>" + mode + "</td>" +
+        "<td>" + count + "</td>" +
+        "<td>" + (preview || "-") + "</td>" +
+        "<td><button class='bx--btn bx--btn--sm bx--btn--ghost' onclick='openEditFirewallModal(\"" + name.replace(/"/g, '&quot;') + "\")'>编辑</button> " +
+        "<button class='bx--btn bx--btn--sm bx--btn--danger--ghost' onclick='deleteFirewall(\"" + name.replace(/"/g, '&quot;') + "\")'>删除</button></td>";
+      if (tbody) tbody.appendChild(tr);
+    });
+    
+    if (msg) msg.textContent = "防火墙规则已加载 (" + Object.keys(data || {}).length + " 组规则)";
+  } catch (e) {
+    if (msg) msg.textContent = "加载失败: " + (e.message || e);
+  }
+}
+
+function openAddFirewallModal() {
+  var modal = document.querySelector('#firewall-add-modal');
+  if (!modal) return;
+  
+  var nameEl = document.getElementById('add-firewall-name');
+  var allowEl = document.getElementById('add-firewall-allow');
+  var blockEl = document.getElementById('add-firewall-block');
+  
+  if (nameEl) nameEl.value = '';
+  if (allowEl) allowEl.value = '';
+  if (blockEl) blockEl.value = '';
+  document.getElementById("add-firewall-log-level").value = "";
+  document.getElementById("add-firewall-log-retention").value = "";
+  
+  // Clear region tag containers
+  clearTags('add-firewall-allow-regions-tags');
+  clearTags('add-firewall-block-regions-tags');
+  
+  // Setup tag input handlers
+  setupTagInput('add-firewall-allow-regions-input', 'add-firewall-allow-regions-tags');
+  setupTagInput('add-firewall-block-regions-input', 'add-firewall-block-regions-tags');
+  
+  modal.classList.add('is-visible');
+}
+
+function openEditFirewallModal(name) {
+  var modal = document.querySelector('#firewall-edit-modal');
+  if (!modal) return;
+  
+  authFetch(firewallsUrl, { headers: buildAuthHeaders({}) })
+    .then(function(res) { return res.json(); })
+    .then(function(data) {
+      var fw = data[name];
+      if (!fw) {
+        showNotification('error', '错误', '防火墙规则不存在');
+        return;
+      }
+      
+      var nameEl = document.getElementById('edit-firewall-name');
+      var allowEl = document.getElementById('edit-firewall-allow');
+      var blockEl = document.getElementById('edit-firewall-block');
+      
+      if (nameEl) nameEl.value = name;
+      
+      // Populate networks from nested structure
+      if (allowEl) {
+        allowEl.value = (fw.allow && fw.allow.networks) ? fw.allow.networks.join('\n') : '';
+      }
+      if (blockEl) {
+        blockEl.value = (fw.block && fw.block.networks) ? fw.block.networks.join('\n') : '';
+      }
+      
+      document.getElementById("edit-firewall-log-level").value = (fw.logLevel !== undefined && fw.logLevel !== null) ? fw.logLevel : "";
+      document.getElementById("edit-firewall-log-retention").value = (fw.logRetentionHours !== undefined && fw.logRetentionHours !== null) ? fw.logRetentionHours : "";
+      
+      // Set region tags from nested structure
+      setTags('edit-firewall-allow-regions-tags', (fw.allow && fw.allow.regions) ? fw.allow.regions : []);
+      setTags('edit-firewall-block-regions-tags', (fw.block && fw.block.regions) ? fw.block.regions : []);
+      
+      // Setup tag input handlers
+      setupTagInput('edit-firewall-allow-regions-input', 'edit-firewall-allow-regions-tags');
+      setupTagInput('edit-firewall-block-regions-input', 'edit-firewall-block-regions-tags');
+      
+      modal.classList.add('is-visible');
+    })
+    .catch(function(e) {
+      showNotification('error', '加载失败', e.message || e);
+    });
+}
+
+async function deleteFirewall(name) {
+  if (!confirm('确认删除防火墙规则 "' + name + '" ?')) return;
+  
+  var msg = document.getElementById('firewalls-msg');
+  if (msg) msg.textContent = '';
+  
+  try {
+    var res = await authFetch(firewallsUrl + '?name=' + encodeURIComponent(name), { 
+      method: 'DELETE', 
+      headers: buildAuthHeaders({}) 
+    });
+    if (!res.ok) throw new Error(await res.text());
+    
+    showNotification('success', '删除成功', '防火墙规则已删除');
+    loadFirewalls();
+  } catch (e) {
+    showNotification('error', '删除失败', e.message || e);
+  }
+}
+
+async function confirmAddFirewall() {
+  var msg = document.getElementById("firewalls-msg");
+  if (msg) msg.textContent = "";
+  var name = document.getElementById("add-firewall-name").value.trim();
+  var allowRaw = document.getElementById("add-firewall-allow").value.trim();
+  var blockRaw = document.getElementById("add-firewall-block").value.trim();
+  
+  if (!name) { if (msg) msg.textContent = "名称必填"; return; }
+  
+  var allowNetworks = allowRaw ? allowRaw.split("\n").map(function(s){return s.trim();}).filter(Boolean) : [];
+  var blockNetworks = blockRaw ? blockRaw.split("\n").map(function(s){return s.trim();}).filter(Boolean) : [];
+  
+  // Collect region tags
+  var allowRegions = getTags('add-firewall-allow-regions-tags');
+  var blockRegions = getTags('add-firewall-block-regions-tags');
+  
+  // Build nested firewall structure
+  var firewall = {};
+  
+  if (allowNetworks.length > 0 || allowRegions.length > 0) {
+    firewall.allow = {};
+    if (allowNetworks.length > 0) firewall.allow.networks = allowNetworks;
+    if (allowRegions.length > 0) firewall.allow.regions = allowRegions;
+  }
+  
+  if (blockNetworks.length > 0 || blockRegions.length > 0) {
+    firewall.block = {};
+    if (blockNetworks.length > 0) firewall.block.networks = blockNetworks;
+    if (blockRegions.length > 0) firewall.block.regions = blockRegions;
+  }
+  
+  var logLevel = document.getElementById("add-firewall-log-level").value;
+  if (logLevel !== "") firewall.logLevel = parseInt(logLevel, 10);
+  var logRetention = document.getElementById("add-firewall-log-retention").value;
+  if (logRetention !== "") firewall.logRetentionHours = parseInt(logRetention, 10);
+
+  try {
+    var res = await authFetch(firewallsUrl, { 
+      method: "POST", 
+      headers: buildAuthHeaders({ "Content-Type": "application/json" }), 
+      body: JSON.stringify({ name: name, firewall: firewall }) 
+    });
+    var text = await res.text();
+    if (!res.ok) throw new Error(text);
+    if (msg) msg.textContent = "新增成功";
+    var modal = document.querySelector('#firewall-add-modal');
+    if (modal) modal.classList.remove('is-visible');
+    loadFirewalls();
+  } catch (e) {
+    if (msg) msg.textContent = "新增失败: " + (e.message || e);
+  }
+}
+
+async function confirmEditFirewall() {
+  var msg = document.getElementById("firewalls-msg");
+  if (msg) msg.textContent = "";
+  var name = document.getElementById("edit-firewall-name").value.trim();
+  var allowRaw = document.getElementById("edit-firewall-allow").value.trim();
+  var blockRaw = document.getElementById("edit-firewall-block").value.trim();
+  
+  if (!name) { if (msg) msg.textContent = "名称必填"; return; }
+  
+  var allowNetworks = allowRaw ? allowRaw.split("\n").map(function(s){return s.trim();}).filter(Boolean) : [];
+  var blockNetworks = blockRaw ? blockRaw.split("\n").map(function(s){return s.trim();}).filter(Boolean) : [];
+  
+  // Collect region tags
+  var allowRegions = getTags('edit-firewall-allow-regions-tags');
+  var blockRegions = getTags('edit-firewall-block-regions-tags');
+  
+  // Build nested firewall structure
+  var firewall = {};
+  
+  if (allowNetworks.length > 0 || allowRegions.length > 0) {
+    firewall.allow = {};
+    if (allowNetworks.length > 0) firewall.allow.networks = allowNetworks;
+    if (allowRegions.length > 0) firewall.allow.regions = allowRegions;
+  }
+  
+  if (blockNetworks.length > 0 || blockRegions.length > 0) {
+    firewall.block = {};
+    if (blockNetworks.length > 0) firewall.block.networks = blockNetworks;
+    if (blockRegions.length > 0) firewall.block.regions = blockRegions;
+  }
+  
+  var logLevel = document.getElementById("edit-firewall-log-level").value;
+  if (logLevel !== "") firewall.logLevel = parseInt(logLevel, 10);
+  var logRetention = document.getElementById("edit-firewall-log-retention").value;
+  if (logRetention !== "") firewall.logRetentionHours = parseInt(logRetention, 10);
+
+  try {
+    var res = await authFetch(firewallsUrl, { 
+      method: "POST", 
+      headers: buildAuthHeaders({ "Content-Type": "application/json" }), 
+      body: JSON.stringify({ name: name, firewall: firewall }) 
+    });
+    var text = await res.text();
+    if (!res.ok) throw new Error(text);
+    if (msg) msg.textContent = "更新成功";
+    var modal = document.querySelector('#firewall-edit-modal');
+    if (modal) modal.classList.remove('is-visible');
+    loadFirewalls();
+  } catch (e) {
+    if (msg) msg.textContent = "更新失败: " + (e.message || e);
+  }
+}
+
+// ===== 流控规则 =====
+function initRateLimitRuleModals() {
+  var addModal = document.querySelector('#rate-limit-rule-add-modal');
+  var editModal = document.querySelector('#rate-limit-rule-edit-modal');
+  if (addModal) {
+    addModal.querySelectorAll('[data-modal-close]').forEach(function(btn) {
+      btn.addEventListener('click', function() { addModal.classList.remove('is-visible'); });
+    });
+  }
+  if (editModal) {
+    editModal.querySelectorAll('[data-modal-close]').forEach(function(btn) {
+      btn.addEventListener('click', function() { editModal.classList.remove('is-visible'); });
+    });
+  }
+  
+  var btnAdd = document.getElementById("btn-rate-limits-add");
+  if (btnAdd) btnAdd.addEventListener("click", openAddRateLimitRuleModal);
+  
+  var btnLoad = document.getElementById("btn-rate-limits-load");
+  if (btnLoad) btnLoad.addEventListener("click", loadRateLimitRules);
+  
+  var btnConfirmAdd = document.getElementById("confirm-add-rate-limit");
+  if (btnConfirmAdd) btnConfirmAdd.addEventListener("click", confirmAddRateLimitRule);
+  
+  var btnConfirmEdit = document.getElementById("confirm-edit-rate-limit");
+  if (btnConfirmEdit) btnConfirmEdit.addEventListener("click", confirmEditRateLimitRule);
+}
+
+async function loadRateLimitRules() {
+  var msg = document.getElementById("rate-limits-msg");
+  if (msg) msg.textContent = "加载中...";
+  try {
+    var res = await authFetch(rateLimitRulesUrl, { headers: buildAuthHeaders({}) });
+    if (!res.ok) throw new Error(await res.text());
+    var data = await res.json();
+    
+    var tbody = document.getElementById("rate-limits-tbody");
+    if (tbody) tbody.innerHTML = "";
+    
+    Object.keys(data || {}).forEach(function(name) {
+      var rule = data[name] || {};
+      var tr = document.createElement("tr");
+      
+      var metricsStr = (rule.metrics || []).map(function(m) {
+        return m.type + "(" + m.window + "s, " + m.threshold + ")";
+      }).join("; ");
+      
+      var actionsStr = (rule.actions || []).map(function(a) {
+        var param = "";
+        if (a.type === "ban") param = a.duration + "s";
+        else if (a.type === "queue") param = a.maxWait + "s";
+        else if (a.type === "redirect") param = a.location;
+        return a.type + "(" + param + ")";
+      }).join("; ");
+      
+      tr.innerHTML = "<td>" + name + "</td>" +
+        "<td>" + (rule.targetType || "-") + "</td>" +
+        "<td>" + metricsStr + "</td>" +
+        "<td>" + actionsStr + "</td>" +
+        "<td><button class='bx--btn bx--btn--sm bx--btn--ghost' onclick='openEditRateLimitRuleModal(\"" + name.replace(/"/g, '&quot;') + "\")'>编辑</button> " +
+        "<button class='bx--btn bx--btn--sm bx--btn--danger--ghost' onclick='deleteRateLimitRule(\"" + name.replace(/"/g, '&quot;') + "\")'>删除</button></td>";
+      if (tbody) tbody.appendChild(tr);
+    });
+    
+    if (msg) msg.textContent = "规则已加载";
+  } catch (e) {
+    if (msg) msg.textContent = "加载失败: " + (e.message || e);
+  }
+}
+
+function openAddRateLimitRuleModal() {
+  document.getElementById("add-rate-limit-name").value = "";
+  document.getElementById("add-rate-limit-target").value = "ip";
+  document.getElementById("add-rate-limit-metrics").value = "";
+  document.getElementById("add-rate-limit-actions").value = "";
+  
+  var modal = document.querySelector('#rate-limit-rule-add-modal');
+  if (modal) modal.classList.add('is-visible');
+}
+
+function openEditRateLimitRuleModal(name) {
+  authFetch(rateLimitRulesUrl, { headers: buildAuthHeaders({}) })
+    .then(function(res) { return res.json(); })
+    .then(function(data) {
+      var rule = data[name];
+      if (!rule) return;
+      
+      document.getElementById("edit-rate-limit-original-name").value = name;
+      document.getElementById("edit-rate-limit-name").value = name;
+      document.getElementById("edit-rate-limit-target").value = rule.targetType || "ip";
+      
+      var metricsStr = (rule.metrics || []).map(function(m) {
+        return m.type + "," + m.window + "," + m.threshold;
+      }).join("\n");
+      document.getElementById("edit-rate-limit-metrics").value = metricsStr;
+      
+      var actionsStr = (rule.actions || []).map(function(a) {
+        var param = "";
+        if (a.type === "ban") param = a.duration;
+        else if (a.type === "queue") param = a.maxWait;
+        else if (a.type === "redirect") param = a.location;
+        return a.type + "," + param;
+      }).join("\n");
+      document.getElementById("edit-rate-limit-actions").value = actionsStr;
+      
+      var modal = document.querySelector('#rate-limit-rule-edit-modal');
+      if (modal) modal.classList.add('is-visible');
+    });
+}
+
+async function confirmAddRateLimitRule() {
+  var msg = document.getElementById("rate-limits-msg");
+  if (msg) msg.textContent = "";
+  var name = document.getElementById("add-rate-limit-name").value.trim();
+  var targetType = document.getElementById("add-rate-limit-target").value;
+  var metricsRaw = document.getElementById("add-rate-limit-metrics").value.trim();
+  var actionsRaw = document.getElementById("add-rate-limit-actions").value.trim();
+  
+  if (!name) { if (msg) msg.textContent = "名称必填"; return; }
+  
+  var metrics = [];
+  if (metricsRaw) {
+    metricsRaw.split("\n").forEach(function(line) {
+      var parts = line.split(",").map(function(s){return s.trim();});
+      if (parts.length >= 3) {
+        metrics.push({
+          type: parts[0],
+          window: parseInt(parts[1], 10),
+          threshold: parseFloat(parts[2]) // Use float to support rate
+        });
+      }
+    });
+  }
+  
+  var actions = [];
+  if (actionsRaw) {
+    actionsRaw.split("\n").forEach(function(line) {
+      var parts = line.split(",").map(function(s){return s.trim();});
+      if (parts.length >= 2) {
+        var action = { type: parts[0] };
+        if (action.type === "ban") action.duration = parseInt(parts[1], 10);
+        else if (action.type === "queue") action.maxWait = parseInt(parts[1], 10);
+        else if (action.type === "redirect") action.location = parts[1];
+        actions.push(action);
+      }
+    });
+  }
+  
+  try {
+    var res = await authFetch(rateLimitRulesUrl, {
+      method: "POST",
+      headers: buildAuthHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({
+        name: name,
+        targetType: targetType,
+        metrics: metrics,
+        actions: actions
+      })
+    });
+    if (!res.ok) throw new Error(await res.text());
+    
+    if (msg) msg.textContent = "新增成功";
+    var modal = document.querySelector('#rate-limit-rule-add-modal');
+    if (modal) modal.classList.remove('is-visible');
+    loadRateLimitRules();
+  } catch (e) {
+    if (msg) msg.textContent = "新增失败: " + (e.message || e);
+  }
+}
+
+async function confirmEditRateLimitRule() {
+  var msg = document.getElementById("rate-limits-msg");
+  if (msg) msg.textContent = "";
+  var name = document.getElementById("edit-rate-limit-name").value.trim();
+  var targetType = document.getElementById("edit-rate-limit-target").value;
+  var metricsRaw = document.getElementById("edit-rate-limit-metrics").value.trim();
+  var actionsRaw = document.getElementById("edit-rate-limit-actions").value.trim();
+  
+  if (!name) { if (msg) msg.textContent = "名称必填"; return; }
+  
+  var metrics = [];
+  if (metricsRaw) {
+    metricsRaw.split("\n").forEach(function(line) {
+      var parts = line.split(",").map(function(s){return s.trim();});
+      if (parts.length >= 3) {
+        metrics.push({
+          type: parts[0],
+          window: parseInt(parts[1], 10),
+          threshold: parseFloat(parts[2])
+        });
+      }
+    });
+  }
+  
+  var actions = [];
+  if (actionsRaw) {
+    actionsRaw.split("\n").forEach(function(line) {
+      var parts = line.split(",").map(function(s){return s.trim();});
+      if (parts.length >= 2) {
+        var action = { type: parts[0] };
+        if (action.type === "ban") action.duration = parseInt(parts[1], 10);
+        else if (action.type === "queue") action.maxWait = parseInt(parts[1], 10);
+        else if (action.type === "redirect") action.location = parts[1];
+        actions.push(action);
+      }
+    });
+  }
+  
+  try {
+    var res = await authFetch(rateLimitRulesUrl, {
+      method: "POST",
+      headers: buildAuthHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({
+        name: name,
+        targetType: targetType,
+        metrics: metrics,
+        actions: actions
+      })
+    });
+    if (!res.ok) throw new Error(await res.text());
+    
+    if (msg) msg.textContent = "更新成功";
+    var modal = document.querySelector('#rate-limit-rule-edit-modal');
+    if (modal) modal.classList.remove('is-visible');
+    loadRateLimitRules();
+  } catch (e) {
+    if (msg) msg.textContent = "更新失败: " + (e.message || e);
+  }
+}
+
+async function deleteRateLimitRule(name) {
+  if (!confirm('确认删除流控规则 "' + name + '" ?')) return;
+  var msg = document.getElementById("rate-limits-msg");
+  if (msg) msg.textContent = "";
+  
+  try {
+    var res = await authFetch(rateLimitRulesUrl + "?name=" + encodeURIComponent(name), { method: "DELETE", headers: buildAuthHeaders({}) });
+    if (!res.ok) throw new Error(await res.text());
+    if (msg) msg.textContent = "删除成功";
+    loadRateLimitRules();
+  } catch (e) {
+    if (msg) msg.textContent = "删除失败: " + (e.message || e);
+  }
+}
+
+// ===== 认证提供商 =====
+function initAuthProviderModals() {
+  var addModal = document.querySelector('#auth-provider-add-modal');
+  var editModal = document.querySelector('#auth-provider-edit-modal');
+  if (addModal) {
+    addModal.querySelectorAll('[data-modal-close]').forEach(function(btn) {
+      btn.addEventListener('click', function() { addModal.classList.remove('is-visible'); });
+    });
+  }
+  if (editModal) {
+    editModal.querySelectorAll('[data-modal-close]').forEach(function(btn) {
+      btn.addEventListener('click', function() { editModal.classList.remove('is-visible'); });
+    });
+  }
+}
+
+async function loadAuthProviders() {
+  var msg = document.getElementById("auth-providers-msg");
+  if (msg) msg.textContent = "";
+  try {
+    var res = await authFetch(authProvidersUrl, { headers: buildAuthHeaders({}) });
+    if (!res.ok) throw new Error(await res.text());
+    var data = await res.json();
+    
+    var tbody = document.getElementById("auth-providers-tbody");
+    if (tbody) tbody.innerHTML = "";
+    
+    Object.keys(data || {}).forEach(function(name) {
+      var ap = data[name] || {};
+      var tr = document.createElement("tr");
+      tr.innerHTML = "<td>" + name + "</td>" +
+        "<td>" + (ap.url || "-") + "</td>" +
+        "<td>" + ap.level + "</td>" +
+        "<td><button class='bx--btn bx--btn--sm bx--btn--ghost' onclick='openEditAuthProviderModal(\"" + name.replace(/"/g, '&quot;') + "\")'>编辑</button> " +
+        "<button class='bx--btn bx--btn--sm bx--btn--danger--ghost' onclick='deleteAuthProvider(\"" + name.replace(/"/g, '&quot;') + "\")'>删除</button></td>";
+      if (tbody) tbody.appendChild(tr);
+    });
+    
+    if (msg) msg.textContent = "认证配置已加载";
+  } catch (e) {
+    if (msg) msg.textContent = "加载失败: " + (e.message || e);
+  }
+}
+
+function openAddAuthProviderModal() {
+  document.getElementById("add-auth-provider-name").value = "";
+  document.getElementById("add-auth-provider-url").value = "";
+  document.getElementById("add-auth-provider-login-url").value = "";
+  document.getElementById("add-auth-provider-level").value = "0";
+  
+  var modal = document.querySelector('#auth-provider-add-modal');
+  if (modal) modal.classList.add('is-visible');
+}
+
+function openEditAuthProviderModal(name) {
+  authFetch(authProvidersUrl, { headers: buildAuthHeaders({}) })
+    .then(function(res) { return res.json(); })
+    .then(function(data) {
+      var ap = data[name];
+      if (!ap) return;
+      
+      document.getElementById("edit-auth-provider-original-name").value = name;
+      document.getElementById("edit-auth-provider-name").value = name;
+      document.getElementById("edit-auth-provider-url").value = ap.url || "";
+      document.getElementById("edit-auth-provider-login-url").value = ap.loginUrl || "";
+      document.getElementById("edit-auth-provider-level").value = ap.level || 0;
+      
+      // Populate token source fields
+      document.getElementById("edit-auth-provider-token-source-header").value = (ap.tokenSource && ap.tokenSource.header) || "";
+      document.getElementById("edit-auth-provider-token-source-cookie").value = (ap.tokenSource && ap.tokenSource.cookie) || "";
+      document.getElementById("edit-auth-provider-token-source-qs").value = (ap.tokenSource && ap.tokenSource.querystring) || "";
+      
+      // Populate token dest fields
+      document.getElementById("edit-auth-provider-token-dest-header").value = (ap.tokenDest && ap.tokenDest.header) || "";
+      document.getElementById("edit-auth-provider-token-dest-cookie").value = (ap.tokenDest && ap.tokenDest.cookie) || "";
+      document.getElementById("edit-auth-provider-token-dest-qs").value = (ap.tokenDest && ap.tokenDest.querystring) || "";
+      
+      var modal = document.querySelector('#auth-provider-edit-modal');
+      if (modal) modal.classList.add('is-visible');
+    });
+}
+
+async function confirmAddAuthProvider() {
+  var msg = document.getElementById("auth-providers-msg");
+  if (msg) msg.textContent = "";
+  var name = document.getElementById("add-auth-provider-name").value.trim();
+  var url = document.getElementById("add-auth-provider-url").value.trim();
+  var loginUrl = document.getElementById("add-auth-provider-login-url").value.trim();
+  var level = parseInt(document.getElementById("add-auth-provider-level").value, 10);
+  
+  if (!name) { if (msg) msg.textContent = "名称必填"; return; }
+  if (!url) { if (msg) msg.textContent = "URL必填"; return; }
+  
+  // Build tokenSource
+  var tokenSource = {};
+  var srcHeader = document.getElementById("add-auth-provider-token-source-header").value.trim();
+  var srcCookie = document.getElementById("add-auth-provider-token-source-cookie").value.trim();
+  var srcQs = document.getElementById("add-auth-provider-token-source-qs").value.trim();
+  if (srcHeader) tokenSource.header = srcHeader;
+  if (srcCookie) tokenSource.cookie = srcCookie;
+  if (srcQs) tokenSource.querystring = srcQs;
+  
+  // Build tokenDest
+  var tokenDest = {};
+  var destHeader = document.getElementById("add-auth-provider-token-dest-header").value.trim();
+  var destCookie = document.getElementById("add-auth-provider-token-dest-cookie").value.trim();
+  var destQs = document.getElementById("add-auth-provider-token-dest-qs").value.trim();
+  if (destHeader) tokenDest.header = destHeader;
+  if (destCookie) tokenDest.cookie = destCookie;
+  if (destQs) tokenDest.querystring = destQs;
+  
+  var authProvider = { url: url, loginUrl: loginUrl, level: level };
+  if (Object.keys(tokenSource).length > 0) authProvider.tokenSource = tokenSource;
+  if (Object.keys(tokenDest).length > 0) authProvider.tokenDest = tokenDest;
+  
+  try {
+    var res = await authFetch(authProvidersUrl, {
+      method: "POST",
+      headers: buildAuthHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ name: name, authProvider: authProvider })
+    });
+    if (!res.ok) throw new Error(await res.text());
+    
+    if (msg) msg.textContent = "新增成功";
+    var modal = document.querySelector('#auth-provider-add-modal');
+    if (modal) modal.classList.remove('is-visible');
+    loadAuthProviders();
+  } catch (e) {
+    if (msg) msg.textContent = "新增失败: " + (e.message || e);
+  }
+}
+
+async function confirmEditAuthProvider() {
+  var msg = document.getElementById("auth-providers-msg");
+  if (msg) msg.textContent = "";
+  var name = document.getElementById("edit-auth-provider-name").value.trim();
+  var url = document.getElementById("edit-auth-provider-url").value.trim();
+  var loginUrl = document.getElementById("edit-auth-provider-login-url").value.trim();
+  var level = parseInt(document.getElementById("edit-auth-provider-level").value, 10);
+  
+  if (!name) { if (msg) msg.textContent = "名称必填"; return; }
+  if (!url) { if (msg) msg.textContent = "URL必填"; return; }
+  
+  // Build tokenSource
+  var tokenSource = {};
+  var srcHeader = document.getElementById("edit-auth-provider-token-source-header").value.trim();
+  var srcCookie = document.getElementById("edit-auth-provider-token-source-cookie").value.trim();
+  var srcQs = document.getElementById("edit-auth-provider-token-source-qs").value.trim();
+  if (srcHeader) tokenSource.header = srcHeader;
+  if (srcCookie) tokenSource.cookie = srcCookie;
+  if (srcQs) tokenSource.querystring = srcQs;
+  
+  // Build tokenDest
+  var tokenDest = {};
+  var destHeader = document.getElementById("edit-auth-provider-token-dest-header").value.trim();
+  var destCookie = document.getElementById("edit-auth-provider-token-dest-cookie").value.trim();
+  var destQs = document.getElementById("edit-auth-provider-token-dest-qs").value.trim();
+  if (destHeader) tokenDest.header = destHeader;
+  if (destCookie) tokenDest.cookie = destCookie;
+  if (destQs) tokenDest.querystring = destQs;
+  
+  var authProvider = { url: url, loginUrl: loginUrl, level: level };
+  if (Object.keys(tokenSource).length > 0) authProvider.tokenSource = tokenSource;
+  if (Object.keys(tokenDest).length > 0) authProvider.tokenDest = tokenDest;
+  
+  try {
+    var res = await authFetch(authProvidersUrl, {
+      method: "POST",
+      headers: buildAuthHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ name: name, authProvider: authProvider })
+    });
+    if (!res.ok) throw new Error(await res.text());
+    
+    if (msg) msg.textContent = "更新成功";
+    var modal = document.querySelector('#auth-provider-edit-modal');
+    if (modal) modal.classList.remove('is-visible');
+    loadAuthProviders();
+  } catch (e) {
+    if (msg) msg.textContent = "更新失败: " + (e.message || e);
+  }
+}
+
+async function deleteAuthProvider(name) {
+  if (!confirm('确认删除认证配置 "' + name + '" ?')) return;
+  var msg = document.getElementById("auth-providers-msg");
+  if (msg) msg.textContent = "";
+  
+  try {
+    var res = await authFetch(authProvidersUrl + "?name=" + encodeURIComponent(name), { method: "DELETE", headers: buildAuthHeaders({}) });
+    if (!res.ok) throw new Error(await res.text());
+    if (msg) msg.textContent = "删除成功";
+    loadAuthProviders();
+  } catch (e) {
+    if (msg) msg.textContent = "删除失败: " + (e.message || e);
+  }
+}
+
+// 填充防火墙下拉框
+async function populateFirewallSelectors() {
+  try {
+    var res = await authFetch(firewallsUrl, { headers: buildAuthHeaders({}) });
+    if (!res.ok) return; // Silently fail if can't load firewalls
+    var data = await res.json();
+    var names = Object.keys(data || {});
+    
+    // Populate add server firewall selector
+    var addServerFwEl = document.getElementById("add-server-firewall");
+    if (addServerFwEl) {
+      addServerFwEl.innerHTML = '<option value="">无</option>';
+      names.forEach(function(name) {
+        var opt = document.createElement("option");
+        opt.value = name;
+        opt.textContent = name;
+        addServerFwEl.appendChild(opt);
+      });
+    }
+    
+    // Populate edit server firewall selector
+    var editServerFwEl = document.getElementById("edit-server-firewall");
+    if (editServerFwEl) {
+      editServerFwEl.innerHTML = '<option value="">无</option>';
+      names.forEach(function(name) {
+        var opt = document.createElement("option");
+        opt.value = name;
+        opt.textContent = name;
+        editServerFwEl.appendChild(opt);
+      });
+    }
+    
+    // Populate rule firewall selector
+    var ruleFwEl = document.getElementById("rule-firewall");
+    if (ruleFwEl) {
+      ruleFwEl.innerHTML = '<option value="">无</option>';
+      names.forEach(function(name) {
+        var opt = document.createElement("option");
+        opt.value = name;
+        opt.textContent = name;
+        ruleFwEl.appendChild(opt);
+      });
+    }
+  } catch (e) {
+    // Silently fail
+  }
+}
+
+// 填充认证提供商下拉框
+async function populateAuthProviderSelectors() {
+  try {
+    var res = await authFetch(authProvidersUrl, { headers: buildAuthHeaders({}) });
+    if (!res.ok) return;
+    var data = await res.json();
+    var names = Object.keys(data || {});
+    
+    // Rule Add
+    var addEl = document.getElementById("add-rule-auth-provider");
+    if (addEl) {
+      addEl.innerHTML = '<option value="">无</option>';
+      names.forEach(function(name) {
+        var opt = document.createElement("option");
+        opt.value = name;
+        opt.textContent = name;
+        addEl.appendChild(opt);
+      });
+    }
+    
+    // Rule Edit
+    var editEl = document.getElementById("edit-rule-auth-provider");
+    if (editEl) {
+      editEl.innerHTML = '<option value="">无</option>';
+      names.forEach(function(name) {
+        var opt = document.createElement("option");
+        opt.value = name;
+        opt.textContent = name;
+        editEl.appendChild(opt);
+      });
+    }
+  } catch (e) {}
+}
+
+// Expose Modal functions to global scope for onclick handlers
+window.openAddUserModal = openAddUserModal;
+window.openEditUserModal = openEditUserModal;
+window.deleteUser = deleteUser;
+window.openAddProxyModal = openAddProxyModal;
+window.openEditProxyModal = openEditProxyModal;
+window.deleteProxy = deleteProxy;
+window.openAddTunnelModal = openAddTunnelModal;
+window.openEditTunnelModal = openEditTunnelModal;
+window.deleteTunnel = deleteTunnel;
+window.openEditServerModal = openEditServerModal;
+window.deleteServer = deleteServer;
+window.openEditRuleModal = openEditRuleModal;
+window.deleteRule = deleteRule;
+window.openEditFirewallModal = openEditFirewallModal;
+window.openEditFirewallModal = openEditFirewallModal;
+window.deleteFirewall = deleteFirewall;
+window.openEditAuthProviderModal = openEditAuthProviderModal;
+window.deleteAuthProvider = deleteAuthProvider;
+
+// Also expose load functions
+window.loadUsers = loadUsers;
+window.loadProxies = loadProxies;
+window.loadTunnels = loadTunnels;
+window.loadServers = loadServers;
+window.loadRules = loadRules;
+window.loadFirewalls = loadFirewalls;
+window.loadTunnelEndpoints = loadTunnelEndpoints;
+window.loadRateLimitRules = loadRateLimitRules;
+window.openAddRateLimitRuleModal = openAddRateLimitRuleModal;
+window.openEditRateLimitRuleModal = openEditRateLimitRuleModal;
+window.deleteRateLimitRule = deleteRateLimitRule;
+
+// ===== 日志 =====
+var currentLogPage = 1;
+var logPageSize = 20;
+
+async function loadLogs() {
+  var msg = document.getElementById("logs-msg");
+  if (msg) msg.textContent = "加载中...";
+  
+  var params = new URLSearchParams();
+  params.append("page", currentLogPage);
+  params.append("pageSize", logPageSize);
+  
+  // Filters
+  var startTime = document.getElementById("logs-start-time").value;
+  if(startTime) params.append("startTime", new Date(startTime).toISOString());
+  
+  var endTime = document.getElementById("logs-end-time").value;
+  if(endTime) params.append("endTime", new Date(endTime).toISOString());
+  
+  var protocols = document.getElementById("logs-protocols").value.trim();
+  if(protocols) params.append("protocols", protocols);
+  
+  var servers = document.getElementById("logs-servers").value.trim();
+  if(servers) params.append("servers", servers);
+  
+  var tunnels = document.getElementById("logs-tunnels").value.trim();
+  if(tunnels) params.append("tunnels", tunnels);
+  
+  var proxies = document.getElementById("logs-proxies").value.trim();
+  if(proxies) params.append("proxies", proxies);
+  
+  var users = document.getElementById("logs-users").value.trim();
+  if(users) params.append("users", users);
+  
+  var firewalls = document.getElementById("logs-firewalls").value.trim();
+  if(firewalls) params.append("firewalls", firewalls);
+
+  try {
+    var res = await authFetch(logsUrl + "?" + params.toString(), { headers: buildAuthHeaders({}) });
+    if (!res.ok) throw new Error(await res.text());
+    var data = await res.json();
+    
+    var tbody = document.getElementById("logs-tbody");
+    if (tbody) tbody.innerHTML = "";
+    
+    (data.logs || []).forEach(function(log) {
+      var tr = document.createElement("tr");
+      var details = [];
+      if(log.serverName) details.push("S:" + log.serverName);
+      if(log.tunnelName) details.push("T:" + log.tunnelName);
+      if(log.proxyName) details.push("P:" + log.proxyName);
+      if(log.firewallName) details.push("FW:" + log.firewallName);
+      if(log.userGroup) details.push("G:" + log.userGroup);
+      
+      var urlStr = log.url || log.destination || "-";
+      if(urlStr.length > 50) urlStr = urlStr.substring(0, 47) + "...";
+      
+      tr.innerHTML = `
+        <td><input type="checkbox" class="log-checkbox" value="${log.id}"></td>
+        <td>${new Date(log.timestamp).toLocaleString()}</td>
+        <td>${log.protocol}</td>
+        <td>${log.method || "-"}</td>
+        <td title="${log.url || log.destination}">${urlStr}</td>
+        <td>${log.statusCode || "-"}</td>
+        <td>${log.durationMs}</td>
+        <td>${fmtBytes(log.requestSize)} / ${fmtBytes(log.responseSize)}</td>
+        <td>${log.clientIP}</td>
+        <td>${log.userName || "-"}</td>
+        <td title="${log.token || ""}">${log.token ? (log.token.length > 10 ? log.token.substring(0, 10) + "..." : log.token) : "-"}</td>
+        <td title="${details.join(', ')}">${details.length > 0 ? "查看" : "-"}</td>
+        tr.innerHTML = `;
+      tbody.appendChild(tr);
+    });
+    
+    document.getElementById("logs-pagination-info").textContent = "Page " + data.page + " / Total " + Math.ceil(data.total / data.size);
+    if(msg) msg.textContent = "日志已加载 (总数: " + data.total + ")";
+    
+    // Reset select all checkbox
+    var selectAll = document.getElementById("logs-select-all");
+    if(selectAll) selectAll.checked = false;
+    
+  } catch (e) {
+    if (msg) msg.textContent = "加载失败: " + (e.message || e);
+  }
+}
+
+async function deleteSelectedLogs() {
+  var ids = [];
+  document.querySelectorAll(".log-checkbox:checked").forEach(function(cb) {
+    ids.push(parseInt(cb.value));
+  });
+  
+  if (ids.length === 0) {
+    alert("请先选择要删除的日志");
+    return;
+  }
+  
+  if (!confirm("确定要删除选中的 " + ids.length + " 条日志吗?")) return;
+  
+  try {
+    var res = await authFetch(logsUrl, { 
+      method: "DELETE", 
+      headers: buildAuthHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ ids: ids })
+    });
+    if (!res.ok) throw new Error(await res.text());
+    
+    showNotification('success', '删除成功', ids.length + ' 条日志已删除');
+    loadLogs();
+  } catch (e) {
+    showNotification('error', '删除失败', e.message || e);
+  }
+}
+
+window.loadLogs = loadLogs;
+window.deleteSelectedLogs = deleteSelectedLogs;
+
+// 设置高级面板切换逻辑
+function setupAdvancedPanelToggles() {
+  // Add modal toggles
+  var addFromAdvCheckbox = document.getElementById('add-rule-from-advanced');
+  if (addFromAdvCheckbox) {
+    addFromAdvCheckbox.addEventListener('change', function() {
+      var panel = document.getElementById('add-rule-from-advanced-panel');
+      if (panel) panel.classList.toggle('hidden', !this.checked);
+    });
+  }
+  
+  var addToAdvCheckbox = document.getElementById('add-rule-to-advanced');
+  if (addToAdvCheckbox) {
+    addToAdvCheckbox.addEventListener('change', function() {
+      var panel = document.getElementById('add-rule-to-advanced-panel');
+      if (panel) panel.classList.toggle('hidden', !this.checked);
+    });
+  }
+  
+  // Edit modal toggles
+  var editFromAdvCheckbox = document.getElementById('edit-rule-from-advanced');
+  if (editFromAdvCheckbox) {
+    editFromAdvCheckbox.addEventListener('change', function() {
+      var panel = document.getElementById('edit-rule-from-advanced-panel');
+      if (panel) panel.classList.toggle('hidden', !this.checked);
+    });
+  }
+  
+  var editToAdvCheckbox = document.getElementById('edit-rule-to-advanced');
+  if (editToAdvCheckbox) {
+    editToAdvCheckbox.addEventListener('change', function() {
+      var panel = document.getElementById('edit-rule-to-advanced-panel');
+      if (panel) panel.classList.toggle('hidden', !this.checked);
+    });
+  }
+}
+
+// 绑定按钮事件
+(function bindMgmtEvents(){
+  function on(id, evt, fn){
+    var el = document.getElementById(id);
+    if (el) {
+      el.addEventListener(evt, fn);
+      console.log("✓ Bound:", id);
+    } else {
+      console.warn("✗ Not found:", id);
+    }
+  }
+  console.log("=== Starting button binding ===");
+  on("btn-users-load", "click", loadUsers);
+  on("btn-users-add", "click", openAddUserModal);
+  on("confirm-add-user", "click", confirmAddUser);
+  on("confirm-edit-user", "click", confirmEditUser);
+
+  on("btn-proxies-load", "click", loadProxies);
+  on("btn-proxies-add", "click", openAddProxyModal);
+  on("confirm-add-proxy", "click", confirmAddProxy);
+  on("confirm-edit-proxy", "click", confirmEditProxy);
+
+  on("btn-tunnels-load", "click", loadTunnels);
+  on("btn-tunnels-add", "click", openAddTunnelModal);
+  on("confirm-add-tunnel", "click", confirmAddTunnel);
+  on("confirm-edit-tunnel", "click", confirmEditTunnel);
+
+  on("btn-servers-load", "click", loadServers);
+  on("btn-servers-add", "click", openAddServerModal);
+  on("confirm-add-server", "click", confirmAddServer);
+  on("confirm-edit-server", "click", confirmEditServer);
+
+  on("btn-rules-load", "click", loadRules);
+  on("btn-rules-add", "click", openAddRuleModal);
+  on("confirm-add-rule", "click", confirmAddRule);
+  on("confirm-edit-rule", "click", confirmEditRule);
+
+  on("btn-firewalls-load", "click", loadFirewalls);
+  on("btn-firewalls-add", "click", openAddFirewallModal);
+  on("confirm-add-firewall", "click", confirmAddFirewall);
+  on("confirm-edit-firewall", "click", confirmEditFirewall);
+
+  on("btn-auth-providers-load", "click", loadAuthProviders);
+  on("btn-auth-providers-add", "click", openAddAuthProviderModal);
+  on("confirm-add-auth-provider", "click", confirmAddAuthProvider);
+  on("confirm-edit-auth-provider", "click", confirmEditAuthProvider);
+
+  // Logs events
+  on("btn-logs-search", "click", function() { currentLogPage = 1; loadLogs(); });
+  on("btn-logs-prev", "click", function() { if(currentLogPage > 1) { currentLogPage--; loadLogs(); } });
+  on("btn-logs-next", "click", function() { currentLogPage++; loadLogs(); });
+  on("btn-logs-delete", "click", deleteSelectedLogs);
+  var logSelectAll = document.getElementById("logs-select-all");
+  if(logSelectAll) {
+    logSelectAll.addEventListener("change", function() {
+      var checked = this.checked;
+      document.querySelectorAll(".log-checkbox").forEach(function(cb) { cb.checked = checked; });
+    });
+  }
+  
+  // 初始加载一次
+    refreshStats();
+    // 填充防火墙下拉框
+    populateFirewallSelectors();
+    // 初始化Carbon组件
+    setTimeout(function() {
+      if (typeof CarbonComponents !== 'undefined') {
+        if (CarbonComponents.Toggle && CarbonComponents.Toggle.init) {
+          CarbonComponents.Toggle.init();
+        }
+        initUserModals();
+        initProxyModals();
+        initTunnelModals();
+        initServerModals();
+        initRuleModals();
+        initFirewallModals();
+        initRateLimitRuleModals();
+        initAuthProviderModals();
+      }
+    }, 100);
+  })();
+
+  // ===== 时间序列图表功能 (扩展维度支持) =====
+  let timeSeriesCharts = {};
+  const carbonChartsLib = window.Charts || window.charts;
+  let timeSeriesRequestSeq = 0;
+  let currentDimension = 'global';
+  let currentDimensionKey = '';
+  
+  // 维度选择事件
+  const dimSelector = document.getElementById('chart-dimension');
+  if (dimSelector) {
+    dimSelector.addEventListener('change', async (e) => {
+      currentDimension = e.target.value;
+      currentDimensionKey = '';
+      
+      const keySelector = document.getElementById('chart-dimension-key');
+      if (currentDimension === 'global') {
+        keySelector.style.display = 'none';
+        loadTimeSeriesData();
+      } else {
+        // 显示并填充具体项选择
+        await populateDimensionKeys(currentDimension);
+        keySelector.style.display = 'inline-block';
+      }
+    });
+  }
+  
+  // 具体项选择事件
+  const keySelector = document.getElementById('chart-dimension-key');
+  if (keySelector) {
+    keySelector.addEventListener('change', (e) => {
+      currentDimensionKey = e.target.value;
+      if (currentDimensionKey) {
+        loadTimeSeriesData();
+      }
+    });
+  }
+  
+  // 填充维度选项
+  async function populateDimensionKeys(dimension) {
+    const select = document.getElementById('chart-dimension-key');
+    select.innerHTML = '<option value="">选择...</option>';
+    
+    try {
+      const res = await authFetch(`/.api/${dimension}`);
+      if (!res.ok) throw new Error('Failed to load dimension keys');
+      const data = await res.json();
+      
+      Object.keys(data).forEach(key => {
+        const option = document.createElement('option');
+        option.value = key;
+        option.textContent = key;
+        select.appendChild(option);
+      });
+    } catch (e) {
+      console.error('Error loading dimension keys:', e);
+    }
+  }
+  
+  async function loadTimeSeriesData() {
+    const requestSeq = ++timeSeriesRequestSeq;
+    let url = '/.api/stats/timeseries';
+    
+    if (currentDimension !== 'global' && currentDimensionKey) {
+      url += `?dimension=${currentDimension}&key=${encodeURIComponent(currentDimensionKey)}`;
+    }
+    
+    try {
+      const res = await authFetch(url);
+      if (!res.ok) throw new Error('Failed to load time-series data');
+      const data = await res.json();
+      // 丢弃过期响应，避免并发刷新导致旧数据覆盖新图
+      if (requestSeq !== timeSeriesRequestSeq) return;
+      renderCharts(data);
+    } catch (e) {
+      console.error('Error loading time-series data:', e);
+    }
+  }
+  
+  function renderCharts(snapshots) {
+    if (!snapshots || snapshots.length === 0) return;
+    
+    if (currentDimension === 'global') {
+      // 全局统计渲染
+      renderLineChart('chart-requests', [{
+        group: '总请求数',
+        data: snapshots.map(s => ({ date: new Date(s.timestamp * 1000), value: s.totalRequests }))
+      }]);
+      
+      renderAreaChart('chart-traffic', [
+        { group: '接收流量', data: snapshots.map(s => ({ date: new Date(s.timestamp * 1000), value: (s.bytesReceived / (1024 * 1024)).toFixed(2) })) },
+        { group: '发送流量', data: snapshots.map(s => ({ date: new Date(s.timestamp * 1000), value: (s.bytesSent / (1024 * 1024)).toFixed(2) })) }
+      ]);
+      
+      renderLineChart('chart-connections', [{
+        group: '活跃连接',
+        data: snapshots.map(s => ({ date: new Date(s.timestamp * 1000), value: s.activeConnections }))
+      }]);
+      
+      renderLineChart('chart-qps', [{
+        group: '请求/秒',
+        data: snapshots.map(s => ({ date: new Date(s.timestamp * 1000), value: s.requestsPerSecond ? s.requestsPerSecond.toFixed(2) : 0 }))
+      }]);
+    } else {
+      // 维度统计渲染
+      renderLineChart('chart-requests', [{
+        group: '请求数',
+        data: snapshots.map(s => ({ date: new Date(s.timestamp * 1000), value: s.totalRequests || s.requests || 0 }))
+      }]);
+      
+      renderAreaChart('chart-traffic', [
+        { group: '接收流量', data: snapshots.map(s => ({ date: new Date(s.timestamp * 1000), value: ((s.bytesReceived || s.bytesRecv || 0) / (1024 * 1024)).toFixed(2) })) },
+        { group: '发送流量', data: snapshots.map(s => ({ date: new Date(s.timestamp * 1000), value: ((s.bytesSent || 0) / (1024 * 1024)).toFixed(2) })) }
+      ]);
+      
+      renderLineChart('chart-connections', [{
+        group: '活跃连接',
+        data: snapshots.map(s => ({ date: new Date(s.timestamp * 1000), value: s.activeConnections || s.errors || 0 }))
+      }]);
+      
+      renderLineChart('chart-qps', [{
+        group: '请求/秒',
+        data: snapshots.map(s => ({ date: new Date(s.timestamp * 1000), value: s.requestsPerSecond ? s.requestsPerSecond.toFixed(2) : (s.avgRespTime ? s.avgRespTime.toFixed(2) : 0) }))
+      }]);
+    }
+  }
+  
+  function ensureChartContainer(containerId) {
+    let container = document.getElementById(containerId);
+    if (container) return container;
+    
+    const cardIndexMap = {
+      'chart-requests': 0,
+      'chart-traffic': 1,
+      'chart-connections': 2,
+      'chart-qps': 3
+    };
+    const idx = cardIndexMap[containerId];
+    if (idx === undefined) return null;
+    
+    const cards = document.querySelectorAll('.charts-grid .chart-card');
+    if (!cards || !cards[idx]) return null;
+    
+    container = document.createElement('div');
+    container.id = containerId;
+    container.className = 'chart-container';
+    cards[idx].appendChild(container);
+    return container;
+  }
+  
+  function renderLineChart(containerId, dataSets) {
+    const container = ensureChartContainer(containerId);
+    if (!container) return;
+    if (!carbonChartsLib || !carbonChartsLib.LineChart) {
+      console.error('Carbon Charts library not loaded for line chart rendering');
+      container.innerHTML = '<div style="padding: 2rem; text-align: center; color: #da1e28;">图表组件未加载</div>';
+      return;
+    }
+    
+    const data = [];
+    dataSets.forEach(ds => {
+      ds.data.forEach(point => {
+        data.push({ group: ds.group, date: point.date, value: parseFloat(point.value) });
+      });
+    });
+    
+    const options = {
+      title: '',
+      axes: { bottom: { title: '时间', mapsTo: 'date', scaleType: 'time' }, left: { mapsTo: 'value', scaleType: 'linear' } },
+      curve: 'curveMonotoneX',
+      height: '300px',
+      legend: { enabled: true },
+      toolbar: { enabled: false }
+    };
+    
+    const existingChart = timeSeriesCharts[containerId];
+    if (existingChart && existingChart.model && typeof existingChart.model.setData === 'function') {
+      try {
+        existingChart.model.setData(data);
+        if (typeof existingChart.model.setOptions === 'function') {
+          existingChart.model.setOptions(options);
+        }
+        return;
+      } catch (e) {
+        console.error('Error updating line chart, recreating:', e);
+      }
+    }
+    
+    try {
+      if (existingChart && typeof existingChart.destroy === 'function') {
+        try { existingChart.destroy(); } catch (e) {}
+      }
+      container.innerHTML = '';
+      timeSeriesCharts[containerId] = new carbonChartsLib.LineChart(container, { data, options });
+    } catch (e) {
+      console.error('Error rendering line chart:', e);
+      container.innerHTML = '<div style="padding: 2rem; text-align: center; color: #da1e28;">图表渲染失败</div>';
+    }
+  }
+  
+  function renderAreaChart(containerId, dataSets) {
+    const container = ensureChartContainer(containerId);
+    if (!container) return;
+    if (!carbonChartsLib || !carbonChartsLib.AreaChart) {
+      console.error('Carbon Charts library not loaded for area chart rendering');
+      container.innerHTML = '<div style="padding: 2rem; text-align: center; color: #da1e28;">图表组件未加载</div>';
+      return;
+    }
+    
+    const data = [];
+    dataSets.forEach(ds => {
+      ds.data.forEach(point => {
+        data.push({ group: ds.group, date: point.date, value: parseFloat(point.value) });
+      });
+    });
+    
+    const options = {
+      title: '',
+      axes: { bottom: { title: '时间', mapsTo: 'date', scaleType: 'time' }, left: { mapsTo: 'value', scaleType: 'linear' } },
+      curve: 'curveMonotoneX',
+      height: '300px',
+      legend: { enabled: true },
+      toolbar: { enabled: false }
+    };
+    
+    const existingChart = timeSeriesCharts[containerId];
+    if (existingChart && existingChart.model && typeof existingChart.model.setData === 'function') {
+      try {
+        existingChart.model.setData(data);
+        if (typeof existingChart.model.setOptions === 'function') {
+          existingChart.model.setOptions(options);
+        }
+        return;
+      } catch (e) {
+        console.error('Error updating area chart, recreating:', e);
+      }
+    }
+    
+    try {
+      if (existingChart && typeof existingChart.destroy === 'function') {
+        try { existingChart.destroy(); } catch (e) {}
+      }
+      container.innerHTML = '';
+      timeSeriesCharts[containerId] = new carbonChartsLib.AreaChart(container, { data, options });
+    } catch (e) {
+      console.error('Error rendering area chart:', e);
+      container.innerHTML = '<div style="padding: 2rem; text-align: center; color: #da1e28;">图表渲染失败</div>';
+    }
+  }
+  
+  const btnRefreshCharts = document.getElementById('btn-refresh-charts');
+  if (btnRefreshCharts) btnRefreshCharts.addEventListener('click', loadTimeSeriesData);
+  
+  setTimeout(loadTimeSeriesData, 2000);
+  setInterval(loadTimeSeriesData, 5 * 60 * 1000);
+
+// ===== 节点配置管理 =====
+var endpointAddModal, endpointEditModal;
+
+function initEndpointModals() {
+  var addModal = document.querySelector('#endpoint-add-modal');
+  var editModal = document.querySelector('#endpoint-edit-modal');
+  
+  if (addModal) {
+    addModal.addEventListener('click', function(e) {
+      if (e.target.closest('[data-modal-close]')) {
+        addModal.classList.remove('is-visible');
+      }
+    });
+  }
+  
+  if (editModal) {
+    editModal.addEventListener('click', function(e) {
+      if (e.target.closest('[data-modal-close]')) {
+        editModal.classList.remove('is-visible');
+      }
+    });
+  }
+}
+initEndpointModals();
+
+async function loadEndpoints() {
+  var msg = document.getElementById("endpoints-msg");
+  if (msg) msg.textContent = "";
+  try {
+    var res = await authFetch(endpointsUrl, { headers: buildAuthHeaders({}) });
+    if (!res.ok) throw new Error(await res.text());
+    var data = await res.json();
+    var tbody = document.getElementById("endpoints-tbody");
+    if (tbody) tbody.innerHTML = "";
+    Object.keys(data || {}).forEach(function(id){
+      var ep = data[id] || {};
+      var portMappingsStr = (ep.portMappings && ep.portMappings.length > 0) ? ep.portMappings.length + "个映射" : "无";
+      
+      var tr = document.createElement("tr");
+      tr.innerHTML =
+        "<td>" + id + "</td>" +
+        "<td>" + (ep.tunnelName || "") + "</td>" +
+        "<td>" + (ep.endpointName || "") + "</td>" +
+        "<td>" + portMappingsStr + "</td>" +
+        "<td><button class='bx--btn bx--btn--sm bx--btn--ghost' onclick='openEditEndpointModal(\"" + id.replace(/"/g, '&quot;') + "\")'>编辑</button> " +
+        "<button class='bx--btn bx--btn--sm bx--btn--danger--ghost' onclick='deleteEndpoint(\"" + id.replace(/"/g, '&quot;') + "\")'>删除</button></td>";
+      if (tbody) tbody.appendChild(tr);
+    });
+    if (msg) msg.textContent = "节点配置已加载";
+  } catch (e) {
+    if (msg) msg.textContent = "加载失败: " + (e.message || e);
+  }
+}
+
+async function populateTunnelSelectorsForEndpoints() {
+  try {
+    var res = await authFetch(tunnelsUrl, { headers: buildAuthHeaders({}) });
+    if (!res.ok) return;
+    var data = await res.json();
+    var tunnelNames = Object.keys(data || {});
+    
+    ["add-endpoint-tunnel", "edit-endpoint-tunnel"].forEach(function(id) {
+      var select = document.getElementById(id);
+      if (select) {
+        select.innerHTML = '<option value="">选择隧道...</option>';
+        tunnelNames.forEach(function(name) {
+          var opt = document.createElement("option");
+          opt.value = name;
+          opt.textContent = name;
+          select.appendChild(opt);
+        });
+      }
+    });
+  } catch (e) {
+    console.warn("加载隧道列表失败:", e);
+  }
+}
+
+function openAddEndpointModal() {
+  document.getElementById("add-endpoint-id").value = "";
+  document.getElementById("add-endpoint-tunnel").value = "";
+  document.getElementById("add-endpoint-name").value = "";
+  document.getElementById("add-endpoint-password").value = "";
+  document.getElementById("add-endpoint-port-mappings").value = "";
+  populateTunnelSelectorsForEndpoints();
+  var modal = document.querySelector('#endpoint-add-modal');
+  if (modal) modal.classList.add('is-visible');
+}
+
+async function openEditEndpointModal(endpointId) {
+  try {
+    var res = await authFetch(endpointsUrl, { headers: buildAuthHeaders({}) });
+    if (!res.ok) throw new Error(await res.text());
+    var data = await res.json();
+    var ep = data[endpointId] || {};
+    
+    await populateTunnelSelectorsForEndpoints();
+    
+    document.getElementById("edit-endpoint-original-id").value = endpointId;
+    document.getElementById("edit-endpoint-id").value = endpointId;
+    document.getElementById("edit-endpoint-tunnel").value = ep.tunnelName || "";
+    document.getElementById("edit-endpoint-name").value = ep.endpointName || "";
+    document.getElementById("edit-endpoint-password").value = "";
+    document.getElementById("edit-endpoint-port-mappings").value = ep.portMappings ? JSON.stringify(ep.portMappings, null, 2) : "";
+    
+    var modal = document.querySelector('#endpoint-edit-modal');
+    if (modal) modal.classList.add('is-visible');
+  } catch (e) {
+    var msg = document.getElementById("endpoints-msg");
+    if (msg) msg.textContent = "加载节点数据失败: " + (e.message || e);
+  }
+}
+
+async function confirmAddEndpoint() {
+  var msg = document.getElementById("endpoints-msg");
+  if (msg) msg.textContent = "";
+  var id = document.getElementById("add-endpoint-id").value.trim();
+  var tunnelName = document.getElementById("add-endpoint-tunnel").value;
+  var endpointName = document.getElementById("add-endpoint-name").value.trim();
+  var password = document.getElementById("add-endpoint-password").value;
+  var portMappingsStr = document.getElementById("add-endpoint-port-mappings").value.trim();
+  
+  // Auto-generate UUID if config ID is empty
+  if (!id) {
+    if (typeof crypto !== 'undefined' && crypto.randomUUID) {
+      id = crypto.randomUUID();
+    } else {
+      // Fallback UUID generation
+      id = 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+        var r = Math.random() * 16 | 0, v = c === 'x' ? r : (r & 0x3 | 0x8);
+        return v.toString(16);
+      });
+    }
+    document.getElementById("add-endpoint-id").value = id;
+  }
+  if (!tunnelName) { if (msg) msg.textContent = "隧道名称必填"; return; }
+  if (!endpointName) { if (msg) msg.textContent = "节点名称必填"; return; }
+  
+  var portMappings = [];
+  if (portMappingsStr) {
+    try { portMappings = JSON.parse(portMappingsStr); } catch (e) { if (msg) msg.textContent = "端口映射JSON格式错误"; return; }
+  }
+  
+  var payload = {
+    tunnelName: tunnelName,
+    endpointName: endpointName,
+    password: password || undefined,
+    portMappings: portMappings,
+  };
+  
+  try {
+    var res = await authFetch(endpointsUrl, { 
+      method: "POST", 
+      headers: buildAuthHeaders({ "Content-Type": "application/json" }), 
+      body: JSON.stringify({ name: id, endpoint: payload }) 
+    });
+    var text = await res.text();
+    if (!res.ok) throw new Error(text);
+    if (msg) msg.textContent = "新增成功";
+    var modal = document.querySelector('#endpoint-add-modal');
+    if (modal) modal.classList.remove('is-visible');
+    loadEndpoints();
+  } catch (e) {
+    if (msg) msg.textContent = "新增失败: " + (e.message || e);
+  }
+}
+
+async function confirmEditEndpoint() {
+  var msg = document.getElementById("endpoints-msg");
+  if (msg) msg.textContent = "";
+  var originalId = document.getElementById("edit-endpoint-original-id").value;
+  var id = document.getElementById("edit-endpoint-id").value.trim();
+  var tunnelName = document.getElementById("edit-endpoint-tunnel").value;
+  var endpointName = document.getElementById("edit-endpoint-name").value.trim();
+  var password = document.getElementById("edit-endpoint-password").value;
+  var portMappingsStr = document.getElementById("edit-endpoint-port-mappings").value.trim();
+  
+  if (!id) { if (msg) msg.textContent = "配置ID必填"; return; }
+  if (!tunnelName) { if (msg) msg.textContent = "隧道名称必填"; return; }
+  if (!endpointName) { if (msg) msg.textContent = "节点名称必填"; return; }
+  
+  var portMappings = [];
+  if (portMappingsStr) {
+    try { portMappings = JSON.parse(portMappingsStr); } catch (e) { if (msg) msg.textContent = "端口映射JSON格式错误"; return; }
+  }
+  
+  var payload = {
+    tunnelName: tunnelName,
+    endpointName: endpointName,
+    portMappings: portMappings,
+  };
+  if (password) payload.password = password;
+  
+  try {
+    // If ID changed, delete old and create new
+    if (originalId !== id) {
+      await authFetch(endpointsUrl + "?name=" + encodeURIComponent(originalId), { 
+        method: "DELETE", 
+        headers: buildAuthHeaders({}) 
+      });
+    }
+    var res = await authFetch(endpointsUrl, { 
+      method: "POST", 
+      headers: buildAuthHeaders({ "Content-Type": "application/json" }), 
+      body: JSON.stringify({ name: id, endpoint: payload }) 
+    });
+    var text = await res.text();
+    if (!res.ok) throw new Error(text);
+    if (msg) msg.textContent = "更新成功";
+    var modal = document.querySelector('#endpoint-edit-modal');
+    if (modal) modal.classList.remove('is-visible');
+    loadEndpoints();
+  } catch (e) {
+    if (msg) msg.textContent = "更新失败: " + (e.message || e);
+  }
+}
+
+async function deleteEndpoint(endpointId) {
+  if (!confirm("确定要删除节点配置 \"" + endpointId + "\" 吗？")) return;
+  var msg = document.getElementById("endpoints-msg");
+  if (msg) msg.textContent = "";
+  try {
+    var res = await authFetch(endpointsUrl + "?name=" + encodeURIComponent(endpointId), { 
+      method: "DELETE", 
+      headers: buildAuthHeaders({}) 
+    });
+    var text = await res.text();
+    if (!res.ok) throw new Error(text);
+    if (msg) msg.textContent = "删除成功";
+    loadEndpoints();
+  } catch (e) {
+    if (msg) msg.textContent = "删除失败: " + (e.message || e);
+  }
+}
+
+// Event listeners
+document.getElementById("btn-endpoints-load").addEventListener("click", loadEndpoints);
+document.getElementById("btn-endpoints-add").addEventListener("click", openAddEndpointModal);
+document.getElementById("confirm-add-endpoint").addEventListener("click", confirmAddEndpoint);
+document.getElementById("confirm-edit-endpoint").addEventListener("click", confirmEditEndpoint);
+
+// Export endpoint functions to window for onclick handlers
+window.loadEndpoints = loadEndpoints;
+window.openAddEndpointModal = openAddEndpointModal;
+window.openEditEndpointModal = openEditEndpointModal;
+window.deleteEndpoint = deleteEndpoint;
+window.confirmAddEndpoint = confirmAddEndpoint;
+window.confirmEditEndpoint = confirmEditEndpoint;
+window.populateTunnelSelectorsForEndpoints = populateTunnelSelectorsForEndpoints;
+
+
+
+}); // End of DOMContentLoaded

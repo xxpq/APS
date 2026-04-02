@@ -77,7 +77,7 @@ func (skm *SessionKeyManager) DeriveInitialKey() error {
 	skm.currentKey = hash[:]
 	skm.keyCreatedAt = time.Now()
 
-	log.Printf("[KEY] [%s] Initial session key derived", skm.endpointName)
+	DebugLog("[KEY] [%s] Initial session key derived", skm.endpointName)
 	return nil
 }
 
@@ -96,7 +96,7 @@ func (skm *SessionKeyManager) StartAutoRotation(initiateFunc func() error) {
 		skm.StartAutoRotation(initiateFunc)
 	})
 
-	log.Printf("[KEY] [%s] Auto-rotation scheduled in %v", skm.endpointName, interval)
+	DebugLog("[KEY] [%s] Auto-rotation scheduled in %v", skm.endpointName, interval)
 }
 
 // StopAutoRotation stops the automatic key rotation
@@ -225,7 +225,7 @@ func (skm *SessionKeyManager) HandleKeyConfirm(confirm *KeyConfirmPayload) error
 	skm.keyCreatedAt = time.Now()
 	skm.gracePeriodEnds = time.Now().Add(KeyGracePeriod)
 
-	log.Printf("[KEY] [%s] New session key activated (grace period ends: %v)", skm.endpointName, skm.gracePeriodEnds)
+	DebugLog("[KEY] [%s] New session key activated (grace period ends: %v)", skm.endpointName, skm.gracePeriodEnds)
 
 	// Call rotation callback if set
 	if skm.onKeyRotated != nil {
@@ -251,7 +251,7 @@ func (skm *SessionKeyManager) ActivateKey() error {
 	skm.keyCreatedAt = time.Now()
 	skm.gracePeriodEnds = time.Now().Add(KeyGracePeriod)
 
-	log.Printf("[KEY] [%s] New session key activated by initiator (grace period ends: %v)", skm.endpointName, skm.gracePeriodEnds)
+	DebugLog("[KEY] [%s] New session key activated by initiator (grace period ends: %v)", skm.endpointName, skm.gracePeriodEnds)
 
 	// Call rotation callback if set
 	if skm.onKeyRotated != nil {
@@ -294,7 +294,7 @@ func (skm *SessionKeyManager) Decrypt(ciphertext []byte) ([]byte, error) {
 	if previousKey != nil && time.Now().Before(gracePeriodEnds) {
 		plaintext, err := skm.decryptWithKey(previousKey, ciphertext)
 		if err == nil {
-			log.Printf("[KEY] [%s] Decrypted with previous key (grace period)", skm.endpointName)
+			DebugLog("[KEY] [%s] Decrypted with previous key (grace period)", skm.endpointName)
 			return plaintext, nil
 		}
 	}

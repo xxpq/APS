@@ -212,8 +212,20 @@ func (tc *TunnelConn) WriteMessage(msg *TunnelMessage) error {
 	frame[4] = msg.Type
 	copy(frame[headerSize:], msg.Payload)
 
-	_, err := tc.conn.Write(frame)
-	return err
+	totalWritten := 0
+	for totalWritten < len(frame) {
+		n, err := tc.conn.Write(frame[totalWritten:])
+		if n > 0 {
+			totalWritten += n
+		}
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return io.ErrShortWrite
+		}
+	}
+	return nil
 }
 
 // SendJSON marshals data to JSON and sends as a message

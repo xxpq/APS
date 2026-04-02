@@ -37,41 +37,6 @@ func (c *RateLimitConn) Close() error {
 	return c.Conn.Close()
 }
 
-// PeekConn wraps a net.Conn with peek/unread capability
-type PeekConn struct {
-	net.Conn
-	reader *bufio.Reader
-}
-
-// NewPeekConn wraps a connection with peek capability
-func NewPeekConn(conn net.Conn) *PeekConn {
-	return &PeekConn{
-		Conn:   conn,
-		reader: bufio.NewReader(conn),
-	}
-}
-
-// Close closes the underlying connection
-func (c *PeekConn) Close() error {
-	return c.Conn.Close()
-}
-
-// Read reads from the buffered reader
-func (c *PeekConn) Read(b []byte) (int, error) {
-	if c.reader == nil {
-		return 0, io.EOF
-	}
-	return c.reader.Read(b)
-}
-
-// Peek returns the next n bytes without advancing the reader
-func (c *PeekConn) Peek(n int) ([]byte, error) {
-	if c.reader == nil {
-		return nil, io.EOF
-	}
-	return c.reader.Peek(n)
-}
-
 // NewConnectionMux creates a new connection multiplexer
 func NewConnectionMux(listener net.Listener) *ConnectionMux {
 	return &ConnectionMux{
@@ -180,16 +145,29 @@ func (m *ConnectionMux) handleConnection(conn net.Conn) {
 		}
 	}
 
-	peekConn := NewPeekConn(conn)
+	reader := bufio.NewReader(conn)
 
 	// Peek first 5 bytes (our tunnel header size)
-	header, err := peekConn.Peek(5)
+	header, err := reader.Peek(5)
 	if err != nil {
 		if err != io.EOF {
 			conn.Close()
 		}
 		return
 	}
+
+	// Drain all currently buffered bytes into a prefix replay connection so that
+	// downstream protocols (HTTP/TLS/smux tunnel) read directly from the raw
+	// socket after the initial protocol sniffing step.
+	buffered := reader.Buffered()
+	prefixBytes, err := reader.Peek(buffered)
+	if err != nil {
+		conn.Close()
+		return
+	}
+	prefix := make([]byte, len(prefixBytes))
+	copy(prefix, prefixBytes)
+	routedConn := &prefixedConn{Conn: conn, prefix: prefix}
 
 	m.mu.RLock()
 	httpHandler := m.httpHandler
@@ -200,17 +178,16 @@ func (m *ConnectionMux) handleConnection(conn net.Conn) {
 	if isTunnelProtocol(header) {
 		// TCP Tunnel protocol
 		if tunnelHandler != nil {
-			tunnelHandler(peekConn)
+			tunnelHandler(routedConn)
 		} else {
 			conn.Close()
 		}
 	} else {
 		// Assume HTTP
 		if httpHandler != nil {
-			httpHandler(peekConn)
+			httpHandler(routedConn)
 		} else {
-			// Return reader to pool before closing
-			peekConn.Close()
+			routedConn.Close()
 		}
 	}
 }

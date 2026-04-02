@@ -111,7 +111,7 @@ func (p *MapRemoteProxy) handleConnectWithMITM(w http.ResponseWriter, r *http.Re
 	defer tlsClientConn.Close()
 
 	if err := tlsClientConn.Handshake(); err != nil {
-		log.Printf("TLS handshake error: %v", err)
+		DebugLog("[CONNECT] TLS handshake error: %v", err)
 		return
 	}
 

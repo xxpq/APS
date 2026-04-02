@@ -75,7 +75,7 @@ func (cm *ConnectionManager) AddSeedServer(cfg *ServerConfig) {
 	cfg.IsSeed = true
 	cfg.RetryCount = 0
 	cm.servers[cfg.Address] = cfg
-	log.Printf("[CONN-MGR] Added seed server: %s (cid: %s)", cfg.Address, cfg.ConfigID)
+	DebugLog("[CONN-MGR] Added seed server: %s (cid: %s)", cfg.Address, cfg.ConfigID)
 }
 
 // AddDynamicServer adds a dynamic server (from mirror update)
@@ -91,7 +91,7 @@ func (cm *ConnectionManager) AddDynamicServer(cfg *ServerConfig) bool {
 	cfg.IsSeed = false
 	cfg.RetryCount = 0
 	cm.servers[cfg.Address] = cfg
-	log.Printf("[CONN-MGR] Added dynamic server: %s (cid: %s)", cfg.Address, cfg.ConfigID)
+	DebugLog("[CONN-MGR] Added dynamic server: %s (cid: %s)", cfg.Address, cfg.ConfigID)
 	return true
 }
 
@@ -143,7 +143,7 @@ func (cm *ConnectionManager) RemoveServer(address string) {
 	if cfg, exists := cm.servers[address]; exists {
 		if !cfg.IsSeed {
 			delete(cm.servers, address)
-			log.Printf("[CONN-MGR] Removed dynamic server: %s", address)
+			DebugLog("[CONN-MGR] Removed dynamic server: %s", address)
 		}
 	}
 }
@@ -192,7 +192,7 @@ func (cm *ConnectionManager) CloseAll() {
 
 	for addr, cancel := range cm.active {
 		cancel()
-		log.Printf("[CONN-MGR] Closed connection to %s", addr)
+		DebugLog("[CONN-MGR] Closed connection to %s", addr)
 	}
 	cm.active = make(map[string]context.CancelFunc)
 }
