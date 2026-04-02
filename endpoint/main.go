@@ -246,6 +246,13 @@ func main() {
 		connectionManager.AddSeedServer(cfg)
 	}
 
+	// Prime TLS pin cache for all seed servers before starting any APS requests.
+	for _, addr := range connectionManager.GetAllServers() {
+		if err := PrimeTLSPinForServer(addr); err != nil {
+			log.Fatalf("Failed to initialize TLS pin for server %s: %v", addr, err)
+		}
+	}
+
 	log.Printf("Connecting to %d seed server(s)", len(serverAddrs))
 
 	// Start a goroutine for each seed server connection

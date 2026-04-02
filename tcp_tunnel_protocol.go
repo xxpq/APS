@@ -44,6 +44,11 @@ const (
 	MsgTypeKeyConfirm  uint8 = 0x52 // Confirmation key is activated
 )
 
+const (
+	// SecureCipherSuiteSPKITS enables SPKI-hash + timestamp-salt derivation and replay defense.
+	SecureCipherSuiteSPKITS = "spki-ts-v1"
+)
+
 // Message header size: 4 bytes length + 1 byte type
 const headerSize = 5
 
@@ -61,12 +66,16 @@ type RegisterPayload struct {
 	TunnelName   string `json:"tunnel_name"`
 	EndpointName string `json:"endpoint_name"`
 	Password     string `json:"password"`
+	ServerHost   string `json:"server_host,omitempty"`
+	PinHash      string `json:"pin_hash,omitempty"`
+	CipherSuite  string `json:"cipher_suite,omitempty"`
 }
 
 // RegisterAckPayload is sent by APS to acknowledge registration
 type RegisterAckPayload struct {
-	Success bool   `json:"success"`
-	Error   string `json:"error,omitempty"`
+	Success     bool   `json:"success"`
+	Error       string `json:"error,omitempty"`
+	CipherSuite string `json:"cipher_suite,omitempty"`
 }
 
 // RequestPayloadTCP represents an HTTP request sent via tunnel

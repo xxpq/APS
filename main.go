@@ -722,9 +722,14 @@ func startServer(name string, config *ListenConfig, handler http.Handler, tunnel
 					log.Printf("Failed to load certificate for server '%s': %v", name, err)
 					return
 				}
+				registerTLSPinHash(&tlsConfig.Certificates[0])
 			} else if config.Cert == "auto" {
 				tlsConfig.GetCertificate = func(info *tls.ClientHelloInfo) (*tls.Certificate, error) {
-					return GenerateCertForHost(info.ServerName)
+					cert, certErr := GenerateCertForHost(info.ServerName)
+					if certErr == nil && cert != nil {
+						registerTLSPinHash(cert, info.ServerName)
+					}
+					return cert, certErr
 				}
 			} else if config.Cert == "acme" {
 				acmeTLSConfig := GetACMETLSConfig()
@@ -732,7 +737,20 @@ func startServer(name string, config *ListenConfig, handler http.Handler, tunnel
 					log.Printf("ACME manager not initialized for server '%s', cannot start HTTPS server.", name)
 					return
 				}
-				tlsConfig = acmeTLSConfig
+				tlsConfig = acmeTLSConfig.Clone()
+				for i := range tlsConfig.Certificates {
+					registerTLSPinHash(&tlsConfig.Certificates[i])
+				}
+				if tlsConfig.GetCertificate != nil {
+					baseGetCertificate := tlsConfig.GetCertificate
+					tlsConfig.GetCertificate = func(info *tls.ClientHelloInfo) (*tls.Certificate, error) {
+						cert, certErr := baseGetCertificate(info)
+						if certErr == nil && cert != nil {
+							registerTLSPinHash(cert, info.ServerName)
+						}
+						return cert, certErr
+					}
+				}
 			}
 
 			tlsListener := NewTlsListener(httpListener, tlsConfig)

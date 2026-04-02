@@ -163,6 +163,7 @@ func (h *AdminHandlers) RegisterHandlers(mux *http.ServeMux) {
 	mux.HandleFunc("/.api/tunnels", h.handleTunnels)
 	mux.HandleFunc("/.api/tunnels/endpoints", h.handleTunnelEndpoints)
 	mux.HandleFunc("/.api/endpoints", h.handleEndpointConfigs) // Endpoint configuration for P2P management
+	mux.HandleFunc("/.api/tls-pin", h.handleTLSPin)
 	mux.HandleFunc("/.api/servers", h.handleServers)
 	mux.HandleFunc("/.api/rules", h.handleRules)
 	mux.HandleFunc("/.api/rate_limit_rules", h.handleRateLimitRules)  // New endpoint
@@ -880,19 +881,64 @@ func (h *AdminHandlers) handleTunnels(w http.ResponseWriter, r *http.Request) {
 }
 
 // ===== Endpoint配置管理 =====
+func (h *AdminHandlers) handleTLSPin(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	pinKey, host, err := getTLSPinHashForRequest(r)
+	if err != nil {
+		http.Error(w, "TLS pin not available for host", http.StatusBadRequest)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"alg":     TLSPinAlgorithm,
+		"host":    host,
+		"hash":    hex.EncodeToString(pinKey),
+	})
+}
+
 func (h *AdminHandlers) handleEndpointConfigs(w http.ResponseWriter, r *http.Request) {
 	// GET with ?id= parameter allows unauthenticated access for endpoints to fetch their config
 	// All other operations require admin authentication
-	configID := r.URL.Query().Get("id")
+	configID := strings.TrimSpace(r.URL.Query().Get("id"))
+	encryptedConfigID := strings.TrimSpace(r.URL.Query().Get(TLSEncryptedConfigIDParam))
+	encryptedSalt := strings.TrimSpace(r.URL.Query().Get(TLSEncryptedSaltParam))
 
-	if r.Method == http.MethodGet && configID != "" {
+	if r.Method == http.MethodGet && (configID != "" || encryptedConfigID != "") {
+		encryptedMode := encryptedConfigID != ""
+		var pinKey []byte
+		var requestSalt string
+		if encryptedMode {
+			var err error
+			configID, requestSalt, pinKey, err = decryptEndpointConfigIDFromRequest(r, encryptedConfigID, encryptedSalt)
+			if err != nil {
+				http.Error(w, "invalid encrypted config id", http.StatusBadRequest)
+				return
+			}
+		}
+
+		writeConfigPayload := func(payload map[string]interface{}) {
+			if encryptedMode {
+				if err := writeEncryptedJSONWithTLSPin(w, pinKey, requestSalt, payload); err != nil {
+					http.Error(w, "failed to write encrypted response", http.StatusInternalServerError)
+				}
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(payload)
+		}
+
 		// Allow endpoint clients to fetch their own config without admin auth
 		h.configMux.RLock()
 		defer h.configMux.RUnlock()
 
 		if h.config.Endpoints == nil {
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			writeConfigPayload(map[string]interface{}{
 				"success": false,
 				"error":   "endpoint not found",
 			})
@@ -901,8 +947,7 @@ func (h *AdminHandlers) handleEndpointConfigs(w http.ResponseWriter, r *http.Req
 
 		endpoint, exists := h.config.Endpoints[configID]
 		if !exists {
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			writeConfigPayload(map[string]interface{}{
 				"success": false,
 				"error":   "endpoint not found",
 			})
@@ -917,8 +962,7 @@ func (h *AdminHandlers) handleEndpointConfigs(w http.ResponseWriter, r *http.Req
 			}
 		}
 
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		writeConfigPayload(map[string]interface{}{
 			"success": true,
 			"config": map[string]interface{}{
 				"id":           configID,

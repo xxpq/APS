@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"strings"
 	"sync"
 	"time"
 
@@ -235,6 +236,48 @@ func (s *TCPTunnelServer) handleConnection(conn net.Conn) {
 		return
 	}
 
+	// Enforce secure handshake; no legacy compatibility mode.
+	if reg.CipherSuite != SecureCipherSuiteSPKITS {
+		DebugLog("[TCP TUNNEL] Unsupported cipher suite '%s' from %s", reg.CipherSuite, remoteAddr)
+		tc.SendJSON(MsgTypeRegisterAck, RegisterAckPayload{
+			Success: false,
+			Error:   "unsupported cipher suite",
+		})
+		tc.Close()
+		return
+	}
+	if reg.ServerHost == "" || reg.PinHash == "" {
+		DebugLog("[TCP TUNNEL] Missing secure registration fields from %s", remoteAddr)
+		tc.SendJSON(MsgTypeRegisterAck, RegisterAckPayload{
+			Success: false,
+			Error:   "missing secure registration fields",
+		})
+		tc.Close()
+		return
+	}
+	expectedPinHash, ok := lookupTLSPinHashForHost(reg.ServerHost)
+	if !ok {
+		DebugLog("[TCP TUNNEL] TLS pin hash unavailable for host '%s' from %s", reg.ServerHost, remoteAddr)
+		tc.SendJSON(MsgTypeRegisterAck, RegisterAckPayload{
+			Success: false,
+			Error:   "tls pin not available for host",
+		})
+		tc.Close()
+		return
+	}
+	expectedHashHex := hex.EncodeToString(expectedPinHash)
+	if !strings.EqualFold(expectedHashHex, reg.PinHash) {
+		DebugLog("[TCP TUNNEL] TLS pin hash mismatch for host '%s' from %s", reg.ServerHost, remoteAddr)
+		tc.SendJSON(MsgTypeRegisterAck, RegisterAckPayload{
+			Success: false,
+			Error:   "tls pin hash mismatch",
+		})
+		tc.Close()
+		return
+	}
+	securePinHash := expectedPinHash
+	negotiatedCipherSuite := SecureCipherSuiteSPKITS
+
 	// Clear read deadline after successful registration
 	conn.SetReadDeadline(time.Time{})
 
@@ -260,6 +303,7 @@ func (s *TCPTunnelServer) handleConnection(conn net.Conn) {
 		tc.Close()
 		return
 	}
+	endpoint.KeyManager.EnableSecureTransport(securePinHash)
 
 	// Register endpoint
 	s.mu.Lock()
@@ -267,7 +311,10 @@ func (s *TCPTunnelServer) handleConnection(conn net.Conn) {
 	s.mu.Unlock()
 
 	// Send registration acknowledgement
-	if err := tc.SendJSON(MsgTypeRegisterAck, RegisterAckPayload{Success: true}); err != nil {
+	if err := tc.SendJSON(MsgTypeRegisterAck, RegisterAckPayload{
+		Success:     true,
+		CipherSuite: negotiatedCipherSuite,
+	}); err != nil {
 		DebugLog("[TCP TUNNEL] Failed to send registration ack to %s: %v", remoteAddr, err)
 		tc.Close()
 		s.unregisterEndpoint(endpoint.ID)

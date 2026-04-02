@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -76,6 +77,11 @@ const (
 	MsgTypeKeyConfirm  uint8 = 0x52 // Confirmation key is activated
 )
 
+const (
+	// SecureCipherSuiteSPKITS enables SPKI-hash + timestamp-salt derivation and replay defense.
+	SecureCipherSuiteSPKITS = "spki-ts-v1"
+)
+
 const headerSize = 5
 const maxMessageSize = 10 * 1024 * 1024
 const connectHandshakeTimeout = 1200 * time.Millisecond
@@ -91,12 +97,16 @@ type RegisterPayload struct {
 	TunnelName   string `json:"tunnel_name"`
 	EndpointName string `json:"endpoint_name"`
 	Password     string `json:"password"`
+	ServerHost   string `json:"server_host,omitempty"`
+	PinHash      string `json:"pin_hash,omitempty"`
+	CipherSuite  string `json:"cipher_suite,omitempty"`
 }
 
 // RegisterAckPayload for registration response
 type RegisterAckPayload struct {
-	Success bool   `json:"success"`
-	Error   string `json:"error,omitempty"`
+	Success     bool   `json:"success"`
+	Error       string `json:"error,omitempty"`
+	CipherSuite string `json:"cipher_suite,omitempty"`
 }
 
 // RequestPayloadTCP for HTTP request
@@ -388,11 +398,20 @@ func runTCPTunnelSession(ctx context.Context) bool {
 		tcpConn.SetKeepAlivePeriod(60 * time.Second)
 	}
 
+	regServerHost, regPinHash, err := GetTLSPinRegistrationInfo(*serverAddr)
+	if err != nil {
+		log.Printf("Failed to load TLS pin registration info: %v", err)
+		return true
+	}
+
 	// Send registration using effective config values
 	if err := tc.SendJSON(MsgTypeRegister, RegisterPayload{
 		TunnelName:   GetEffectiveTunnelName(),
 		EndpointName: GetEffectiveEndpointName(),
 		Password:     GetEffectivePassword(),
+		ServerHost:   regServerHost,
+		PinHash:      hex.EncodeToString(regPinHash),
+		CipherSuite:  SecureCipherSuiteSPKITS,
 	}); err != nil {
 		log.Printf("Failed to send registration: %v", err)
 		return true
@@ -423,6 +442,10 @@ func runTCPTunnelSession(ctx context.Context) bool {
 		}
 		return true
 	}
+	if ack.CipherSuite != SecureCipherSuiteSPKITS {
+		log.Printf("Registration failed: secure cipher suite negotiation failed (expected %s, got %s)", SecureCipherSuiteSPKITS, ack.CipherSuite)
+		return false
+	}
 
 	log.Println("Successfully registered with TCP tunnel server")
 
@@ -436,6 +459,7 @@ func runTCPTunnelSession(ctx context.Context) bool {
 		log.Printf("Failed to derive initial key: %v", err)
 		return true
 	}
+	keyManager.EnableSecureTransport(regPinHash)
 
 	// Upgrade to SMUX
 	// Client side acts as SMUX client

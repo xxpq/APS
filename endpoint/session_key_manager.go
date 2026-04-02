@@ -5,6 +5,8 @@ import (
 	"crypto/cipher"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +15,8 @@ import (
 	"math/big"
 	"sync"
 	"time"
+
+	"golang.org/x/crypto/pbkdf2"
 )
 
 // Key rotation parameters
@@ -22,6 +26,13 @@ const (
 	KeyGracePeriod         = 5 * time.Minute  // Old key valid for this long after rotation
 	KeySize                = 32               // AES-256 key size
 	NonceSize              = 12               // GCM nonce size
+	SecureEnvelopeVersion  = 0xA1             // Secure envelope marker
+	SecureReplayWindow     = 5 * time.Minute  // Timestamp/replay window
+	SecureReplayMaxEntries = 20000            // Anti-replay cache cap
+
+	secureSaltLayout = "200601021504"
+	KeyDeriveRounds  = 4096
+	KeyDeriveSalt    = "aps:transport-key:v2"
 )
 
 // SessionKeyManager manages encryption keys with automatic rotation
@@ -37,6 +48,10 @@ type SessionKeyManager struct {
 	pendingNonce    []byte       // Nonce for pending negotiation
 	onKeyRotated    func([]byte) // Callback when key is rotated
 	endpointName    string       // Name of the endpoint for logging purposes
+	secureEnabled   bool         // Whether secure transport mode is enabled
+	tlsPinHash      []byte       // SPKI hash used for key derivation hardening
+	replaySeen      map[string]int64
+	replayOpCount   uint64
 	mu              sync.RWMutex
 }
 
@@ -72,13 +87,35 @@ func (skm *SessionKeyManager) DeriveInitialKey() error {
 	skm.mu.Lock()
 	defer skm.mu.Unlock()
 
-	// Derive key from master password using SHA-256
-	hash := sha256.Sum256([]byte(skm.masterPassword + ":session_key"))
-	skm.currentKey = hash[:]
+	// Derive key from master password using PBKDF2-HMAC-SHA256 (fixed iterations).
+	derivedKey := pbkdf2.Key([]byte(skm.masterPassword), []byte(KeyDeriveSalt), KeyDeriveRounds, KeySize, sha256.New)
+	skm.currentKey = derivedKey
 	skm.keyCreatedAt = time.Now()
 
-	DebugLog("[KEY] [%s] Initial session key derived", skm.endpointName)
+	DebugLog("[KEY] [%s] Initial session key derived (PBKDF2-%d)", skm.endpointName, KeyDeriveRounds)
 	return nil
+}
+
+// EnableSecureTransport enables secure transport hardening with SPKI hash + ts salt.
+func (skm *SessionKeyManager) EnableSecureTransport(pinHash []byte) {
+	skm.mu.Lock()
+	defer skm.mu.Unlock()
+
+	if len(pinHash) == 0 {
+		skm.secureEnabled = false
+		skm.tlsPinHash = nil
+		skm.replaySeen = nil
+		skm.replayOpCount = 0
+		DebugLog("[SECURE] [%s] Secure transport disabled (empty pin hash)", skm.endpointName)
+		return
+	}
+
+	skm.secureEnabled = true
+	skm.tlsPinHash = append([]byte(nil), pinHash...)
+	if skm.replaySeen == nil {
+		skm.replaySeen = make(map[string]int64, 1024)
+	}
+	DebugLog("[SECURE] [%s] Secure transport enabled (SPKI hash %s)", skm.endpointName, hex.EncodeToString(pinHash))
 }
 
 // StartAutoRotation starts the automatic key rotation timer
@@ -265,10 +302,16 @@ func (skm *SessionKeyManager) ActivateKey() error {
 func (skm *SessionKeyManager) Encrypt(plaintext []byte) ([]byte, error) {
 	skm.mu.RLock()
 	key := skm.currentKey
+	secureEnabled := skm.secureEnabled
+	pinHash := append([]byte(nil), skm.tlsPinHash...)
 	skm.mu.RUnlock()
 
 	if key == nil {
 		return nil, errors.New("no encryption key available")
+	}
+
+	if secureEnabled {
+		return skm.encryptSecureMessage(key, pinHash, plaintext)
 	}
 
 	return skm.encryptWithKey(key, plaintext)
@@ -280,7 +323,16 @@ func (skm *SessionKeyManager) Decrypt(ciphertext []byte) ([]byte, error) {
 	currentKey := skm.currentKey
 	previousKey := skm.previousKey
 	gracePeriodEnds := skm.gracePeriodEnds
+	secureEnabled := skm.secureEnabled
+	pinHash := append([]byte(nil), skm.tlsPinHash...)
 	skm.mu.RUnlock()
+
+	if secureEnabled {
+		if len(ciphertext) < 1+8 || ciphertext[0] != SecureEnvelopeVersion {
+			return nil, errors.New("secure transport requires protected envelope")
+		}
+		return skm.decryptSecureMessage(currentKey, previousKey, gracePeriodEnds, pinHash, ciphertext)
+	}
 
 	// Try current key first
 	if currentKey != nil {
@@ -300,6 +352,127 @@ func (skm *SessionKeyManager) Decrypt(ciphertext []byte) ([]byte, error) {
 	}
 
 	return nil, errors.New("failed to decrypt with any available key")
+}
+
+func (skm *SessionKeyManager) encryptSecureMessage(key, pinHash, plaintext []byte) ([]byte, error) {
+	if len(pinHash) == 0 {
+		return nil, errors.New("secure transport pin hash missing")
+	}
+
+	ts := time.Now().UTC().Unix()
+	derivedKey := deriveSecureMessageKey(key, pinHash, ts)
+	innerCiphertext, err := skm.encryptWithKey(derivedKey, plaintext)
+	if err != nil {
+		return nil, err
+	}
+
+	envelope := make([]byte, 1+8+len(innerCiphertext))
+	envelope[0] = SecureEnvelopeVersion
+	binary.BigEndian.PutUint64(envelope[1:9], uint64(ts))
+	copy(envelope[9:], innerCiphertext)
+	return envelope, nil
+}
+
+func (skm *SessionKeyManager) decryptSecureMessage(currentKey, previousKey []byte, gracePeriodEnds time.Time, pinHash, ciphertext []byte) ([]byte, error) {
+	if len(pinHash) == 0 {
+		return nil, errors.New("secure transport pin hash missing")
+	}
+	if len(ciphertext) < 1+8 {
+		return nil, errors.New("secure envelope too short")
+	}
+
+	ts := int64(binary.BigEndian.Uint64(ciphertext[1:9]))
+	if !isSecureTimestampFresh(ts) {
+		return nil, errors.New("secure envelope timestamp out of window")
+	}
+
+	innerCiphertext := ciphertext[9:]
+
+	if currentKey != nil {
+		derivedKey := deriveSecureMessageKey(currentKey, pinHash, ts)
+		plaintext, err := skm.decryptWithKey(derivedKey, innerCiphertext)
+		if err == nil {
+			if replayErr := skm.registerReplayCiphertext(ciphertext, ts); replayErr != nil {
+				return nil, replayErr
+			}
+			return plaintext, nil
+		}
+	}
+
+	if previousKey != nil && time.Now().Before(gracePeriodEnds) {
+		derivedKey := deriveSecureMessageKey(previousKey, pinHash, ts)
+		plaintext, err := skm.decryptWithKey(derivedKey, innerCiphertext)
+		if err == nil {
+			if replayErr := skm.registerReplayCiphertext(ciphertext, ts); replayErr != nil {
+				return nil, replayErr
+			}
+			DebugLog("[KEY] [%s] Decrypted secure envelope with previous key (grace period)", skm.endpointName)
+			return plaintext, nil
+		}
+	}
+
+	return nil, errors.New("failed to decrypt secure envelope with any available key")
+}
+
+func deriveSecureMessageKey(baseKey, pinHash []byte, ts int64) []byte {
+	salt := time.Unix(ts, 0).UTC().Format(secureSaltLayout)
+	h := sha256.New()
+	h.Write(baseKey)
+	h.Write([]byte{':'})
+	h.Write(pinHash)
+	h.Write([]byte{':'})
+	h.Write([]byte(salt))
+	return h.Sum(nil)
+}
+
+func isSecureTimestampFresh(ts int64) bool {
+	now := time.Now().UTC().Unix()
+	delta := now - ts
+	if delta < 0 {
+		delta = -delta
+	}
+	return time.Duration(delta)*time.Second <= SecureReplayWindow
+}
+
+func (skm *SessionKeyManager) registerReplayCiphertext(ciphertext []byte, ts int64) error {
+	tokenHash := sha256.Sum256(ciphertext)
+	token := hex.EncodeToString(tokenHash[:16])
+
+	now := time.Now().UTC().Unix()
+	expiry := ts + int64((SecureReplayWindow + time.Minute).Seconds())
+
+	skm.mu.Lock()
+	defer skm.mu.Unlock()
+
+	if skm.replaySeen == nil {
+		skm.replaySeen = make(map[string]int64, 1024)
+	}
+
+	skm.replayOpCount++
+	if skm.replayOpCount%128 == 0 || len(skm.replaySeen) > SecureReplayMaxEntries {
+		for k, exp := range skm.replaySeen {
+			if exp < now {
+				delete(skm.replaySeen, k)
+			}
+		}
+	}
+
+	if exp, exists := skm.replaySeen[token]; exists && exp >= now {
+		return errors.New("replay detected")
+	}
+	skm.replaySeen[token] = expiry
+
+	if len(skm.replaySeen) > SecureReplayMaxEntries {
+		toDelete := len(skm.replaySeen) - SecureReplayMaxEntries
+		for k := range skm.replaySeen {
+			delete(skm.replaySeen, k)
+			toDelete--
+			if toDelete <= 0 {
+				break
+			}
+		}
+	}
+	return nil
 }
 
 // encryptWithKey encrypts data with a specific key using AES-GCM

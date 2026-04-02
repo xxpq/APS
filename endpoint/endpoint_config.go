@@ -6,6 +6,8 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 )
 
@@ -34,41 +36,84 @@ type ConfigResponse struct {
 
 // FetchConfigFromAPS retrieves endpoint configuration from APS server
 func FetchConfigFromAPS(apsAddr, configID string) (*EndpointRuntimeConfig, error) {
-	url := fmt.Sprintf("http://%s/.api/endpoints?id=%s", apsAddr, configID)
+	var lastErr error
+	for attempt := 0; attempt < 2; attempt++ {
+		encryptedID, requestSalt, pin, err := buildEncryptedConfigIDForServer(apsAddr, configID)
+		if err != nil {
+			return nil, fmt.Errorf("failed to prepare encrypted config request: %w", err)
+		}
 
-	client := &http.Client{
-		Timeout: 30 * time.Second,
+		requestPath := fmt.Sprintf(
+			"/.api/endpoints?%s=%s&%s=%s",
+			TLSEncryptedConfigIDParam,
+			url.QueryEscape(encryptedID),
+			TLSEncryptedSaltParam,
+			url.QueryEscape(requestSalt),
+		)
+
+		resp, pin, err := doPinnedAPSGet(apsAddr, requestPath)
+		if err != nil {
+			lastErr = fmt.Errorf("failed to connect to APS with pinned TLS: %w", err)
+			continue
+		}
+
+		body, readErr := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if readErr != nil {
+			lastErr = fmt.Errorf("failed to read response: %w", readErr)
+			continue
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			if resp.StatusCode == http.StatusBadRequest &&
+				strings.Contains(strings.ToLower(string(body)), "invalid encrypted config id") &&
+				attempt == 0 {
+				if _, refreshErr := refreshEndpointTLSPin(apsAddr); refreshErr != nil {
+					lastErr = fmt.Errorf("APS returned encrypted-id error and pin refresh failed: %v", refreshErr)
+					continue
+				}
+				// Re-encrypt config ID with the refreshed pin hash.
+				continue
+			}
+			lastErr = fmt.Errorf("APS returned error status %d: %s", resp.StatusCode, string(body))
+			continue
+		}
+
+		var envelope EncryptedPayloadEnvelope
+		if err := json.Unmarshal(body, &envelope); err != nil {
+			lastErr = fmt.Errorf("failed to parse encrypted envelope: %w", err)
+			continue
+		}
+
+		decryptedBody, err := decodeEncryptedEnvelopeWithPin(pin, &envelope)
+		if err != nil {
+			lastErr = fmt.Errorf("failed to decrypt APS response: %w", err)
+			continue
+		}
+
+		var configResp ConfigResponse
+		if err := json.Unmarshal(decryptedBody, &configResp); err != nil {
+			lastErr = fmt.Errorf("failed to parse config response: %w", err)
+			continue
+		}
+
+		if !configResp.Success {
+			lastErr = fmt.Errorf("APS error: %s", configResp.Error)
+			continue
+		}
+
+		if configResp.Config == nil {
+			lastErr = fmt.Errorf("no configuration found for ID: %s", configID)
+			continue
+		}
+
+		return configResp.Config, nil
 	}
 
-	resp, err := client.Get(url)
-	if err != nil {
-		return nil, fmt.Errorf("failed to connect to APS: %w", err)
+	if lastErr != nil {
+		return nil, lastErr
 	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("APS returned error status %d: %s", resp.StatusCode, string(body))
-	}
-
-	var configResp ConfigResponse
-	if err := json.Unmarshal(body, &configResp); err != nil {
-		return nil, fmt.Errorf("failed to parse config response: %w", err)
-	}
-
-	if !configResp.Success {
-		return nil, fmt.Errorf("APS error: %s", configResp.Error)
-	}
-
-	if configResp.Config == nil {
-		return nil, fmt.Errorf("no configuration found for ID: %s", configID)
-	}
-
-	return configResp.Config, nil
+	return nil, fmt.Errorf("failed to fetch configuration from APS")
 }
 
 // ValidateConfig validates the endpoint configuration
