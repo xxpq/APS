@@ -316,7 +316,7 @@ func isEndpointConfigTokenFresh(ts int64) bool {
 	return time.Duration(delta)*time.Second <= endpointConfigTokenWindow
 }
 
-func registerEndpointConfigReplayToken(cid, nonce, token string, ts int64) error {
+func registerEndpointConfigReplayToken(statsDB *StatsDB, cid, nonce, token string, ts int64) error {
 	now := time.Now().UTC().Unix()
 	expiry := ts + int64((endpointConfigTokenWindow + time.Minute).Seconds())
 	replayToken := strings.Join([]string{
@@ -324,6 +324,18 @@ func registerEndpointConfigReplayToken(cid, nonce, token string, ts int64) error
 		strings.TrimSpace(nonce),
 		strings.TrimSpace(token),
 	}, "|")
+
+	if statsDB != nil {
+		isReplay, err := statsDB.CheckAndStoreReplayToken("eid_fetch", replayToken, expiry)
+		if err != nil {
+			log.Printf("[TLS-PIN] Persistent eid replay check failed: %v", err)
+		} else if isReplay {
+			return errors.New("endpoint config request replay detected")
+		}
+		if err := statsDB.DeleteExpiredReplayTokens(now); err != nil {
+			log.Printf("[TLS-PIN] Persistent eid replay cleanup failed: %v", err)
+		}
+	}
 
 	endpointConfigReplay.mu.Lock()
 	defer endpointConfigReplay.mu.Unlock()
@@ -352,7 +364,7 @@ func registerEndpointConfigReplayToken(cid, nonce, token string, ts int64) error
 	return nil
 }
 
-func decryptEndpointConfigIDFromRequest(r *http.Request, encryptedID, salt string) (string, string, []byte, error) {
+func decryptEndpointConfigIDFromRequest(r *http.Request, encryptedID, salt string, statsDB *StatsDB) (string, string, []byte, error) {
 	pinKey, _, err := getTLSPinHashForRequest(r)
 	if err != nil {
 		return "", "", nil, err
@@ -392,7 +404,7 @@ func decryptEndpointConfigIDFromRequest(r *http.Request, encryptedID, salt strin
 	if !hmac.Equal(providedToken, expectedTokenBytes) {
 		return "", "", nil, errors.New("invalid eid token")
 	}
-	if err := registerEndpointConfigReplayToken(request.ConfigID, request.Nonce, request.Token, request.Timestamp); err != nil {
+	if err := registerEndpointConfigReplayToken(statsDB, request.ConfigID, request.Nonce, request.Token, request.Timestamp); err != nil {
 		return "", "", nil, err
 	}
 	return request.ConfigID, salt, pinKey, nil

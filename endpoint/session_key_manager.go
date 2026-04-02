@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/ecdh"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
@@ -18,6 +19,7 @@ import (
 	"time"
 
 	"golang.org/x/crypto/argon2"
+	"golang.org/x/crypto/hkdf"
 	"golang.org/x/crypto/pbkdf2"
 )
 
@@ -42,19 +44,22 @@ const (
 	kdfArgon2Threads    = uint8(4)
 	kdfPBKDF2Rounds     = 600000
 	legacyKeyDeriveSalt = "aps:transport-key:v2"
+	keyRotateInfoLabel  = "aps:key-rotation:v3"
 )
 
 // SessionKeyManager manages encryption keys with automatic rotation
 type SessionKeyManager struct {
-	currentKey      []byte       // Active encryption key
-	previousKey     []byte       // Previous key (valid during grace period)
-	keyCreatedAt    time.Time    // When current key was created
-	gracePeriodEnds time.Time    // When previous key expires
-	rotationTimer   *time.Timer  // Auto-rotation timer
-	masterPassword  string       // Master password for key derivation
-	isInitiator     bool         // Whether this side initiated the last key exchange
-	pendingKey      []byte       // Key being negotiated
-	pendingNonce    []byte       // Nonce for pending negotiation
+	currentKey      []byte      // Active encryption key
+	previousKey     []byte      // Previous key (valid during grace period)
+	keyCreatedAt    time.Time   // When current key was created
+	gracePeriodEnds time.Time   // When previous key expires
+	rotationTimer   *time.Timer // Auto-rotation timer
+	masterPassword  string      // Master password for key derivation
+	isInitiator     bool        // Whether this side initiated the last key exchange
+	pendingKey      []byte      // Key being negotiated
+	pendingNonce    []byte      // Nonce for pending negotiation
+	pendingECDHPriv *ecdh.PrivateKey
+	pendingECDHPub  []byte
 	onKeyRotated    func([]byte) // Callback when key is rotated
 	endpointName    string       // Name of the endpoint for logging purposes
 	secureEnabled   bool         // Whether secure transport mode is enabled
@@ -69,15 +74,17 @@ type SessionKeyManager struct {
 
 // KeyRequestPayload is sent to initiate key negotiation
 type KeyRequestPayload struct {
-	Nonce     []byte `json:"nonce"`     // Random nonce for this negotiation
-	Timestamp int64  `json:"timestamp"` // Request timestamp
+	Nonce           []byte `json:"nonce"`                       // Random nonce for this negotiation
+	Timestamp       int64  `json:"timestamp"`                   // Request timestamp
+	EphemeralPubKey []byte `json:"ephemeral_pub_key,omitempty"` // Initiator ephemeral ECDH public key
 }
 
 // KeyResponsePayload contains the encrypted new key
 type KeyResponsePayload struct {
-	Nonce        []byte `json:"nonce"`         // Responder's nonce
-	EncryptedKey []byte `json:"encrypted_key"` // New key encrypted with current key
-	Timestamp    int64  `json:"timestamp"`
+	Nonce           []byte `json:"nonce"`                   // Responder's nonce
+	EncryptedKey    []byte `json:"encrypted_key,omitempty"` // Legacy field for compatibility
+	Timestamp       int64  `json:"timestamp"`
+	EphemeralPubKey []byte `json:"ephemeral_pub_key,omitempty"` // Responder ephemeral ECDH public key
 }
 
 // KeyConfirmPayload confirms key activation
@@ -126,6 +133,34 @@ func (skm *SessionKeyManager) SetKDFParams(version, salt string) error {
 	return nil
 }
 
+func deriveInitialKeyWithKDF(masterPassword, version, salt string) ([]byte, error) {
+	normalizedVersion, err := normalizeEndpointKDFVersion(version)
+	if err != nil {
+		return nil, err
+	}
+
+	kdfSalt := strings.TrimSpace(salt)
+	if kdfSalt == "" {
+		return nil, errors.New("kdfSalt is required before deriving initial key")
+	}
+
+	switch normalizedVersion {
+	case KDFVersionArgon2idV1:
+		return argon2.IDKey(
+			[]byte(masterPassword),
+			[]byte(kdfSalt),
+			kdfArgon2Time,
+			kdfArgon2MemoryKB,
+			kdfArgon2Threads,
+			KeySize,
+		), nil
+	case KDFVersionPBKDF2V3:
+		return pbkdf2.Key([]byte(masterPassword), []byte(kdfSalt), kdfPBKDF2Rounds, KeySize, sha256.New), nil
+	default:
+		return pbkdf2.Key([]byte(masterPassword), []byte(legacyKeyDeriveSalt), kdfPBKDF2Rounds, KeySize, sha256.New), nil
+	}
+}
+
 // DeriveInitialKey derives the initial session key from master password
 func (skm *SessionKeyManager) DeriveInitialKey() error {
 	skm.mu.Lock()
@@ -135,26 +170,9 @@ func (skm *SessionKeyManager) DeriveInitialKey() error {
 	if kdfVersion == "" {
 		kdfVersion = DefaultKDFVersion
 	}
-	kdfSalt := strings.TrimSpace(skm.kdfSalt)
-	if kdfSalt == "" {
-		return errors.New("kdfSalt is required before deriving initial key")
-	}
-
-	var derivedKey []byte
-	switch kdfVersion {
-	case KDFVersionArgon2idV1:
-		derivedKey = argon2.IDKey(
-			[]byte(skm.masterPassword),
-			[]byte(kdfSalt),
-			kdfArgon2Time,
-			kdfArgon2MemoryKB,
-			kdfArgon2Threads,
-			KeySize,
-		)
-	case KDFVersionPBKDF2V3:
-		derivedKey = pbkdf2.Key([]byte(skm.masterPassword), []byte(kdfSalt), kdfPBKDF2Rounds, KeySize, sha256.New)
-	default:
-		derivedKey = pbkdf2.Key([]byte(skm.masterPassword), []byte(legacyKeyDeriveSalt), kdfPBKDF2Rounds, KeySize, sha256.New)
+	derivedKey, err := deriveInitialKeyWithKDF(skm.masterPassword, kdfVersion, skm.kdfSalt)
+	if err != nil {
+		return err
 	}
 
 	skm.currentKey = derivedKey
@@ -165,19 +183,13 @@ func (skm *SessionKeyManager) DeriveInitialKey() error {
 }
 
 // EnableSecureTransport enables secure transport hardening with SPKI hash + CID + ts salt.
-func (skm *SessionKeyManager) EnableSecureTransport(pinHash []byte, cid string) {
+func (skm *SessionKeyManager) EnableSecureTransport(pinHash []byte, cid string) error {
 	skm.mu.Lock()
 	defer skm.mu.Unlock()
 	cid = strings.TrimSpace(cid)
 
 	if len(pinHash) == 0 || cid == "" {
-		skm.secureEnabled = false
-		skm.tlsPinHash = nil
-		skm.transportCID = ""
-		skm.replaySeen = nil
-		skm.replayOpCount = 0
-		DebugLog("[SECURE] [%s] Secure transport disabled (pin hash or cid missing)", skm.endpointName)
-		return
+		return errors.New("secure transport requires non-empty pin hash and cid")
 	}
 
 	skm.secureEnabled = true
@@ -187,6 +199,7 @@ func (skm *SessionKeyManager) EnableSecureTransport(pinHash []byte, cid string) 
 		skm.replaySeen = make(map[string]int64, 1024)
 	}
 	DebugLog("[SECURE] [%s] Secure transport enabled (SPKI hash %s, cid %s)", skm.endpointName, hex.EncodeToString(pinHash), cid)
+	return nil
 }
 
 // StartAutoRotation starts the automatic key rotation timer
@@ -225,6 +238,37 @@ func (skm *SessionKeyManager) randomRotationInterval() time.Duration {
 	return KeyRotationMinInterval + time.Duration(randomDiff.Int64())
 }
 
+func deriveForwardSecureRotatedKey(currentKey, sharedSecret, reqNonce, respNonce, initiatorPub, responderPub []byte) ([]byte, error) {
+	if len(currentKey) == 0 {
+		return nil, errors.New("current key is empty")
+	}
+	if len(sharedSecret) == 0 {
+		return nil, errors.New("shared secret is empty")
+	}
+	saltH := sha256.New()
+	saltH.Write(currentKey)
+	saltH.Write([]byte{':'})
+	saltH.Write(reqNonce)
+	saltH.Write([]byte{':'})
+	saltH.Write(respNonce)
+	salt := saltH.Sum(nil)
+
+	infoH := sha256.New()
+	infoH.Write([]byte(keyRotateInfoLabel))
+	infoH.Write([]byte{':'})
+	infoH.Write(initiatorPub)
+	infoH.Write([]byte{':'})
+	infoH.Write(responderPub)
+	info := infoH.Sum(nil)
+
+	reader := hkdf.New(sha256.New, sharedSecret, salt, info)
+	key := make([]byte, KeySize)
+	if _, err := io.ReadFull(reader, key); err != nil {
+		return nil, err
+	}
+	return key, nil
+}
+
 // GenerateKeyRequest creates a key negotiation request
 func (skm *SessionKeyManager) GenerateKeyRequest() (*KeyRequestPayload, error) {
 	skm.mu.Lock()
@@ -238,10 +282,17 @@ func (skm *SessionKeyManager) GenerateKeyRequest() (*KeyRequestPayload, error) {
 
 	skm.pendingNonce = nonce
 	skm.isInitiator = true
+	priv, err := ecdh.P256().GenerateKey(rand.Reader)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate ecdh key: %w", err)
+	}
+	skm.pendingECDHPriv = priv
+	skm.pendingECDHPub = priv.PublicKey().Bytes()
 
 	return &KeyRequestPayload{
-		Nonce:     nonce,
-		Timestamp: time.Now().UnixNano(),
+		Nonce:           nonce,
+		Timestamp:       time.Now().UnixNano(),
+		EphemeralPubKey: append([]byte(nil), skm.pendingECDHPub...),
 	}, nil
 }
 
@@ -250,32 +301,50 @@ func (skm *SessionKeyManager) HandleKeyRequest(req *KeyRequestPayload) (*KeyResp
 	skm.mu.Lock()
 	defer skm.mu.Unlock()
 
-	// Generate new session key
-	newKey := make([]byte, KeySize)
-	if _, err := io.ReadFull(rand.Reader, newKey); err != nil {
-		return nil, fmt.Errorf("failed to generate new key: %w", err)
+	if len(req.EphemeralPubKey) == 0 {
+		return nil, errors.New("missing initiator ecdh public key")
 	}
-
-	// Encrypt new key with current key
-	encryptedKey, err := skm.encryptWithKey(skm.currentKey, newKey)
+	initiatorPub, err := ecdh.P256().NewPublicKey(req.EphemeralPubKey)
 	if err != nil {
-		return nil, fmt.Errorf("failed to encrypt new key: %w", err)
+		return nil, fmt.Errorf("invalid initiator ecdh public key: %w", err)
 	}
 
-	// Generate response nonce
+	responderPriv, err := ecdh.P256().GenerateKey(rand.Reader)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate responder ecdh key: %w", err)
+	}
+	responderPub := responderPriv.PublicKey().Bytes()
+
 	respNonce := make([]byte, NonceSize)
 	if _, err := io.ReadFull(rand.Reader, respNonce); err != nil {
 		return nil, fmt.Errorf("failed to generate response nonce: %w", err)
 	}
 
-	// Store pending key
+	sharedSecret, err := responderPriv.ECDH(initiatorPub)
+	if err != nil {
+		return nil, fmt.Errorf("failed to compute ecdh shared secret: %w", err)
+	}
+	newKey, err := deriveForwardSecureRotatedKey(
+		skm.currentKey,
+		sharedSecret,
+		req.Nonce,
+		respNonce,
+		req.EphemeralPubKey,
+		responderPub,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to derive rotated key: %w", err)
+	}
+
 	skm.pendingKey = newKey
 	skm.isInitiator = false
+	skm.pendingECDHPriv = nil
+	skm.pendingECDHPub = nil
 
 	return &KeyResponsePayload{
-		Nonce:        respNonce,
-		EncryptedKey: encryptedKey,
-		Timestamp:    time.Now().UnixNano(),
+		Nonce:           respNonce,
+		Timestamp:       time.Now().UnixNano(),
+		EphemeralPubKey: responderPub,
 	}, nil
 }
 
@@ -287,19 +356,38 @@ func (skm *SessionKeyManager) HandleKeyResponse(resp *KeyResponsePayload) (*KeyC
 	if !skm.isInitiator {
 		return nil, errors.New("unexpected key response - not an initiator")
 	}
-
-	// Decrypt the new key
-	newKey, err := skm.decryptWithKey(skm.currentKey, resp.EncryptedKey)
+	if skm.pendingECDHPriv == nil {
+		return nil, errors.New("missing pending initiator ecdh private key")
+	}
+	if len(resp.EphemeralPubKey) == 0 {
+		return nil, errors.New("missing responder ecdh public key")
+	}
+	responderPub, err := ecdh.P256().NewPublicKey(resp.EphemeralPubKey)
 	if err != nil {
-		return nil, fmt.Errorf("failed to decrypt new key: %w", err)
+		return nil, fmt.Errorf("invalid responder ecdh public key: %w", err)
 	}
 
-	// Store pending key
+	sharedSecret, err := skm.pendingECDHPriv.ECDH(responderPub)
+	if err != nil {
+		return nil, fmt.Errorf("failed to compute ecdh shared secret: %w", err)
+	}
+	newKey, err := deriveForwardSecureRotatedKey(
+		skm.currentKey,
+		sharedSecret,
+		skm.pendingNonce,
+		resp.Nonce,
+		skm.pendingECDHPub,
+		resp.EphemeralPubKey,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to derive rotated key: %w", err)
+	}
+
 	skm.pendingKey = newKey
+	skm.pendingECDHPriv = nil
+	skm.pendingECDHPub = nil
 
-	// Generate confirmation with key hash
 	keyHash := sha256.Sum256(newKey)
-
 	return &KeyConfirmPayload{
 		KeyHash:   keyHash[:],
 		Timestamp: time.Now().UnixNano(),
@@ -330,6 +418,9 @@ func (skm *SessionKeyManager) HandleKeyConfirm(confirm *KeyConfirmPayload) error
 	skm.previousKey = skm.currentKey
 	skm.currentKey = skm.pendingKey
 	skm.pendingKey = nil
+	skm.pendingNonce = nil
+	skm.pendingECDHPriv = nil
+	skm.pendingECDHPub = nil
 	skm.keyCreatedAt = time.Now()
 	skm.gracePeriodEnds = time.Now().Add(KeyGracePeriod)
 
@@ -356,6 +447,9 @@ func (skm *SessionKeyManager) ActivateKey() error {
 	skm.previousKey = skm.currentKey
 	skm.currentKey = skm.pendingKey
 	skm.pendingKey = nil
+	skm.pendingNonce = nil
+	skm.pendingECDHPriv = nil
+	skm.pendingECDHPub = nil
 	skm.keyCreatedAt = time.Now()
 	skm.gracePeriodEnds = time.Now().Add(KeyGracePeriod)
 
@@ -382,11 +476,11 @@ func (skm *SessionKeyManager) Encrypt(plaintext []byte) ([]byte, error) {
 		return nil, errors.New("no encryption key available")
 	}
 
-	if secureEnabled {
-		return skm.encryptSecureMessage(key, pinHash, transportCID, plaintext)
+	if !secureEnabled {
+		return nil, errors.New("secure transport is not enabled")
 	}
 
-	return skm.encryptWithKey(key, plaintext)
+	return skm.encryptSecureMessage(key, pinHash, transportCID, plaintext)
 }
 
 // Decrypt decrypts data, trying current key first, then previous key during grace period
@@ -400,31 +494,14 @@ func (skm *SessionKeyManager) Decrypt(ciphertext []byte) ([]byte, error) {
 	transportCID := skm.transportCID
 	skm.mu.RUnlock()
 
-	if secureEnabled {
-		if len(ciphertext) < 1+8 || ciphertext[0] != SecureEnvelopeVersion {
-			return nil, errors.New("secure transport requires protected envelope")
-		}
-		return skm.decryptSecureMessage(currentKey, previousKey, gracePeriodEnds, pinHash, transportCID, ciphertext)
+	if !secureEnabled {
+		return nil, errors.New("secure transport is not enabled")
 	}
 
-	// Try current key first
-	if currentKey != nil {
-		plaintext, err := skm.decryptWithKey(currentKey, ciphertext)
-		if err == nil {
-			return plaintext, nil
-		}
+	if len(ciphertext) < 1+8 || ciphertext[0] != SecureEnvelopeVersion {
+		return nil, errors.New("secure transport requires protected envelope")
 	}
-
-	// During grace period, try previous key
-	if previousKey != nil && time.Now().Before(gracePeriodEnds) {
-		plaintext, err := skm.decryptWithKey(previousKey, ciphertext)
-		if err == nil {
-			DebugLog("[KEY] [%s] Decrypted with previous key (grace period)", skm.endpointName)
-			return plaintext, nil
-		}
-	}
-
-	return nil, errors.New("failed to decrypt with any available key")
+	return skm.decryptSecureMessage(currentKey, previousKey, gracePeriodEnds, pinHash, transportCID, ciphertext)
 }
 
 func (skm *SessionKeyManager) encryptSecureMessage(key, pinHash []byte, cid string, plaintext []byte) ([]byte, error) {

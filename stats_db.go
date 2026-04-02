@@ -73,6 +73,13 @@ func (s *StatsDB) initSchema() error {
 			traffic_used INTEGER DEFAULT 0,
 			requests_used INTEGER DEFAULT 0
 		);`,
+		`CREATE TABLE IF NOT EXISTS replay_tokens (
+			scope TEXT NOT NULL,
+			token TEXT NOT NULL,
+			expiry INTEGER NOT NULL,
+			PRIMARY KEY(scope, token)
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_replay_tokens_expiry ON replay_tokens(expiry);`,
 	}
 
 	for _, query := range queries {
@@ -93,6 +100,82 @@ func (s *StatsDB) initSchema() error {
 	}
 
 	return nil
+}
+
+// CheckAndStoreReplayToken checks whether a token is still valid in persistent storage.
+// Returns true when replay is detected, false when token is accepted and persisted.
+func (s *StatsDB) CheckAndStoreReplayToken(scope, token string, expiry int64) (bool, error) {
+	if s == nil || s.db == nil {
+		return false, nil
+	}
+	if scope == "" || token == "" || expiry <= 0 {
+		return false, fmt.Errorf("invalid replay token input")
+	}
+
+	now := time.Now().UTC().Unix()
+
+	var existingExpiry int64
+	err := s.db.QueryRow(
+		`SELECT expiry FROM replay_tokens WHERE scope = ? AND token = ?`,
+		scope, token,
+	).Scan(&existingExpiry)
+	if err == nil {
+		if existingExpiry >= now {
+			return true, nil
+		}
+		_, updateErr := s.db.Exec(
+			`UPDATE replay_tokens SET expiry = ? WHERE scope = ? AND token = ?`,
+			expiry, scope, token,
+		)
+		if updateErr != nil {
+			return false, updateErr
+		}
+		return false, nil
+	}
+	if err != sql.ErrNoRows {
+		return false, err
+	}
+
+	_, err = s.db.Exec(
+		`INSERT INTO replay_tokens(scope, token, expiry) VALUES(?, ?, ?)`,
+		scope, token, expiry,
+	)
+	if err != nil {
+		// Handle concurrent insert race: re-read to determine replay.
+		var retryExpiry int64
+		retryErr := s.db.QueryRow(
+			`SELECT expiry FROM replay_tokens WHERE scope = ? AND token = ?`,
+			scope, token,
+		).Scan(&retryExpiry)
+		if retryErr == nil && retryExpiry >= now {
+			return true, nil
+		}
+		if retryErr == nil {
+			_, retryUpdateErr := s.db.Exec(
+				`UPDATE replay_tokens SET expiry = ? WHERE scope = ? AND token = ?`,
+				expiry, scope, token,
+			)
+			if retryUpdateErr != nil {
+				return false, retryUpdateErr
+			}
+			return false, nil
+		}
+		return false, err
+	}
+
+	return false, nil
+}
+
+// DeleteExpiredReplayTokens removes expired replay tokens from persistent storage.
+func (s *StatsDB) DeleteExpiredReplayTokens(nowUnix int64) error {
+	if s == nil || s.db == nil {
+		return nil
+	}
+	if nowUnix <= 0 {
+		nowUnix = time.Now().UTC().Unix()
+	}
+	_, err := s.db.Exec(`DELETE FROM replay_tokens WHERE expiry < ?`, nowUnix)
+	return err
 }
 
 // AddSnapshot saves a TimeSeriesSnapshot to the database and cleans up old data.

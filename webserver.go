@@ -949,7 +949,7 @@ func (h *AdminHandlers) handleEndpointConfigs(w http.ResponseWriter, r *http.Req
 	}
 
 	if r.Method == http.MethodGet && encryptedConfigID != "" {
-		configID, requestSalt, pinKey, err := decryptEndpointConfigIDFromRequest(r, encryptedConfigID, encryptedSalt)
+		configID, requestSalt, pinKey, err := decryptEndpointConfigIDFromRequest(r, encryptedConfigID, encryptedSalt, h.statsDB)
 		if err != nil {
 			http.Error(w, "invalid encrypted config id", http.StatusBadRequest)
 			return

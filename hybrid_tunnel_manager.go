@@ -9,30 +9,32 @@ import (
 	"time"
 )
 
-// HybridTunnelManager 管理TCP隧道的管理器
+// HybridTunnelManager 绠＄悊TCP闅ч亾鐨勭鐞嗗櫒
 type HybridTunnelManager struct {
 	mu             sync.RWMutex
 	tcpManager     *TCPTunnelManager
 	tcpServer      *TCPTunnelServer
 	config         *Config
 	statsCollector *StatsCollector
+	statsDB        *StatsDB
 }
 
-// NewHybridTunnelManager 创建隧道管理器
-func NewHybridTunnelManager(config *Config, statsCollector *StatsCollector) *HybridTunnelManager {
+// NewHybridTunnelManager creates a hybrid tunnel manager.
+func NewHybridTunnelManager(config *Config, statsCollector *StatsCollector, statsDB *StatsDB) *HybridTunnelManager {
 	htm := &HybridTunnelManager{
 		config:         config,
 		statsCollector: statsCollector,
+		statsDB:        statsDB,
 	}
 
-	// 初始化TCP隧道服务器和管理器
-	htm.tcpServer = NewTCPTunnelServer(config)
+	// Initialize TCP tunnel server and manager.
+	htm.tcpServer = NewTCPTunnelServer(config, statsDB)
 	htm.tcpManager = NewTCPTunnelManager(config, htm.tcpServer)
 
 	return htm
 }
 
-// StartTCPServer 启动TCP隧道服务器（可指定端口或使用连接复用器）
+// StartTCPServer 鍚姩TCP闅ч亾鏈嶅姟鍣紙鍙寚瀹氱鍙ｆ垨浣跨敤杩炴帴澶嶇敤鍣級
 func (htm *HybridTunnelManager) StartTCPServer(addr string) error {
 	if htm.tcpServer == nil {
 		return errors.New("TCP tunnel server not initialized")
@@ -40,21 +42,21 @@ func (htm *HybridTunnelManager) StartTCPServer(addr string) error {
 	return htm.tcpServer.Start(addr)
 }
 
-// HandleTunnelConnection 处理来自连接复用器的隧道连接
+// HandleTunnelConnection 澶勭悊鏉ヨ嚜杩炴帴澶嶇敤鍣ㄧ殑闅ч亾杩炴帴
 func (htm *HybridTunnelManager) HandleTunnelConnection(conn net.Conn) {
 	if htm.tcpServer != nil {
 		htm.tcpServer.handleConnection(conn)
 	}
 }
 
-// SetStatsCollector 设置统计收集器
+// SetStatsCollector sets stats collector.
 func (htm *HybridTunnelManager) SetStatsCollector(statsCollector *StatsCollector) {
 	htm.mu.Lock()
 	defer htm.mu.Unlock()
 	htm.statsCollector = statsCollector
 }
 
-// UpdateTunnels 动态更新隧道配置
+// UpdateTunnels updates tunnel config reference.
 func (htm *HybridTunnelManager) UpdateTunnels(newConfig *Config) {
 	htm.mu.Lock()
 	defer htm.mu.Unlock()
@@ -79,7 +81,7 @@ func (htm *HybridTunnelManager) SendProxyConnect(ctx context.Context, tunnelName
 	return nil, errors.New("no available tunnel manager for proxy connection")
 }
 
-// GetRandomEndpointFromTunnels 从隧道中获取随机端点
+// GetRandomEndpointFromTunnels 浠庨毀閬撲腑鑾峰彇闅忔満绔偣
 func (htm *HybridTunnelManager) GetRandomEndpointFromTunnels(tunnelNames []string) (string, string, error) {
 	if htm.tcpManager != nil {
 		return htm.tcpManager.GetRandomEndpointFromTunnels(tunnelNames)
@@ -87,7 +89,7 @@ func (htm *HybridTunnelManager) GetRandomEndpointFromTunnels(tunnelNames []strin
 	return "", "", errors.New("no available endpoints found")
 }
 
-// FindTunnelForEndpoint 查找端点所在的隧道
+// FindTunnelForEndpoint 鏌ユ壘绔偣鎵€鍦ㄧ殑闅ч亾
 func (htm *HybridTunnelManager) FindTunnelForEndpoint(endpointName string) (string, bool) {
 	if htm.tcpManager != nil {
 		return htm.tcpManager.FindTunnelForEndpoint(endpointName)
@@ -95,7 +97,7 @@ func (htm *HybridTunnelManager) FindTunnelForEndpoint(endpointName string) (stri
 	return "", false
 }
 
-// GetEndpointsInfo 获取端点信息
+// GetEndpointsInfo 鑾峰彇绔偣淇℃伅
 func (htm *HybridTunnelManager) GetEndpointsInfo(tunnelName string, stats *StatsCollector) map[string]*EndpointInfo {
 	if htm.tcpManager == nil {
 		return nil
@@ -106,7 +108,7 @@ func (htm *HybridTunnelManager) GetEndpointsInfo(tunnelName string, stats *Stats
 	return info
 }
 
-// MeasureEndpointLatency 测量端点延迟
+// MeasureEndpointLatency 娴嬮噺绔偣寤惰繜
 func (htm *HybridTunnelManager) MeasureEndpointLatency(tunnelName, endpointName string) (time.Duration, error) {
 	if htm.tcpManager == nil {
 		return 0, errors.New("TCP tunnel manager not initialized")
@@ -114,7 +116,7 @@ func (htm *HybridTunnelManager) MeasureEndpointLatency(tunnelName, endpointName 
 	return htm.tcpManager.MeasureEndpointLatency(tunnelName, endpointName)
 }
 
-// GetPoolStats 获取连接池统计信息
+// GetPoolStats returns tunnel manager pool stats.
 func (htm *HybridTunnelManager) GetPoolStats() map[string]interface{} {
 	htm.mu.RLock()
 	defer htm.mu.RUnlock()
@@ -125,7 +127,7 @@ func (htm *HybridTunnelManager) GetPoolStats() map[string]interface{} {
 	return stats
 }
 
-// Cleanup 清理资源
+// Cleanup 娓呯悊璧勬簮
 func (htm *HybridTunnelManager) Cleanup() {
 	DebugLog("[TUNNEL] Cleaning up tunnel manager")
 

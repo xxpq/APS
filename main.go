@@ -475,17 +475,17 @@ func main() {
 	harManager := NewHarLoggerManager(config)
 	defer harManager.Shutdown()
 
-	tunnelManager := NewHybridTunnelManager(config, nil) // 使用混合隧道管理器
+	tunnelManager := NewHybridTunnelManager(config, nil, statsDB) // 浣跨敤娣峰悎闅ч亾绠＄悊鍣?
 	scriptRunner := NewScriptRunner(config.Scripting)
 	trafficShaper := NewTrafficShaper(initialQuotaUsage)
 	statsCollector := NewStatsCollector(config)
 	defer statsCollector.Close() // Ensure graceful shutdown of async stats workers
 
-	// 初始化静态文件缓存管理器
+	// 鍒濆鍖栭潤鎬佹枃浠剁紦瀛樼鐞嗗櫒
 	staticCache := NewStaticCacheManager(config.StaticCache)
 	defer staticCache.Stop()
 
-	// 设置tunnelManager的statsCollector，实现端点统计的集中式管理
+	// 璁剧疆tunnelManager鐨剆tatsCollector锛屽疄鐜扮鐐圭粺璁＄殑闆嗕腑寮忕鐞?
 	tunnelManager.SetStatsCollector(statsCollector)
 	replayManager := NewReplayManager(config)
 
@@ -512,7 +512,7 @@ func main() {
 	}
 	log.Println("===========================================")
 	fmt.Println()
-	fmt.Println("🔐 HTTPS Interception Setup:")
+	fmt.Println("馃攼 HTTPS Interception Setup:")
 	fmt.Println("   1. Configure your system or browser to use one of the proxy servers.")
 	fmt.Println("   2. Visit '/.ssl' on any server with 'cert: \"auto\"' to download the root certificate.")
 	fmt.Println()
@@ -529,7 +529,7 @@ func (sm *ServerManager) StartAll() {
 	sm.config.mu.RLock()
 	defer sm.config.mu.RUnlock()
 
-	// 检查是否有服务配置了ACME
+	// 妫€鏌ユ槸鍚︽湁鏈嶅姟閰嶇疆浜咥CME
 	needsACMEChallengeServer := false
 	for _, serverConfig := range sm.config.Servers {
 		if certStr, ok := serverConfig.Cert.(string); ok && certStr == "acme" {
@@ -538,7 +538,7 @@ func (sm *ServerManager) StartAll() {
 		}
 	}
 
-	// 如果需要ACME，确保有一个公共的80端口服务器
+	// 濡傛灉闇€瑕丄CME锛岀‘淇濇湁涓€涓叕鍏辩殑80绔彛鏈嶅姟鍣?
 	if needsACMEChallengeServer {
 		foundPort80 := false
 		for _, serverConfig := range sm.config.Servers {
@@ -558,7 +558,7 @@ func (sm *ServerManager) StartAll() {
 		}
 	}
 
-	// 将 mappings 按 server name 分组
+	// 灏?mappings 鎸?server name 鍒嗙粍
 	serverMappings := make(map[string][]*Mapping)
 	for i := range sm.config.Mappings {
 		mapping := &sm.config.Mappings[i]
@@ -567,7 +567,7 @@ func (sm *ServerManager) StartAll() {
 		}
 	}
 
-	// 为每个 server 创建并启动一个处理器
+	// 涓烘瘡涓?server 鍒涘缓骞跺惎鍔ㄤ竴涓鐞嗗櫒
 	for name, serverConfig := range sm.config.Servers {
 		if serverConfig == nil {
 			continue
@@ -580,17 +580,17 @@ func createServerHandler(serverName string, mappings []*Mapping, serverConfig *L
 	mux := http.NewServeMux()
 	proxy := NewMapRemoteProxy(config, harManager, tunnelManager, scriptRunner, trafficShaper, stats, staticCache, loggingDB, serverName, rateLimiter)
 
-	// 如果 cert 是 auto，注册证书下载处理器
+	// 濡傛灉 cert 鏄?auto锛屾敞鍐岃瘉涔︿笅杞藉鐞嗗櫒
 	if certStr, ok := serverConfig.Cert.(string); ok && certStr == "auto" {
 		certHandlers := &CertHandlers{}
 		certHandlers.RegisterHandlers(mux)
 	}
 
-	// 注册 Auth 管理接口
+	// 娉ㄥ唽 Auth 绠＄悊鎺ュ彛
 	authHandlers := &AuthHandlers{}
 	authHandlers.RegisterHandlers(mux)
 
-	// 添加重放端点（始终可用）
+	// 娣诲姞閲嶆斁绔偣锛堝缁堝彲鐢級
 	mux.HandleFunc("/.replay", replayManager.ServeHTTP)
 
 	requireTunnelMTLS := serverConfig.TunnelMTLS != nil && *serverConfig.TunnelMTLS
@@ -652,38 +652,38 @@ func createServerHandler(serverName string, mappings []*Mapping, serverConfig *L
 		DebugLog("[TCP TUNNEL] Server '%s' is not bound by any tunnel; '/.tunnel' is not registered", serverName)
 	}
 
-	// 根据 panel 控制 /.api 与 /.admin 的注册
+	// 鏍规嵁 panel 鎺у埗 /.api 涓?/.admin 鐨勬敞鍐?
 	if serverConfig.Panel != nil && *serverConfig.Panel {
-		// 添加统计数据端点
+		// 娣诲姞缁熻鏁版嵁绔偣
 		mux.HandleFunc("/.api/stats", stats.ServeHTTP)
 
-		// 注册管理面板处理器
+		// 娉ㄥ唽绠＄悊闈㈡澘澶勭悊鍣?
 		adminHandlers := NewAdminHandlers(config, configFile, serverName, stats, statsDB, loggingDB, logBroadcaster, rateLimiter)
-		// 设置tunnel管理器引用，用于查询endpoint状态
+		// 璁剧疆tunnel绠＄悊鍣ㄥ紩鐢紝鐢ㄤ簬鏌ヨendpoint鐘舵€?
 		adminHandlers.SetTunnelManager(tunnelManager)
 		adminHandlers.RegisterHandlers(mux)
 	}
 
-	// 创建一个统一的处理器来处理所有请求
+	// 鍒涘缓涓€涓粺涓€鐨勫鐞嗗櫒鏉ュ鐞嗘墍鏈夎姹?
 	var baseHandler http.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// 检查 mux 中是否有更具体的匹配 (例如证书下载页面或相对路径)
+		// 妫€鏌?mux 涓槸鍚︽湁鏇村叿浣撶殑鍖归厤 (渚嬪璇佷功涓嬭浇椤甸潰鎴栫浉瀵硅矾寰?
 		handler, pattern := mux.Handler(r)
 		if pattern != "" {
 			handler.ServeHTTP(w, r)
 			return
 		}
 
-		// 代理请求 (CONNECT)
+		// 浠ｇ悊璇锋眰 (CONNECT)
 		if r.Method == http.MethodConnect {
 			proxy.ServeHTTP(w, r)
 			return
 		}
 
-		// 默认处理 HTTP 请求转发
+		// 榛樿澶勭悊 HTTP 璇锋眰杞彂
 		proxy.ServeHTTP(w, r)
 	})
 
-	// 如果是80端口，并且全局启用了ACME，则包装处理器以处理ACME挑战
+	// 濡傛灉鏄?0绔彛锛屽苟涓斿叏灞€鍚敤浜咥CME锛屽垯鍖呰澶勭悊鍣ㄤ互澶勭悊ACME鎸戞垬
 	if serverConfig.Port == 80 && isACMEEnabled {
 		baseHandler = GetACMEHandler(baseHandler)
 	}

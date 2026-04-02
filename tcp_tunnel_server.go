@@ -27,6 +27,7 @@ type TCPTunnelServer struct {
 	tunnelManager *TCPTunnelManager
 	endpoints     map[string]*TCPEndpoint // endpointID -> endpoint
 	config        *Config
+	statsDB       *StatsDB
 	running       bool
 	replayMu      sync.Mutex
 	replaySeen    map[string]int64
@@ -105,10 +106,11 @@ type tcpProxyConnection struct {
 	mu           sync.Mutex
 }
 
-// NewTCPTunnelServer creates a new TCP tunnel server
-func NewTCPTunnelServer(config *Config) *TCPTunnelServer {
+// NewTCPTunnelServer creates a new TCP tunnel server.
+func NewTCPTunnelServer(config *Config, statsDB *StatsDB) *TCPTunnelServer {
 	return &TCPTunnelServer{
 		config:     config,
+		statsDB:    statsDB,
 		endpoints:  make(map[string]*TCPEndpoint),
 		replaySeen: make(map[string]int64, 1024),
 	}
@@ -121,18 +123,25 @@ func (s *TCPTunnelServer) SetTunnelManager(tm *TCPTunnelManager) {
 	s.tunnelManager = tm
 }
 
-func deriveRegistrationProofKey(password, cid string, pinHash []byte) []byte {
-	h := sha256.New()
-	h.Write([]byte(password))
-	h.Write([]byte{':'})
-	h.Write([]byte(cid))
-	h.Write([]byte{':'})
-	h.Write(pinHash)
-	return h.Sum(nil)
+func deriveRegistrationProofKey(password, cid string, pinHash []byte, kdfVersion, kdfSalt string) ([]byte, error) {
+	baseKey, err := deriveInitialKeyWithKDF(password, kdfVersion, kdfSalt)
+	if err != nil {
+		return nil, err
+	}
+	mac := hmac.New(sha256.New, baseKey)
+	mac.Write([]byte("registration-proof-v3"))
+	mac.Write([]byte{':'})
+	mac.Write([]byte(strings.TrimSpace(cid)))
+	mac.Write([]byte{':'})
+	mac.Write(pinHash)
+	return mac.Sum(nil), nil
 }
 
-func computeSecureRegistrationProof(password, cid, tunnelName, endpointName, serverHost, pinHashHex, cipherSuite string, ts int64) string {
-	key := deriveRegistrationProofKey(password, cid, []byte(pinHashHex))
+func computeSecureRegistrationProof(password, cid, tunnelName, endpointName, serverHost, pinHashHex, cipherSuite string, ts int64, kdfVersion, kdfSalt string) (string, error) {
+	key, err := deriveRegistrationProofKey(password, cid, []byte(pinHashHex), kdfVersion, kdfSalt)
+	if err != nil {
+		return "", err
+	}
 	message := strings.Join([]string{
 		cid,
 		tunnelName,
@@ -144,7 +153,7 @@ func computeSecureRegistrationProof(password, cid, tunnelName, endpointName, ser
 	}, "|")
 	mac := hmac.New(sha256.New, key)
 	mac.Write([]byte(message))
-	return hex.EncodeToString(mac.Sum(nil))
+	return hex.EncodeToString(mac.Sum(nil)), nil
 }
 
 func isRegistrationTimestampFresh(ts int64) bool {
@@ -160,6 +169,18 @@ func (s *TCPTunnelServer) registerSecureRegistrationReplayToken(cid string, ts i
 	now := time.Now().UTC().Unix()
 	expiry := ts + int64((secureRegistrationWindow + time.Minute).Seconds())
 	token := cid + "|" + strconv.FormatInt(ts, 10) + "|" + proof
+
+	if s.statsDB != nil {
+		isReplay, err := s.statsDB.CheckAndStoreReplayToken("secure_reg", token, expiry)
+		if err != nil {
+			DebugLog("[TCP TUNNEL] Persistent registration replay check failed: %v", err)
+		} else if isReplay {
+			return errors.New("registration replay detected")
+		}
+		if err := s.statsDB.DeleteExpiredReplayTokens(now); err != nil {
+			DebugLog("[TCP TUNNEL] Persistent registration replay cleanup failed: %v", err)
+		}
+	}
 
 	s.replayMu.Lock()
 	defer s.replayMu.Unlock()
@@ -469,7 +490,7 @@ func (s *TCPTunnelServer) handleConnection(conn net.Conn) {
 		tc.Close()
 		return
 	}
-	expectedProofHex := computeSecureRegistrationProof(
+	expectedProofHex, proofErr := computeSecureRegistrationProof(
 		effectiveCredential,
 		reg.ConfigID,
 		reg.TunnelName,
@@ -478,7 +499,18 @@ func (s *TCPTunnelServer) handleConnection(conn net.Conn) {
 		expectedHashHex,
 		reg.CipherSuite,
 		reg.Timestamp,
+		tunnelConfig.KDFVersion,
+		tunnelConfig.KDFSalt,
 	)
+	if proofErr != nil {
+		DebugLog("[TCP TUNNEL] Failed to derive registration proof key for cid '%s' from %s: %v", reg.ConfigID, remoteAddr, proofErr)
+		tc.SendJSON(MsgTypeRegisterAck, RegisterAckPayload{
+			Success: false,
+			Error:   "registration proof derivation failed",
+		})
+		tc.Close()
+		return
+	}
 	providedProof, err := hex.DecodeString(strings.TrimSpace(reg.AuthProof))
 	if err != nil {
 		DebugLog("[TCP TUNNEL] Invalid auth proof encoding from %s", remoteAddr)
@@ -541,7 +573,7 @@ func (s *TCPTunnelServer) handleConnection(conn net.Conn) {
 	}
 
 	// Initialize per-connection session key manager
-	endpoint.KeyManager = NewSessionKeyManager(effectiveCredential, reg.EndpointName)
+	endpoint.KeyManager = NewSessionKeyManager(effectiveCredential, reg.EndpointName, s.statsDB)
 	if err := endpoint.KeyManager.SetKDFParams(tunnelConfig.KDFVersion, tunnelConfig.KDFSalt); err != nil {
 		DebugLog("[TCP TUNNEL] Failed to set KDF parameters for %s: %v", remoteAddr, err)
 		tc.Close()
@@ -552,7 +584,11 @@ func (s *TCPTunnelServer) handleConnection(conn net.Conn) {
 		tc.Close()
 		return
 	}
-	endpoint.KeyManager.EnableSecureTransport(securePinHash, reg.ConfigID)
+	if err := endpoint.KeyManager.EnableSecureTransport(securePinHash, reg.ConfigID); err != nil {
+		DebugLog("[TCP TUNNEL] Failed to enable secure transport for %s: %v", remoteAddr, err)
+		tc.Close()
+		return
+	}
 	endpoint.ControlOut = NewControlPlaneOutboundState()
 
 	// Register endpoint

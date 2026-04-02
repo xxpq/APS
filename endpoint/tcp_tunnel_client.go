@@ -399,18 +399,25 @@ func (c *prefixedConn) Read(b []byte) (int, error) {
 	return c.Conn.Read(b)
 }
 
-func deriveRegistrationProofKey(password, cid string, pinHash []byte) []byte {
-	h := sha256.New()
-	h.Write([]byte(password))
-	h.Write([]byte{':'})
-	h.Write([]byte(cid))
-	h.Write([]byte{':'})
-	h.Write(pinHash)
-	return h.Sum(nil)
+func deriveRegistrationProofKey(password, cid string, pinHash []byte, kdfVersion, kdfSalt string) ([]byte, error) {
+	baseKey, err := deriveInitialKeyWithKDF(password, kdfVersion, kdfSalt)
+	if err != nil {
+		return nil, err
+	}
+	mac := hmac.New(sha256.New, baseKey)
+	mac.Write([]byte("registration-proof-v3"))
+	mac.Write([]byte{':'})
+	mac.Write([]byte(strings.TrimSpace(cid)))
+	mac.Write([]byte{':'})
+	mac.Write(pinHash)
+	return mac.Sum(nil), nil
 }
 
-func computeSecureRegistrationProof(password, cid, tunnelName, endpointName, serverHost, pinHashHex, cipherSuite string, ts int64) string {
-	key := deriveRegistrationProofKey(password, cid, []byte(pinHashHex))
+func computeSecureRegistrationProof(password, cid, tunnelName, endpointName, serverHost, pinHashHex, cipherSuite string, ts int64, kdfVersion, kdfSalt string) (string, error) {
+	key, err := deriveRegistrationProofKey(password, cid, []byte(pinHashHex), kdfVersion, kdfSalt)
+	if err != nil {
+		return "", err
+	}
 	message := strings.Join([]string{
 		cid,
 		tunnelName,
@@ -422,7 +429,7 @@ func computeSecureRegistrationProof(password, cid, tunnelName, endpointName, ser
 	}, "|")
 	mac := hmac.New(sha256.New, key)
 	mac.Write([]byte(message))
-	return hex.EncodeToString(mac.Sum(nil))
+	return hex.EncodeToString(mac.Sum(nil)), nil
 }
 
 func buildTunnelTLSConfig(serverHost string, expectedPinHash []byte, connCtx ImmutableConnectionContext) (*tls.Config, error) {
@@ -597,7 +604,7 @@ func runTCPTunnelSession(ctx context.Context, connCtx ImmutableConnectionContext
 
 	regPinHashHex := hex.EncodeToString(regPinHash)
 	regTS := time.Now().UTC().Unix()
-	regProof := computeSecureRegistrationProof(
+	regProof, proofErr := computeSecureRegistrationProof(
 		sessionCredential,
 		cid,
 		connCtx.TunnelName,
@@ -606,7 +613,13 @@ func runTCPTunnelSession(ctx context.Context, connCtx ImmutableConnectionContext
 		regPinHashHex,
 		SecureCipherSuiteSPKITS,
 		regTS,
+		connCtx.KDFVersion,
+		connCtx.KDFSalt,
 	)
+	if proofErr != nil {
+		log.Printf("Failed to compute registration proof: %v", proofErr)
+		return false
+	}
 
 	// Send registration using effective config values
 	if err := tc.SendJSON(MsgTypeRegister, RegisterPayload{
@@ -666,7 +679,10 @@ func runTCPTunnelSession(ctx context.Context, connCtx ImmutableConnectionContext
 		log.Printf("Failed to derive initial key: %v", err)
 		return true
 	}
-	keyManager.EnableSecureTransport(regPinHash, cid)
+	if err := keyManager.EnableSecureTransport(regPinHash, cid); err != nil {
+		log.Printf("Failed to enable secure transport: %v", err)
+		return false
+	}
 
 	// Upgrade to SMUX
 	// Client side acts as SMUX client
