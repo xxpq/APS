@@ -4,6 +4,7 @@ import (
 	"container/list"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"database/sql"
 	"flag"
 	"fmt"
@@ -47,6 +48,15 @@ type ServerManager struct {
 	loggingDB      *LoggingDB
 	logBroadcaster *LogBroadcaster
 	rateLimiter    *RateLimitEngine
+}
+
+type tunnelInboundConn struct {
+	net.Conn
+	serverName string
+}
+
+func (c *tunnelInboundConn) TunnelServerName() string {
+	return c.serverName
 }
 
 func NewServerManager(config *Config, configFile string, harManager *HarLoggerManager, tunnelManager TunnelManagerInterface, scriptRunner *ScriptRunner, trafficShaper *TrafficShaper, stats *StatsCollector, staticCache *StaticCacheManager, replayManager *ReplayManager, statsDB *StatsDB, loggingDB *LoggingDB, logBroadcaster *LogBroadcaster) *ServerManager {
@@ -182,7 +192,7 @@ func (sm *ServerManager) Start(name string, serverConfig *ListenConfig, isACMEEn
 	// Note: Type 0 defaults to HTTP in config processing, but here we check explicitly
 	if serverConfig.Type == ServerTypeHTTP || serverConfig.Type == ServerTypeHTTPUDP {
 		handler := createServerHandler(name, serverMappings[name], serverConfig, sm.config, sm.configFile, sm.harManager, sm.tunnelManager, sm.scriptRunner, sm.trafficShaper, sm.stats, sm.staticCache, sm.replayManager, isACMEEnabled, sm.statsDB, sm.loggingDB, sm.logBroadcaster, sm.rateLimiter)
-		server, mux := startServer(name, serverConfig, handler, sm.tunnelManager, sm.rateLimiter)
+		server, mux := startServer(name, serverConfig, handler, sm.rateLimiter)
 		if server != nil {
 			sm.servers[name] = server
 			if mux != nil {
@@ -583,40 +593,64 @@ func createServerHandler(serverName string, mappings []*Mapping, serverConfig *L
 	// 添加重放端点（始终可用）
 	mux.HandleFunc("/.replay", replayManager.ServeHTTP)
 
-	// HTTP CONNECT tunnel entry on the same listener/port.
-	mux.HandleFunc("/.tunnel", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodConnect {
-			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		log.Printf("[TCP TUNNEL] CONNECT /.tunnel request from %s", r.RemoteAddr)
+	requireTunnelMTLS := serverConfig.TunnelMTLS != nil && *serverConfig.TunnelMTLS
+	tunnelBound := isServerBoundToAnyTunnel(config, serverName)
 
-		hijacker, ok := w.(http.Hijacker)
-		if !ok {
-			http.Error(w, "Hijacking not supported", http.StatusInternalServerError)
-			return
-		}
+	if tunnelBound {
+		// HTTP CONNECT tunnel entry is only exposed on servers bound by tunnels.<name>.servers.
+		mux.HandleFunc("/.tunnel", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodConnect {
+				http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			if r.TLS == nil {
+				http.Error(w, "TLS is required for /.tunnel", http.StatusUpgradeRequired)
+				return
+			}
+			if requireTunnelMTLS {
+				if len(r.TLS.PeerCertificates) == 0 || len(r.TLS.VerifiedChains) == 0 {
+					http.Error(w, "mTLS client certificate required for /.tunnel", http.StatusForbidden)
+					return
+				}
+			}
+			if tunnelManager == nil {
+				http.Error(w, "Tunnel manager unavailable", http.StatusServiceUnavailable)
+				return
+			}
+			log.Printf("[TCP TUNNEL] CONNECT /.tunnel request from %s on server '%s'", r.RemoteAddr, serverName)
 
-		conn, rw, err := hijacker.Hijack()
-		if err != nil {
-			log.Printf("[TCP TUNNEL] Failed to hijack CONNECT /.tunnel: %v", err)
-			return
-		}
+			hijacker, ok := w.(http.Hijacker)
+			if !ok {
+				http.Error(w, "Hijacking not supported", http.StatusInternalServerError)
+				return
+			}
 
-		if _, err := rw.WriteString("HTTP/1.1 200 Connection Established\r\n\r\n"); err != nil {
-			log.Printf("[TCP TUNNEL] Failed to write CONNECT /.tunnel response: %v", err)
-			conn.Close()
-			return
-		}
-		if err := rw.Flush(); err != nil {
-			log.Printf("[TCP TUNNEL] Failed to flush CONNECT /.tunnel response: %v", err)
-			conn.Close()
-			return
-		}
-		log.Printf("[TCP TUNNEL] CONNECT /.tunnel upgraded for %s", r.RemoteAddr)
+			conn, rw, err := hijacker.Hijack()
+			if err != nil {
+				log.Printf("[TCP TUNNEL] Failed to hijack CONNECT /.tunnel: %v", err)
+				return
+			}
 
-		go tunnelManager.HandleTunnelConnection(conn)
-	})
+			if _, err := rw.WriteString("HTTP/1.1 200 Connection Established\r\n\r\n"); err != nil {
+				log.Printf("[TCP TUNNEL] Failed to write CONNECT /.tunnel response: %v", err)
+				conn.Close()
+				return
+			}
+			if err := rw.Flush(); err != nil {
+				log.Printf("[TCP TUNNEL] Failed to flush CONNECT /.tunnel response: %v", err)
+				conn.Close()
+				return
+			}
+			log.Printf("[TCP TUNNEL] CONNECT /.tunnel upgraded for %s on server '%s'", r.RemoteAddr, serverName)
+
+			go tunnelManager.HandleTunnelConnection(&tunnelInboundConn{
+				Conn:       conn,
+				serverName: serverName,
+			})
+		})
+	} else {
+		DebugLog("[TCP TUNNEL] Server '%s' is not bound by any tunnel; '/.tunnel' is not registered", serverName)
+	}
 
 	// 根据 panel 控制 /.api 与 /.admin 的注册
 	if serverConfig.Panel != nil && *serverConfig.Panel {
@@ -624,7 +658,7 @@ func createServerHandler(serverName string, mappings []*Mapping, serverConfig *L
 		mux.HandleFunc("/.api/stats", stats.ServeHTTP)
 
 		// 注册管理面板处理器
-		adminHandlers := NewAdminHandlers(config, configFile, stats, statsDB, loggingDB, logBroadcaster, rateLimiter)
+		adminHandlers := NewAdminHandlers(config, configFile, serverName, stats, statsDB, loggingDB, logBroadcaster, rateLimiter)
 		// 设置tunnel管理器引用，用于查询endpoint状态
 		adminHandlers.SetTunnelManager(tunnelManager)
 		adminHandlers.RegisterHandlers(mux)
@@ -667,7 +701,62 @@ func createServerHandler(serverName string, mappings []*Mapping, serverConfig *L
 	return h2c.NewHandler(baseHandler, http2Server)
 }
 
-func startServer(name string, config *ListenConfig, handler http.Handler, tunnelManager TunnelManagerInterface, rateLimiter *RateLimitEngine) (*http.Server, *ConnectionMux) {
+func isServerBoundToAnyTunnel(config *Config, serverName string) bool {
+	if config == nil || config.Tunnels == nil || strings.TrimSpace(serverName) == "" {
+		return false
+	}
+	for _, tunnel := range config.Tunnels {
+		if tunnel == nil {
+			continue
+		}
+		for _, boundServer := range tunnel.Servers {
+			if strings.TrimSpace(boundServer) == strings.TrimSpace(serverName) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func configureTunnelMTLSForServer(name string, serverConfig *ListenConfig, tlsConfig *tls.Config) error {
+	if serverConfig == nil || tlsConfig == nil {
+		return nil
+	}
+
+	requireTunnelMTLS := serverConfig.TunnelMTLS != nil && *serverConfig.TunnelMTLS
+	caPath := strings.TrimSpace(serverConfig.TunnelMTLSCA)
+
+	if !requireTunnelMTLS && caPath == "" {
+		return nil
+	}
+	if caPath == "" {
+		return fmt.Errorf("server '%s': tunnelMTLS requires tunnelMTLSCA", name)
+	}
+
+	caPEM, err := os.ReadFile(caPath)
+	if err != nil {
+		return fmt.Errorf("server '%s': failed to read tunnelMTLSCA '%s': %w", name, caPath, err)
+	}
+	clientCAPool := x509.NewCertPool()
+	if !clientCAPool.AppendCertsFromPEM(caPEM) {
+		return fmt.Errorf("server '%s': failed to parse tunnelMTLSCA '%s'", name, caPath)
+	}
+
+	tlsConfig.ClientCAs = clientCAPool
+	if tlsConfig.ClientAuth < tls.VerifyClientCertIfGiven {
+		tlsConfig.ClientAuth = tls.VerifyClientCertIfGiven
+	}
+
+	if requireTunnelMTLS {
+		log.Printf("[TCP TUNNEL] Server '%s' requires mTLS on /.tunnel (CA: %s)", name, caPath)
+	} else {
+		log.Printf("[TCP TUNNEL] Server '%s' enables client cert verification for /.tunnel (CA: %s)", name, caPath)
+	}
+
+	return nil
+}
+
+func startServer(name string, config *ListenConfig, handler http.Handler, rateLimiter *RateLimitEngine) (*http.Server, *ConnectionMux) {
 	// Determine bind address based on 'public' (default: true)
 	host := "127.0.0.1"
 	if config.Public == nil || *config.Public {
@@ -694,11 +783,6 @@ func startServer(name string, config *ListenConfig, handler http.Handler, tunnel
 	// Create ConnectionMux
 	mux := NewConnectionMux(listener)
 	mux.SetRateLimiter(rateLimiter, name, config.RateLimitRules)
-
-	// Setup Tunnel Handler
-	mux.SetTunnelHandler(func(conn net.Conn) {
-		tunnelManager.HandleTunnelConnection(conn)
-	})
 
 	// Setup HTTP Handler
 	httpListener := NewChannelListener(listener.Addr())
@@ -751,6 +835,14 @@ func startServer(name string, config *ListenConfig, handler http.Handler, tunnel
 						return cert, certErr
 					}
 				}
+			}
+
+			if tlsConfig.MinVersion == 0 || tlsConfig.MinVersion < tls.VersionTLS12 {
+				tlsConfig.MinVersion = tls.VersionTLS12
+			}
+			if err := configureTunnelMTLSForServer(name, config, tlsConfig); err != nil {
+				log.Printf("Server '%s' TLS setup failed: %v", name, err)
+				return
 			}
 
 			tlsListener := NewTlsListener(httpListener, tlsConfig)

@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -107,6 +108,7 @@ var AdminSessions = &SessionStore{sessions: make(map[string]Session)}
 type AdminHandlers struct {
 	config        *Config
 	configPath    string
+	serverName    string
 	configMux     sync.RWMutex
 	sessions      *SessionStore
 	tunnelManager TunnelManagerInterface
@@ -119,10 +121,11 @@ type AdminHandlers struct {
 }
 
 // NewAdminHandlers creates a new AdminHandlers instance.
-func NewAdminHandlers(config *Config, configPath string, statsCollector *StatsCollector, statsDB *StatsDB, loggingDB *LoggingDB, logBroadcaster *LogBroadcaster, rateLimiter *RateLimitEngine) *AdminHandlers {
+func NewAdminHandlers(config *Config, configPath string, serverName string, statsCollector *StatsCollector, statsDB *StatsDB, loggingDB *LoggingDB, logBroadcaster *LogBroadcaster, rateLimiter *RateLimitEngine) *AdminHandlers {
 	return &AdminHandlers{
 		config:         config,
 		configPath:     configPath,
+		serverName:     strings.TrimSpace(serverName),
 		sessions:       AdminSessions,
 		statsCollector: statsCollector,
 		statsDB:        statsDB,
@@ -560,6 +563,10 @@ func (h *AdminHandlers) setConfig(w http.ResponseWriter, r *http.Request) {
 
 // ===== 辅助：保存当前内存配置到文件（需持有写锁）=====
 func (h *AdminHandlers) saveConfigLocked() error {
+	if err := ensureTunnelKDFSettings(h.config); err != nil {
+		return err
+	}
+
 	// Increment version for concurrent editing detection
 	h.config.Version++
 
@@ -571,6 +578,28 @@ func (h *AdminHandlers) saveConfigLocked() error {
 	encoder := json.NewEncoder(file)
 	encoder.SetIndent("", "  ")
 	return encoder.Encode(h.config)
+}
+
+func (h *AdminHandlers) getTunnelKDFParamsLocked(tunnelName string) (string, string, error) {
+	if h.config == nil || h.config.Tunnels == nil {
+		return "", "", errors.New("tunnel configuration is not initialized")
+	}
+	tunnelName = strings.TrimSpace(tunnelName)
+	tunnel, exists := h.config.Tunnels[tunnelName]
+	if !exists || tunnel == nil {
+		return "", "", fmt.Errorf("tunnel '%s' not found", tunnelName)
+	}
+
+	kdfVersion, err := normalizeKDFVersion(tunnel.KDFVersion)
+	if err != nil {
+		return "", "", err
+	}
+	kdfSalt := strings.TrimSpace(tunnel.KDFSalt)
+	if kdfSalt == "" {
+		return "", "", fmt.Errorf("tunnel '%s' kdfSalt is missing", tunnelName)
+	}
+
+	return kdfVersion, kdfSalt, nil
 }
 
 func appendNormalizedFromEntries(dst []string, seen map[string]struct{}, raw interface{}) []string {
@@ -850,6 +879,12 @@ func (h *AdminHandlers) handleTunnels(w http.ResponseWriter, r *http.Request) {
 			if t.Password == "" {
 				t.Password = existingTunnel.Password
 			}
+			if strings.TrimSpace(t.KDFVersion) == "" {
+				t.KDFVersion = existingTunnel.KDFVersion
+			}
+			if strings.TrimSpace(t.KDFSalt) == "" {
+				t.KDFSalt = existingTunnel.KDFSalt
+			}
 		}
 		h.config.Tunnels[req.Name] = &t
 		if err := h.saveConfigLocked(); err != nil {
@@ -903,34 +938,27 @@ func (h *AdminHandlers) handleTLSPin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *AdminHandlers) handleEndpointConfigs(w http.ResponseWriter, r *http.Request) {
-	// GET with ?id= parameter allows unauthenticated access for endpoints to fetch their config
-	// All other operations require admin authentication
-	configID := strings.TrimSpace(r.URL.Query().Get("id"))
+	// Endpoint self-fetch supports encrypted eid only.
+	legacyID := strings.TrimSpace(r.URL.Query().Get("id"))
 	encryptedConfigID := strings.TrimSpace(r.URL.Query().Get(TLSEncryptedConfigIDParam))
 	encryptedSalt := strings.TrimSpace(r.URL.Query().Get(TLSEncryptedSaltParam))
 
-	if r.Method == http.MethodGet && (configID != "" || encryptedConfigID != "") {
-		encryptedMode := encryptedConfigID != ""
-		var pinKey []byte
-		var requestSalt string
-		if encryptedMode {
-			var err error
-			configID, requestSalt, pinKey, err = decryptEndpointConfigIDFromRequest(r, encryptedConfigID, encryptedSalt)
-			if err != nil {
-				http.Error(w, "invalid encrypted config id", http.StatusBadRequest)
-				return
-			}
+	if r.Method == http.MethodGet && legacyID != "" {
+		http.Error(w, "plaintext id mode is disabled; use encrypted eid", http.StatusBadRequest)
+		return
+	}
+
+	if r.Method == http.MethodGet && encryptedConfigID != "" {
+		configID, requestSalt, pinKey, err := decryptEndpointConfigIDFromRequest(r, encryptedConfigID, encryptedSalt)
+		if err != nil {
+			http.Error(w, "invalid encrypted config id", http.StatusBadRequest)
+			return
 		}
 
 		writeConfigPayload := func(payload map[string]interface{}) {
-			if encryptedMode {
-				if err := writeEncryptedJSONWithTLSPin(w, pinKey, requestSalt, payload); err != nil {
-					http.Error(w, "failed to write encrypted response", http.StatusInternalServerError)
-				}
-				return
+			if err := writeEncryptedJSONWithTLSPin(w, pinKey, requestSalt, payload); err != nil {
+				http.Error(w, "failed to write encrypted response", http.StatusInternalServerError)
 			}
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(payload)
 		}
 
 		// Allow endpoint clients to fetch their own config without admin auth
@@ -953,23 +981,36 @@ func (h *AdminHandlers) handleEndpointConfigs(w http.ResponseWriter, r *http.Req
 			})
 			return
 		}
+		kdfVersion, kdfSalt, kdfErr := h.getTunnelKDFParamsLocked(endpoint.TunnelName)
+		if kdfErr != nil {
+			writeConfigPayload(map[string]interface{}{
+				"success": false,
+				"error":   "tunnel KDF parameters are invalid",
+			})
+			return
+		}
 
-		// Inherit password from tunnel config if endpoint doesn't have its own
-		effectivePassword := endpoint.Password
-		if effectivePassword == "" && h.config.Tunnels != nil {
-			if tunnel, ok := h.config.Tunnels[endpoint.TunnelName]; ok {
-				effectivePassword = tunnel.Password
-			}
+		sessionCredential, sessionExpiresAt, issueErr := issueEndpointSessionCredential(configID, endpoint.TunnelName, endpoint.EndpointName)
+		if issueErr != nil {
+			writeConfigPayload(map[string]interface{}{
+				"success": false,
+				"error":   "failed to issue session credential",
+			})
+			return
 		}
 
 		writeConfigPayload(map[string]interface{}{
 			"success": true,
 			"config": map[string]interface{}{
-				"id":           configID,
-				"tunnelName":   endpoint.TunnelName,
-				"endpointName": endpoint.EndpointName,
-				"password":     effectivePassword,
-				"portMappings": endpoint.PortMappings,
+				"id":                configID,
+				"serverName":        h.serverName,
+				"tunnelName":        endpoint.TunnelName,
+				"endpointName":      endpoint.EndpointName,
+				"sessionCredential": sessionCredential,
+				"sessionExpiresAt":  sessionExpiresAt,
+				"kdfVersion":        kdfVersion,
+				"kdfSalt":           kdfSalt,
+				"portMappings":      endpoint.PortMappings,
 			},
 		})
 		return
@@ -1038,7 +1079,7 @@ func (h *AdminHandlers) handleEndpointConfigs(w http.ResponseWriter, r *http.Req
 		if oldEndpointName != "" {
 			targetEndpoint = oldEndpointName
 		}
-		go h.pushConfigToEndpoint(targetTunnel, targetEndpoint, &ep)
+		go h.pushConfigToEndpoint(req.Name, targetTunnel, targetEndpoint, &ep)
 
 	case http.MethodDelete:
 		name := r.URL.Query().Get("name")
@@ -1063,23 +1104,37 @@ func (h *AdminHandlers) handleEndpointConfigs(w http.ResponseWriter, r *http.Req
 	}
 }
 
-// pushConfigToEndpoint sends a config update message to a connected endpoint
-func (h *AdminHandlers) pushConfigToEndpoint(tunnelName, endpointName string, config *EndpointConfig_APS) {
+// pushConfigToEndpoint sends a config update message to a connected endpoint.
+// It always issues a fresh one-time session credential instead of pushing static passwords.
+func (h *AdminHandlers) pushConfigToEndpoint(configID, tunnelName, endpointName string, config *EndpointConfig_APS) {
 	if h.tunnelManager == nil {
 		log.Println("[CONFIG] Cannot push config: tunnel manager not set")
 		return
 	}
 
-	// Build config update payload
-	payload := map[string]interface{}{
-		"tunnelName":   config.TunnelName,
-		"endpointName": config.EndpointName,
-		"portMappings": config.PortMappings,
+	h.configMux.RLock()
+	kdfVersion, kdfSalt, kdfErr := h.getTunnelKDFParamsLocked(config.TunnelName)
+	h.configMux.RUnlock()
+	if kdfErr != nil {
+		log.Printf("[CONFIG] Failed to resolve tunnel KDF params for %s: %v", config.TunnelName, kdfErr)
+		return
 	}
 
-	// Only include password if it's set
-	if config.Password != "" {
-		payload["password"] = config.Password
+	sessionCredential, sessionExpiresAt, issueErr := issueEndpointSessionCredential(configID, config.TunnelName, config.EndpointName)
+	if issueErr != nil {
+		log.Printf("[CONFIG] Failed to issue session credential for %s: %v", configID, issueErr)
+		return
+	}
+
+	// Build config update payload
+	payload := map[string]interface{}{
+		"tunnelName":        config.TunnelName,
+		"endpointName":      config.EndpointName,
+		"sessionCredential": sessionCredential,
+		"sessionExpiresAt":  sessionExpiresAt,
+		"kdfVersion":        kdfVersion,
+		"kdfSalt":           kdfSalt,
+		"portMappings":      config.PortMappings,
 	}
 
 	payloadBytes, err := json.Marshal(payload)

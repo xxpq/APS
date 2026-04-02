@@ -426,9 +426,22 @@ func (tm *TCPTunnelManager) SendConfigUpdate(tunnelName, endpointName string, pa
 	if err != nil {
 		return err
 	}
+
+	tm.mu.RLock()
+	configVersion := int64(0)
+	if tm.config != nil {
+		configVersion = tm.config.Version
+	}
+	tm.mu.RUnlock()
+
+	protectedPayload, err := WrapControlPlanePayload(ep.KeyManager, MsgTypeConfigUpdate, payload, configVersion, ep.ControlOut)
+	if err != nil {
+		return err
+	}
+
 	msg := &TunnelMessage{
 		Type:    MsgTypeConfigUpdate,
-		Payload: payload,
+		Payload: protectedPayload,
 	}
 	return ep.Conn.WriteMessage(msg)
 }

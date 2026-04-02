@@ -4,6 +4,10 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
@@ -15,6 +19,8 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -78,13 +84,13 @@ const (
 )
 
 const (
-	// SecureCipherSuiteSPKITS enables SPKI-hash + timestamp-salt derivation and replay defense.
-	SecureCipherSuiteSPKITS = "spki-ts-v1"
+	// SecureCipherSuiteSPKITS enforces SPKI + CID + Timestamp secure transport.
+	SecureCipherSuiteSPKITS = "spki-cid-ts-v2"
 )
 
 const headerSize = 5
 const maxMessageSize = 10 * 1024 * 1024
-const connectHandshakeTimeout = 1200 * time.Millisecond
+const connectHandshakeTimeout = 5 * time.Second
 
 // TunnelMessage represents a message in the TCP tunnel protocol
 type TunnelMessage struct {
@@ -96,7 +102,10 @@ type TunnelMessage struct {
 type RegisterPayload struct {
 	TunnelName   string `json:"tunnel_name"`
 	EndpointName string `json:"endpoint_name"`
-	Password     string `json:"password"`
+	ServerName   string `json:"server_name,omitempty"`
+	ConfigID     string `json:"cid"`
+	Timestamp    int64  `json:"ts"`
+	AuthProof    string `json:"auth_proof"`
 	ServerHost   string `json:"server_host,omitempty"`
 	PinHash      string `json:"pin_hash,omitempty"`
 	CipherSuite  string `json:"cipher_suite,omitempty"`
@@ -298,6 +307,76 @@ func (c *prefixedConn) Read(b []byte) (int, error) {
 	return c.Conn.Read(b)
 }
 
+func deriveRegistrationProofKey(password, cid string, pinHash []byte) []byte {
+	h := sha256.New()
+	h.Write([]byte(password))
+	h.Write([]byte{':'})
+	h.Write([]byte(cid))
+	h.Write([]byte{':'})
+	h.Write(pinHash)
+	return h.Sum(nil)
+}
+
+func computeSecureRegistrationProof(password, cid, tunnelName, endpointName, serverHost, pinHashHex, cipherSuite string, ts int64) string {
+	key := deriveRegistrationProofKey(password, cid, []byte(pinHashHex))
+	message := strings.Join([]string{
+		cid,
+		tunnelName,
+		endpointName,
+		serverHost,
+		pinHashHex,
+		cipherSuite,
+		strconv.FormatInt(ts, 10),
+	}, "|")
+	mac := hmac.New(sha256.New, key)
+	mac.Write([]byte(message))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+func buildTunnelTLSConfig(serverHost string, expectedPinHash []byte, connCtx ImmutableConnectionContext) (*tls.Config, error) {
+	tlsConfig := &tls.Config{
+		MinVersion: tls.VersionTLS12,
+		ServerName: serverHost,
+		VerifyConnection: func(cs tls.ConnectionState) error {
+			if len(cs.PeerCertificates) == 0 {
+				return errors.New("missing peer certificate")
+			}
+			sum := sha256.Sum256(cs.PeerCertificates[0].RawSubjectPublicKeyInfo)
+			if !hmac.Equal(sum[:], expectedPinHash) {
+				return errors.New("tls pin mismatch")
+			}
+			return nil
+		},
+	}
+
+	if strings.TrimSpace(connCtx.MTLSCAFile) != "" {
+		caPEM, err := os.ReadFile(strings.TrimSpace(connCtx.MTLSCAFile))
+		if err != nil {
+			return nil, fmt.Errorf("failed to read mtls CA file: %w", err)
+		}
+		roots := x509.NewCertPool()
+		if !roots.AppendCertsFromPEM(caPEM) {
+			return nil, errors.New("failed to parse mtls CA file")
+		}
+		tlsConfig.RootCAs = roots
+	}
+
+	certPath := strings.TrimSpace(connCtx.MTLSCertFile)
+	keyPath := strings.TrimSpace(connCtx.MTLSKeyFile)
+	if certPath != "" || keyPath != "" {
+		if certPath == "" || keyPath == "" {
+			return nil, errors.New("both -mtls-cert and -mtls-key are required together")
+		}
+		cert, err := tls.LoadX509KeyPair(certPath, keyPath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load mTLS client certificate: %w", err)
+		}
+		tlsConfig.Certificates = []tls.Certificate{cert}
+	}
+
+	return tlsConfig, nil
+}
+
 func connectWithHTTPTunnelHandshake(conn net.Conn, serverAddress string) (net.Conn, error) {
 	handshakeReq := fmt.Sprintf(
 		"CONNECT /.tunnel HTTP/1.1\r\nHost: %s\r\nUser-Agent: aps-endpoint/%s\r\nConnection: keep-alive\r\nProxy-Connection: keep-alive\r\n\r\n",
@@ -344,44 +423,70 @@ func connectWithHTTPTunnelHandshake(conn net.Conn, serverAddress string) (net.Co
 	return &prefixedConn{Conn: conn, prefix: prefix}, nil
 }
 
-func dialTunnelServer(serverAddress string) (net.Conn, error) {
-	conn, err := net.DialTimeout("tcp", serverAddress, 30*time.Second)
+func dialTunnelServer(serverAddress, serverHost string, expectedPinHash []byte, connCtx ImmutableConnectionContext) (net.Conn, error) {
+	tlsConfig, err := buildTunnelTLSConfig(serverHost, expectedPinHash, connCtx)
+	if err != nil {
+		return nil, err
+	}
+
+	dialer := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}
+	conn, err := tls.DialWithDialer(dialer, "tcp", serverAddress, tlsConfig)
 	if err != nil {
 		return nil, err
 	}
 
 	upgradedConn, err := connectWithHTTPTunnelHandshake(conn, serverAddress)
-	if err == nil {
-		DebugLog("[CONN] CONNECT /.tunnel handshake succeeded")
-		return upgradedConn, nil
+	if err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("CONNECT /.tunnel over TLS failed: %w", err)
 	}
 
-	var netErr net.Error
-	if errors.As(err, &netErr) && netErr.Timeout() {
-		// APS already accepted CONNECT in some network paths, but the response line can
-		// be delayed/dropped. Continue on the same socket and attempt tunnel registration.
-		DebugLog("[CONN] CONNECT /.tunnel handshake timed out waiting for response (%v); assuming upgrade and continuing on same connection", err)
-		_ = conn.SetDeadline(time.Time{})
-		return conn, nil
-	}
-
-	DebugLog("[CONN] CONNECT /.tunnel handshake failed (%v), falling back to raw TCP tunnel", err)
-	conn.Close()
-
-	return net.DialTimeout("tcp", serverAddress, 30*time.Second)
+	DebugLog("[CONN] CONNECT /.tunnel handshake over TLS succeeded")
+	return upgradedConn, nil
 }
 
 // runTCPTunnelSession connects to APS via TCP tunnel protocol
-func runTCPTunnelSession(ctx context.Context) bool {
-	DebugLog("Connecting to TCP tunnel server at %s", *serverAddr)
-	DebugLog("[CONN] Tunnel transport mode: CONNECT /.tunnel first, fallback to raw TCP")
+type TunnelSessionState struct {
+	mu                sync.RWMutex
+	TunnelName        string
+	EndpointName      string
+	SessionCredential string
+	SessionExpiresAt  int64
+	PortMappings      []PortMappingConfig
+	KDFVersion        string
+	KDFSalt           string
+}
+
+func runTCPTunnelSession(ctx context.Context, connCtx ImmutableConnectionContext) bool {
+	serverAddress := normalizeServerAddressForSession(connCtx.ServerAddress)
+	DebugLog("Connecting to TCP tunnel server at %s", serverAddress)
+	DebugLog("[CONN] Tunnel transport mode: strict TLS + CONNECT /.tunnel (raw TCP disabled)")
 
 	// 如果serverAddr不包含端口，则添加默认端口
-	if !strings.Contains(*serverAddr, ":") {
-		*serverAddr += ":80"
+	if serverAddress == "" {
+		log.Printf("Failed to connect: empty server address")
+		return true
 	}
 
-	conn, err := dialTunnelServer(*serverAddr)
+	regServerHost, regPinHash, err := GetTLSPinRegistrationInfo(serverAddress)
+	if err != nil {
+		log.Printf("Failed to load TLS pin registration info: %v", err)
+		return true
+	}
+
+	cid := strings.TrimSpace(connCtx.ConfigID)
+	if cid == "" {
+		log.Printf("Registration failed: config id (cid) is required for secure transport")
+		return false
+	}
+
+	sessionCredential := strings.TrimSpace(connCtx.SessionCredential)
+	if sessionCredential == "" {
+		log.Printf("Registration failed: empty session credential is not allowed in secure mode")
+		return false
+	}
+
+	conn, err := dialTunnelServer(serverAddress, regServerHost, regPinHash, connCtx)
 	if err != nil {
 		log.Printf("Failed to connect: %v", err)
 		return true
@@ -398,19 +503,29 @@ func runTCPTunnelSession(ctx context.Context) bool {
 		tcpConn.SetKeepAlivePeriod(60 * time.Second)
 	}
 
-	regServerHost, regPinHash, err := GetTLSPinRegistrationInfo(*serverAddr)
-	if err != nil {
-		log.Printf("Failed to load TLS pin registration info: %v", err)
-		return true
-	}
+	regPinHashHex := hex.EncodeToString(regPinHash)
+	regTS := time.Now().UTC().Unix()
+	regProof := computeSecureRegistrationProof(
+		sessionCredential,
+		cid,
+		connCtx.TunnelName,
+		connCtx.EndpointName,
+		regServerHost,
+		regPinHashHex,
+		SecureCipherSuiteSPKITS,
+		regTS,
+	)
 
 	// Send registration using effective config values
 	if err := tc.SendJSON(MsgTypeRegister, RegisterPayload{
-		TunnelName:   GetEffectiveTunnelName(),
-		EndpointName: GetEffectiveEndpointName(),
-		Password:     GetEffectivePassword(),
+		TunnelName:   connCtx.TunnelName,
+		EndpointName: connCtx.EndpointName,
+		ServerName:   strings.TrimSpace(connCtx.ServerName),
+		ConfigID:     cid,
+		Timestamp:    regTS,
+		AuthProof:    regProof,
 		ServerHost:   regServerHost,
-		PinHash:      hex.EncodeToString(regPinHash),
+		PinHash:      regPinHashHex,
 		CipherSuite:  SecureCipherSuiteSPKITS,
 	}); err != nil {
 		log.Printf("Failed to send registration: %v", err)
@@ -450,16 +565,16 @@ func runTCPTunnelSession(ctx context.Context) bool {
 	log.Println("Successfully registered with TCP tunnel server")
 
 	// Initialize session key manager
-	password := *tunnelPassword
-	if runtimeConfig != nil && runtimeConfig.Password != "" {
-		password = runtimeConfig.Password
+	keyManager := NewSessionKeyManager(sessionCredential, connCtx.EndpointName)
+	if err := keyManager.SetKDFParams(connCtx.KDFVersion, connCtx.KDFSalt); err != nil {
+		log.Printf("Failed to initialize KDF parameters: %v", err)
+		return false
 	}
-	keyManager := NewSessionKeyManager(password, GetEffectiveEndpointName())
 	if err := keyManager.DeriveInitialKey(); err != nil {
 		log.Printf("Failed to derive initial key: %v", err)
 		return true
 	}
-	keyManager.EnableSecureTransport(regPinHash)
+	keyManager.EnableSecureTransport(regPinHash, cid)
 
 	// Upgrade to SMUX
 	// Client side acts as SMUX client
@@ -484,6 +599,17 @@ func runTCPTunnelSession(ctx context.Context) bool {
 	// Start accepting incoming streams (for proxy connections)
 	go acceptStreams(session, tc, keyManager)
 
+	sessionState := &TunnelSessionState{
+		TunnelName:        connCtx.TunnelName,
+		EndpointName:      connCtx.EndpointName,
+		SessionCredential: connCtx.SessionCredential,
+		SessionExpiresAt:  connCtx.SessionExpiresAt,
+		PortMappings:      clonePortMappingsForContext(connCtx.PortMappings),
+		KDFVersion:        connCtx.KDFVersion,
+		KDFSalt:           connCtx.KDFSalt,
+	}
+	controlState := NewControlPlaneInboundState()
+
 	// Start message handling loop (on control stream)
 	done := make(chan struct{})
 	go func() {
@@ -500,7 +626,7 @@ func runTCPTunnelSession(ctx context.Context) bool {
 				DebugLog("[CONN] Control read loop exiting, reconnect required")
 				return
 			}
-			go handleTCPMessage(tc, msg, keyManager)
+			go handleTCPMessage(tc, msg, keyManager, sessionState, controlState)
 		}
 	}()
 
@@ -541,7 +667,7 @@ func runTCPTunnelSession(ctx context.Context) bool {
 }
 
 // handleTCPMessage handles incoming messages
-func handleTCPMessage(tc *TunnelConn, msg *TunnelMessage, km *SessionKeyManager) {
+func handleTCPMessage(tc *TunnelConn, msg *TunnelMessage, km *SessionKeyManager, sessionState *TunnelSessionState, controlState *ControlPlaneInboundState) {
 	switch msg.Type {
 	case MsgTypeRequest:
 		handleTCPRequest(tc, msg, km)
@@ -562,10 +688,20 @@ func handleTCPMessage(tc *TunnelConn, msg *TunnelMessage, km *SessionKeyManager)
 	case MsgTypeCancel:
 		// TODO: Handle cancellation
 	case MsgTypeConfigUpdate:
-		handleConfigUpdate(tc, msg)
+		plainPayload, err := UnwrapControlPlanePayload(km, msg.Type, msg.Payload, controlState)
+		if err != nil {
+			log.Printf("[CONTROL] ConfigUpdate rejected: %v", err)
+			return
+		}
+		handleConfigUpdate(tc, &TunnelMessage{Type: msg.Type, Payload: plainPayload}, sessionState)
 
 	case MsgTypeMirrorUpdate:
-		handleMirrorUpdate(tc, msg)
+		plainPayload, err := UnwrapControlPlanePayload(km, msg.Type, msg.Payload, controlState)
+		if err != nil {
+			log.Printf("[CONTROL] MirrorUpdate rejected: %v", err)
+			return
+		}
+		handleMirrorUpdate(tc, &TunnelMessage{Type: msg.Type, Payload: plainPayload})
 
 	// Key rotation messages
 	case MsgTypeKeyRequest:
@@ -855,10 +991,13 @@ func sendTCPErrorResponse(tc *TunnelConn, requestID, errorMsg string) {
 
 // ConfigUpdatePayload is the payload for config update messages from APS
 type ConfigUpdatePayload struct {
-	TunnelName   string              `json:"tunnelName"`
-	EndpointName string              `json:"endpointName"`
-	Password     string              `json:"password,omitempty"`
-	PortMappings []PortMappingConfig `json:"portMappings,omitempty"`
+	TunnelName        string              `json:"tunnelName"`
+	EndpointName      string              `json:"endpointName"`
+	SessionCredential string              `json:"sessionCredential,omitempty"`
+	SessionExpiresAt  int64               `json:"sessionExpiresAt,omitempty"`
+	KDFVersion        string              `json:"kdfVersion,omitempty"`
+	KDFSalt           string              `json:"kdfSalt,omitempty"`
+	PortMappings      []PortMappingConfig `json:"portMappings,omitempty"`
 }
 
 // MirrorUpdatePayload is sent by APS to inform endpoint of mirror addresses
@@ -867,7 +1006,7 @@ type MirrorUpdatePayload struct {
 }
 
 // handleConfigUpdate handles configuration update pushed from APS
-func handleConfigUpdate(tc *TunnelConn, msg *TunnelMessage) {
+func handleConfigUpdate(tc *TunnelConn, msg *TunnelMessage, sessionState *TunnelSessionState) {
 	var payload ConfigUpdatePayload
 	if err := msg.ParseJSON(&payload); err != nil {
 		log.Printf("[CONFIG] Failed to parse config update: %v", err)
@@ -876,13 +1015,17 @@ func handleConfigUpdate(tc *TunnelConn, msg *TunnelMessage) {
 
 	DebugLog("[CONFIG] Received config update from APS")
 
-	// Update runtime config
-	runtimeConfigMu.Lock()
-	if runtimeConfig == nil {
-		runtimeConfig = &EndpointRuntimeConfig{}
+	if sessionState == nil {
+		log.Printf("[CONFIG] Session state is nil; ignoring config update")
+		return
 	}
-	oldTunnel := runtimeConfig.TunnelName
-	oldEndpoint := runtimeConfig.EndpointName
+
+	sessionState.mu.Lock()
+	oldTunnel := sessionState.TunnelName
+	oldEndpoint := sessionState.EndpointName
+	oldSessionCredential := sessionState.SessionCredential
+	oldKDFVersion := sessionState.KDFVersion
+	oldKDFSalt := sessionState.KDFSalt
 
 	// Check for critical changes that require reconnection
 	shouldReconnect := false
@@ -892,26 +1035,43 @@ func handleConfigUpdate(tc *TunnelConn, msg *TunnelMessage) {
 	if payload.EndpointName != "" && payload.EndpointName != oldEndpoint {
 		shouldReconnect = true
 	}
+	if payload.SessionCredential != "" && payload.SessionCredential != oldSessionCredential {
+		shouldReconnect = true
+	}
+	if payload.KDFVersion != "" && payload.KDFVersion != oldKDFVersion {
+		shouldReconnect = true
+	}
+	if payload.KDFSalt != "" && payload.KDFSalt != oldKDFSalt {
+		shouldReconnect = true
+	}
 
 	// Update fields from payload
 	if payload.TunnelName != "" {
-		runtimeConfig.TunnelName = payload.TunnelName
+		sessionState.TunnelName = payload.TunnelName
 	}
 	if payload.EndpointName != "" {
-		runtimeConfig.EndpointName = payload.EndpointName
+		sessionState.EndpointName = payload.EndpointName
 	}
-	if payload.Password != "" {
-		runtimeConfig.Password = payload.Password
+	if payload.SessionCredential != "" {
+		sessionState.SessionCredential = payload.SessionCredential
+	}
+	if payload.SessionExpiresAt > 0 {
+		sessionState.SessionExpiresAt = payload.SessionExpiresAt
+	}
+	if payload.KDFVersion != "" {
+		sessionState.KDFVersion = payload.KDFVersion
+	}
+	if payload.KDFSalt != "" {
+		sessionState.KDFSalt = payload.KDFSalt
 	}
 	if payload.PortMappings != nil {
-		runtimeConfig.PortMappings = payload.PortMappings
+		sessionState.PortMappings = clonePortMappingsForContext(payload.PortMappings)
 	}
 
-	runtimeConfigMu.Unlock()
+	sessionState.mu.Unlock()
 
 	if shouldReconnect {
-		log.Printf("[CONFIG] Critical configuration changed (runtime tunnel=%s endpoint=%s -> update tunnel=%s endpoint=%s), reconnecting...",
-			oldTunnel, oldEndpoint, payload.TunnelName, payload.EndpointName)
+		log.Printf("[CONFIG] Critical configuration changed (tunnel/endpoint/sessionCredential/KDF), reconnecting...")
 		closeTunnelConnWithReason(tc, "config update requires reconnect")
 		return
 	}

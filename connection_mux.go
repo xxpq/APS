@@ -180,6 +180,7 @@ func (m *ConnectionMux) handleConnection(conn net.Conn) {
 		if tunnelHandler != nil {
 			tunnelHandler(routedConn)
 		} else {
+			DebugLog("[MUX] Raw tunnel protocol connection rejected from %s (raw tunnel disabled)", conn.RemoteAddr().String())
 			conn.Close()
 		}
 	} else {

@@ -2,13 +2,16 @@ package main
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
 	"log"
 	"net"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -24,7 +27,11 @@ type TCPTunnelServer struct {
 	endpoints     map[string]*TCPEndpoint // endpointID -> endpoint
 	config        *Config
 	running       bool
+	replayMu      sync.Mutex
+	replaySeen    map[string]int64
 }
+
+const secureRegistrationWindow = 5 * time.Minute
 
 // EndpointStats holds statistics for an endpoint
 type EndpointStats struct {
@@ -49,6 +56,7 @@ type TCPEndpoint struct {
 
 	// Session key manager for dynamic encryption
 	KeyManager *SessionKeyManager
+	ControlOut *ControlPlaneOutboundState
 
 	// Pending requests and proxy connections
 	mu              sync.Mutex
@@ -85,8 +93,9 @@ type tcpProxyConnection struct {
 // NewTCPTunnelServer creates a new TCP tunnel server
 func NewTCPTunnelServer(config *Config) *TCPTunnelServer {
 	return &TCPTunnelServer{
-		config:    config,
-		endpoints: make(map[string]*TCPEndpoint),
+		config:     config,
+		endpoints:  make(map[string]*TCPEndpoint),
+		replaySeen: make(map[string]int64, 1024),
 	}
 }
 
@@ -95,6 +104,83 @@ func (s *TCPTunnelServer) SetTunnelManager(tm *TCPTunnelManager) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.tunnelManager = tm
+}
+
+func deriveRegistrationProofKey(password, cid string, pinHash []byte) []byte {
+	h := sha256.New()
+	h.Write([]byte(password))
+	h.Write([]byte{':'})
+	h.Write([]byte(cid))
+	h.Write([]byte{':'})
+	h.Write(pinHash)
+	return h.Sum(nil)
+}
+
+func computeSecureRegistrationProof(password, cid, tunnelName, endpointName, serverHost, pinHashHex, cipherSuite string, ts int64) string {
+	key := deriveRegistrationProofKey(password, cid, []byte(pinHashHex))
+	message := strings.Join([]string{
+		cid,
+		tunnelName,
+		endpointName,
+		serverHost,
+		pinHashHex,
+		cipherSuite,
+		strconv.FormatInt(ts, 10),
+	}, "|")
+	mac := hmac.New(sha256.New, key)
+	mac.Write([]byte(message))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+func isRegistrationTimestampFresh(ts int64) bool {
+	now := time.Now().UTC().Unix()
+	delta := now - ts
+	if delta < 0 {
+		delta = -delta
+	}
+	return time.Duration(delta)*time.Second <= secureRegistrationWindow
+}
+
+func (s *TCPTunnelServer) registerSecureRegistrationReplayToken(cid string, ts int64, proof string) error {
+	now := time.Now().UTC().Unix()
+	expiry := ts + int64((secureRegistrationWindow + time.Minute).Seconds())
+	token := cid + "|" + strconv.FormatInt(ts, 10) + "|" + proof
+
+	s.replayMu.Lock()
+	defer s.replayMu.Unlock()
+
+	for k, exp := range s.replaySeen {
+		if exp < now {
+			delete(s.replaySeen, k)
+		}
+	}
+	if exp, exists := s.replaySeen[token]; exists && exp >= now {
+		return errors.New("registration replay detected")
+	}
+	s.replaySeen[token] = expiry
+	if len(s.replaySeen) > SecureReplayMaxEntries {
+		toDelete := len(s.replaySeen) - SecureReplayMaxEntries
+		for k := range s.replaySeen {
+			delete(s.replaySeen, k)
+			toDelete--
+			if toDelete <= 0 {
+				break
+			}
+		}
+	}
+	return nil
+}
+
+func isTunnelBoundToServer(tunnelConfig *TunnelConfig, serverName string) bool {
+	if tunnelConfig == nil || strings.TrimSpace(serverName) == "" {
+		return false
+	}
+	for _, bound := range tunnelConfig.Servers {
+		if strings.TrimSpace(bound) == strings.TrimSpace(serverName) {
+			return true
+		}
+	}
+	return false
 }
 
 // Start starts the TCP tunnel server
@@ -166,6 +252,11 @@ func (s *TCPTunnelServer) acceptLoop() {
 
 // handleConnection handles a new endpoint connection
 func (s *TCPTunnelServer) handleConnection(conn net.Conn) {
+	listenerServerName := ""
+	if tagged, ok := conn.(interface{ TunnelServerName() string }); ok {
+		listenerServerName = strings.TrimSpace(tagged.TunnelServerName())
+	}
+
 	// Optimize TCP connection for better throughput
 	if tcpConn, ok := conn.(*net.TCPConn); ok {
 		tcpConn.SetReadBuffer(256 * 1024)  // 256KB
@@ -211,12 +302,13 @@ func (s *TCPTunnelServer) handleConnection(conn net.Conn) {
 		return
 	}
 
-	// Validate tunnel and password
+	// Validate tunnel and endpoint binding
 	s.mu.RLock()
-	tunnelConfig, exists := s.config.Tunnels[reg.TunnelName]
+	tunnelConfig, tunnelExists := s.config.Tunnels[reg.TunnelName]
+	endpointConfig, endpointExists := s.config.Endpoints[reg.ConfigID]
 	s.mu.RUnlock()
 
-	if !exists {
+	if !tunnelExists {
 		DebugLog("[TCP TUNNEL] Tunnel '%s' not found from %s", reg.TunnelName, remoteAddr)
 		tc.SendJSON(MsgTypeRegisterAck, RegisterAckPayload{
 			Success: false,
@@ -225,12 +317,38 @@ func (s *TCPTunnelServer) handleConnection(conn net.Conn) {
 		tc.Close()
 		return
 	}
-
-	if tunnelConfig.Password != "" && tunnelConfig.Password != reg.Password {
-		DebugLog("[TCP TUNNEL] Invalid password for tunnel '%s' from %s", reg.TunnelName, remoteAddr)
+	if strings.TrimSpace(reg.ServerName) == "" {
+		DebugLog("[TCP TUNNEL] Missing server_name in registration from %s", remoteAddr)
 		tc.SendJSON(MsgTypeRegisterAck, RegisterAckPayload{
 			Success: false,
-			Error:   "invalid password",
+			Error:   "missing server_name",
+		})
+		tc.Close()
+		return
+	}
+	if listenerServerName == "" {
+		DebugLog("[TCP TUNNEL] Listener server name unavailable for registration from %s", remoteAddr)
+		tc.SendJSON(MsgTypeRegisterAck, RegisterAckPayload{
+			Success: false,
+			Error:   "listener server context unavailable",
+		})
+		tc.Close()
+		return
+	}
+	if !isTunnelBoundToServer(tunnelConfig, reg.ServerName) {
+		DebugLog("[TCP TUNNEL] tunnel '%s' is not bound to server '%s' for %s", reg.TunnelName, reg.ServerName, remoteAddr)
+		tc.SendJSON(MsgTypeRegisterAck, RegisterAckPayload{
+			Success: false,
+			Error:   "server_name not bound to tunnel",
+		})
+		tc.Close()
+		return
+	}
+	if strings.TrimSpace(reg.ServerName) != listenerServerName {
+		DebugLog("[TCP TUNNEL] server_name mismatch reg='%s' listener='%s' from %s", reg.ServerName, listenerServerName, remoteAddr)
+		tc.SendJSON(MsgTypeRegisterAck, RegisterAckPayload{
+			Success: false,
+			Error:   "server_name mismatch",
 		})
 		tc.Close()
 		return
@@ -246,11 +364,72 @@ func (s *TCPTunnelServer) handleConnection(conn net.Conn) {
 		tc.Close()
 		return
 	}
-	if reg.ServerHost == "" || reg.PinHash == "" {
+	if reg.ServerHost == "" || reg.PinHash == "" || strings.TrimSpace(reg.ConfigID) == "" || strings.TrimSpace(reg.AuthProof) == "" || reg.Timestamp == 0 {
 		DebugLog("[TCP TUNNEL] Missing secure registration fields from %s", remoteAddr)
 		tc.SendJSON(MsgTypeRegisterAck, RegisterAckPayload{
 			Success: false,
 			Error:   "missing secure registration fields",
+		})
+		tc.Close()
+		return
+	}
+	if !isRegistrationTimestampFresh(reg.Timestamp) {
+		DebugLog("[TCP TUNNEL] Registration timestamp out of window from %s", remoteAddr)
+		tc.SendJSON(MsgTypeRegisterAck, RegisterAckPayload{
+			Success: false,
+			Error:   "registration timestamp out of window",
+		})
+		tc.Close()
+		return
+	}
+	if !endpointExists || endpointConfig == nil {
+		DebugLog("[TCP TUNNEL] Config id '%s' not found from %s", reg.ConfigID, remoteAddr)
+		tc.SendJSON(MsgTypeRegisterAck, RegisterAckPayload{
+			Success: false,
+			Error:   "config id not found",
+		})
+		tc.Close()
+		return
+	}
+	if endpointConfig.TunnelName != reg.TunnelName || endpointConfig.EndpointName != reg.EndpointName {
+		DebugLog("[TCP TUNNEL] CID binding mismatch for cid '%s' from %s", reg.ConfigID, remoteAddr)
+		tc.SendJSON(MsgTypeRegisterAck, RegisterAckPayload{
+			Success: false,
+			Error:   "cid binding mismatch",
+		})
+		tc.Close()
+		return
+	}
+	if !endpointConfig.AllowMultiNode {
+		s.mu.RLock()
+		alreadyOnline := false
+		for _, online := range s.endpoints {
+			if online == nil || !online.IsOnline() {
+				continue
+			}
+			if online.TunnelName == reg.TunnelName && online.EndpointName == reg.EndpointName {
+				alreadyOnline = true
+				break
+			}
+		}
+		s.mu.RUnlock()
+		if alreadyOnline {
+			DebugLog("[TCP TUNNEL] multi-node denied for tunnel='%s' endpoint='%s' from %s", reg.TunnelName, reg.EndpointName, remoteAddr)
+			tc.SendJSON(MsgTypeRegisterAck, RegisterAckPayload{
+				Success: false,
+				Error:   "multiple online nodes are not allowed",
+			})
+			tc.Close()
+			return
+		}
+	}
+
+	effectiveCredential, credErr := peekEndpointSessionCredential(reg.ConfigID, reg.TunnelName, reg.EndpointName)
+	if credErr != nil {
+		DebugLog("[TCP TUNNEL] Missing/invalid session credential for cid '%s' from %s: %v", reg.ConfigID, remoteAddr, credErr)
+		tc.SendJSON(MsgTypeRegisterAck, RegisterAckPayload{
+			Success: false,
+			Error:   "session credential missing or expired",
 		})
 		tc.Close()
 		return
@@ -271,6 +450,54 @@ func (s *TCPTunnelServer) handleConnection(conn net.Conn) {
 		tc.SendJSON(MsgTypeRegisterAck, RegisterAckPayload{
 			Success: false,
 			Error:   "tls pin hash mismatch",
+		})
+		tc.Close()
+		return
+	}
+	expectedProofHex := computeSecureRegistrationProof(
+		effectiveCredential,
+		reg.ConfigID,
+		reg.TunnelName,
+		reg.EndpointName,
+		reg.ServerHost,
+		expectedHashHex,
+		reg.CipherSuite,
+		reg.Timestamp,
+	)
+	providedProof, err := hex.DecodeString(strings.TrimSpace(reg.AuthProof))
+	if err != nil {
+		DebugLog("[TCP TUNNEL] Invalid auth proof encoding from %s", remoteAddr)
+		tc.SendJSON(MsgTypeRegisterAck, RegisterAckPayload{
+			Success: false,
+			Error:   "invalid auth proof encoding",
+		})
+		tc.Close()
+		return
+	}
+	expectedProof, _ := hex.DecodeString(expectedProofHex)
+	if !hmac.Equal(providedProof, expectedProof) {
+		DebugLog("[TCP TUNNEL] Auth proof mismatch for cid '%s' from %s", reg.ConfigID, remoteAddr)
+		tc.SendJSON(MsgTypeRegisterAck, RegisterAckPayload{
+			Success: false,
+			Error:   "auth proof mismatch",
+		})
+		tc.Close()
+		return
+	}
+	if err := s.registerSecureRegistrationReplayToken(reg.ConfigID, reg.Timestamp, strings.TrimSpace(reg.AuthProof)); err != nil {
+		DebugLog("[TCP TUNNEL] Replay rejected for cid '%s' from %s: %v", reg.ConfigID, remoteAddr, err)
+		tc.SendJSON(MsgTypeRegisterAck, RegisterAckPayload{
+			Success: false,
+			Error:   "registration replay detected",
+		})
+		tc.Close()
+		return
+	}
+	if err := consumeEndpointSessionCredential(reg.ConfigID, reg.TunnelName, reg.EndpointName, effectiveCredential); err != nil {
+		DebugLog("[TCP TUNNEL] Session credential consume failed for cid '%s' from %s: %v", reg.ConfigID, remoteAddr, err)
+		tc.SendJSON(MsgTypeRegisterAck, RegisterAckPayload{
+			Success: false,
+			Error:   "session credential already used or invalid",
 		})
 		tc.Close()
 		return
@@ -297,13 +524,19 @@ func (s *TCPTunnelServer) handleConnection(conn net.Conn) {
 	}
 
 	// Initialize per-connection session key manager
-	endpoint.KeyManager = NewSessionKeyManager(reg.Password, reg.EndpointName)
+	endpoint.KeyManager = NewSessionKeyManager(effectiveCredential, reg.EndpointName)
+	if err := endpoint.KeyManager.SetKDFParams(tunnelConfig.KDFVersion, tunnelConfig.KDFSalt); err != nil {
+		DebugLog("[TCP TUNNEL] Failed to set KDF parameters for %s: %v", remoteAddr, err)
+		tc.Close()
+		return
+	}
 	if err := endpoint.KeyManager.DeriveInitialKey(); err != nil {
 		DebugLog("[TCP TUNNEL] Failed to derive initial key for %s: %v", remoteAddr, err)
 		tc.Close()
 		return
 	}
-	endpoint.KeyManager.EnableSecureTransport(securePinHash)
+	endpoint.KeyManager.EnableSecureTransport(securePinHash, reg.ConfigID)
+	endpoint.ControlOut = NewControlPlaneOutboundState()
 
 	// Register endpoint
 	s.mu.Lock()
@@ -1231,7 +1464,26 @@ func sendMirrorUpdate(s *TCPTunnelServer, ep *TCPEndpoint) {
 		Mirrors: mirrorList,
 	}
 
-	if err := ep.Conn.SendJSON(MsgTypeMirrorUpdate, payload); err != nil {
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		DebugLog("[MIRROR] Failed to marshal mirror payload for %s: %v", ep.EndpointName, err)
+		return
+	}
+
+	s.mu.RLock()
+	configVersion := int64(0)
+	if s.config != nil {
+		configVersion = s.config.Version
+	}
+	s.mu.RUnlock()
+
+	protectedPayload, err := WrapControlPlanePayload(ep.KeyManager, MsgTypeMirrorUpdate, payloadBytes, configVersion, ep.ControlOut)
+	if err != nil {
+		DebugLog("[MIRROR] Failed to protect mirror update for %s: %v", ep.EndpointName, err)
+		return
+	}
+
+	if err := ep.Conn.WriteMessage(&TunnelMessage{Type: MsgTypeMirrorUpdate, Payload: protectedPayload}); err != nil {
 		DebugLog("[MIRROR] Failed to send mirror update to %s: %v", ep.EndpointName, err)
 		return
 	}

@@ -61,6 +61,7 @@ type EndpointConfig_APS struct {
 	TunnelName        string                `json:"tunnelName"`
 	EndpointName      string                `json:"endpointName"`
 	Password          string                `json:"password,omitempty"`
+	AllowMultiNode    bool                  `json:"allowMultiNode,omitempty"`
 	Mirror            string                `json:"mirror,omitempty"` // Reference to mirrors group
 	PortMappings      []EndpointPortMapping `json:"portMappings,omitempty"`
 	LogLevel          *int                  `json:"logLevel,omitempty"`
@@ -191,6 +192,8 @@ func (pc *ProxyConfig) UnmarshalJSON(data []byte) error {
 type TunnelConfig struct {
 	Servers           []string  `json:"servers"`
 	Password          string    `json:"password,omitempty"` // AES key for encryption
+	KDFVersion        string    `json:"kdfVersion,omitempty"`
+	KDFSalt           string    `json:"kdfSalt,omitempty"`
 	Auth              *RuleAuth `json:"auth,omitempty"`
 	LogLevel          *int      `json:"logLevel,omitempty"`          // 日志等级: 0=不记录, 1=基本请求, 2=完整请求
 	LogRetentionHours *int      `json:"logRetentionHours,omitempty"` // 日志保留时长(小时)
@@ -513,6 +516,8 @@ type ListenConfig struct {
 	Tunnels           interface{} `json:"tunnels,omitempty"`           // string or []string
 	Public            *bool       `json:"public,omitempty"`            // true: 0.0.0.0:port, false: 127.0.0.1:port (default true)
 	Panel             *bool       `json:"panel,omitempty"`             // true: register /.api & /.admin, false: do not (default false)
+	TunnelMTLS        *bool       `json:"tunnelMTLS,omitempty"`        // Require verified client certificate for /.tunnel
+	TunnelMTLSCA      string      `json:"tunnelMTLSCA,omitempty"`      // PEM CA bundle for tunnel mTLS client cert verification
 	Firewall          string      `json:"firewall,omitempty"`          // 引用 firewalls 的 key
 	RateLimitRules    []string    `json:"rateLimitRules,omitempty"`    // 绑定的流控规则名
 	ConnectionPolicies
@@ -908,6 +913,10 @@ func processConfig(config *Config) error {
 				log.Printf("[FIREWALL] Loaded firewall rule '%s'", name)
 			}
 		}
+	}
+
+	if err := ensureTunnelKDFSettings(config); err != nil {
+		return err
 	}
 
 	return nil

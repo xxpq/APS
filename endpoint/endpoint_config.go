@@ -13,11 +13,15 @@ import (
 
 // EndpointRuntimeConfig holds the configuration fetched from APS
 type EndpointRuntimeConfig struct {
-	ID           string              `json:"id"`
-	TunnelName   string              `json:"tunnelName"`
-	EndpointName string              `json:"endpointName"`
-	Password     string              `json:"password,omitempty"`
-	PortMappings []PortMappingConfig `json:"portMappings,omitempty"`
+	ID                string              `json:"id"`
+	ServerName        string              `json:"serverName,omitempty"`
+	TunnelName        string              `json:"tunnelName"`
+	EndpointName      string              `json:"endpointName"`
+	SessionCredential string              `json:"sessionCredential,omitempty"`
+	SessionExpiresAt  int64               `json:"sessionExpiresAt,omitempty"`
+	KDFVersion        string              `json:"kdfVersion,omitempty"`
+	KDFSalt           string              `json:"kdfSalt,omitempty"`
+	PortMappings      []PortMappingConfig `json:"portMappings,omitempty"`
 }
 
 // PortMappingConfig defines a port mapping from local to remote endpoint
@@ -124,15 +128,26 @@ func (c *EndpointRuntimeConfig) ValidateConfig() error {
 	if c.EndpointName == "" {
 		return fmt.Errorf("endpoint name is required")
 	}
+	if strings.TrimSpace(c.SessionCredential) == "" {
+		return fmt.Errorf("sessionCredential is required")
+	}
+	normalizedVersion, err := normalizeEndpointKDFVersion(c.KDFVersion)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(c.KDFSalt) == "" {
+		return fmt.Errorf("kdfSalt is required")
+	}
+	c.KDFVersion = normalizedVersion
+	c.KDFSalt = strings.TrimSpace(c.KDFSalt)
 	return nil
 }
 
-// initializeConfiguration sets up the endpoint configuration based on provided flags
-// Supports both new -cid mode and legacy -tunnel mode
+// initializeConfiguration sets up the endpoint configuration.
+// Secure mode requires -cid and disallows legacy plaintext registration flags.
 func initializeConfiguration() error {
-	// Check for new configuration mode: -cid with -server or -listen
+	// Secure mode: fetch runtime config by CID from APS.
 	if *configID != "" {
-		// New mode: fetch config from APS
 		if *serverAddr == "" {
 			return fmt.Errorf("when using -cid, you must specify -server <addr:port>")
 		}
@@ -165,20 +180,7 @@ func initializeConfiguration() error {
 
 	}
 
-	// Legacy mode: use -tunnel, -name, -password flags (deprecated)
-	if *tunnelName != "" {
-		printDeprecationWarning()
-		// Create runtime config from legacy flags
-		runtimeConfig = &EndpointRuntimeConfig{
-			TunnelName:   *tunnelName,
-			EndpointName: *name,
-			Password:     *tunnelPassword,
-		}
-		usingLegacyMode = true
-		return nil
-	}
-
-	return fmt.Errorf("configuration required: use -cid <config-id> -server <addr:port> OR -tunnel <name> (deprecated)")
+	return fmt.Errorf("secure mode requires -cid <config-id> and -server <addr:port>; legacy -tunnel/-password is disabled")
 }
 
 // printDeprecationWarning displays a warning about using deprecated flags
@@ -215,10 +217,18 @@ func GetEffectiveEndpointName() string {
 	return *name
 }
 
-// GetEffectivePassword returns the password from runtime config or legacy flag
+// GetEffectivePassword returns the session credential from runtime config (or legacy fallback flag).
 func GetEffectivePassword() string {
 	if runtimeConfig != nil {
-		return runtimeConfig.Password
+		return runtimeConfig.SessionCredential
 	}
 	return *tunnelPassword
+}
+
+// GetEffectiveConfigID returns the active CID for secure registration.
+func GetEffectiveConfigID() string {
+	if runtimeConfig != nil && strings.TrimSpace(runtimeConfig.ID) != "" {
+		return strings.TrimSpace(runtimeConfig.ID)
+	}
+	return strings.TrimSpace(*configID)
 }

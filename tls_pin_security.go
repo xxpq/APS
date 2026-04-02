@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/tls"
@@ -17,6 +18,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -31,6 +33,9 @@ const (
 	TLSEncryptedSaltParam = "salt"
 
 	tlsPinSaltLayout = "200601021504"
+
+	endpointConfigTokenWindow    = 3 * time.Minute
+	endpointConfigReplayMaxEntry = 20000
 )
 
 var (
@@ -42,6 +47,13 @@ var (
 	}{
 		byHost: make(map[string][]byte),
 	}
+
+	endpointConfigReplay = struct {
+		mu   sync.Mutex
+		seen map[string]int64
+	}{
+		seen: make(map[string]int64, 1024),
+	}
 )
 
 // EncryptedPayloadEnvelope wraps encrypted JSON payloads exchanged between endpoint and APS.
@@ -50,6 +62,13 @@ type EncryptedPayloadEnvelope struct {
 	Alg       string `json:"alg"`
 	Salt      string `json:"salt"`
 	Payload   string `json:"payload"`
+}
+
+type encryptedEndpointConfigRequest struct {
+	ConfigID  string `json:"cid"`
+	Nonce     string `json:"nonce"`
+	Timestamp int64  `json:"ts"`
+	Token     string `json:"token"`
 }
 
 func normalizeTLSPinHost(host string) string {
@@ -266,6 +285,73 @@ func isTLSPinSaltAllowed(salt string) bool {
 	return false
 }
 
+func deriveEndpointConfigTokenKey(pinKey []byte, salt string) []byte {
+	h := sha256.New()
+	h.Write(pinKey)
+	h.Write([]byte{':'})
+	h.Write([]byte(salt))
+	h.Write([]byte(":eid-token-v1"))
+	return h.Sum(nil)
+}
+
+func computeEndpointConfigToken(pinKey []byte, cid, nonce string, ts int64, salt string) string {
+	key := deriveEndpointConfigTokenKey(pinKey, salt)
+	msg := strings.Join([]string{
+		strings.TrimSpace(cid),
+		strings.TrimSpace(nonce),
+		strconv.FormatInt(ts, 10),
+		strings.TrimSpace(salt),
+	}, "|")
+	mac := hmac.New(sha256.New, key)
+	mac.Write([]byte(msg))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+func isEndpointConfigTokenFresh(ts int64) bool {
+	now := time.Now().UTC().Unix()
+	delta := now - ts
+	if delta < 0 {
+		delta = -delta
+	}
+	return time.Duration(delta)*time.Second <= endpointConfigTokenWindow
+}
+
+func registerEndpointConfigReplayToken(cid, nonce, token string, ts int64) error {
+	now := time.Now().UTC().Unix()
+	expiry := ts + int64((endpointConfigTokenWindow + time.Minute).Seconds())
+	replayToken := strings.Join([]string{
+		strings.TrimSpace(cid),
+		strings.TrimSpace(nonce),
+		strings.TrimSpace(token),
+	}, "|")
+
+	endpointConfigReplay.mu.Lock()
+	defer endpointConfigReplay.mu.Unlock()
+
+	for k, exp := range endpointConfigReplay.seen {
+		if exp < now {
+			delete(endpointConfigReplay.seen, k)
+		}
+	}
+
+	if exp, exists := endpointConfigReplay.seen[replayToken]; exists && exp >= now {
+		return errors.New("endpoint config request replay detected")
+	}
+	endpointConfigReplay.seen[replayToken] = expiry
+
+	if len(endpointConfigReplay.seen) > endpointConfigReplayMaxEntry {
+		toDelete := len(endpointConfigReplay.seen) - endpointConfigReplayMaxEntry
+		for k := range endpointConfigReplay.seen {
+			delete(endpointConfigReplay.seen, k)
+			toDelete--
+			if toDelete <= 0 {
+				break
+			}
+		}
+	}
+	return nil
+}
+
 func decryptEndpointConfigIDFromRequest(r *http.Request, encryptedID, salt string) (string, string, []byte, error) {
 	pinKey, _, err := getTLSPinHashForRequest(r)
 	if err != nil {
@@ -282,11 +368,34 @@ func decryptEndpointConfigIDFromRequest(r *http.Request, encryptedID, salt strin
 	if err != nil {
 		return "", "", nil, fmt.Errorf("failed to decrypt config id: %w", err)
 	}
-	configID := strings.TrimSpace(string(plaintext))
-	if configID == "" {
-		return "", "", nil, errors.New("empty decrypted config id")
+
+	var request encryptedEndpointConfigRequest
+	if err := json.Unmarshal(plaintext, &request); err != nil {
+		return "", "", nil, errors.New("invalid encrypted eid payload")
 	}
-	return configID, salt, pinKey, nil
+	request.ConfigID = strings.TrimSpace(request.ConfigID)
+	request.Nonce = strings.TrimSpace(request.Nonce)
+	request.Token = strings.TrimSpace(request.Token)
+	if request.ConfigID == "" || request.Nonce == "" || request.Token == "" || request.Timestamp == 0 {
+		return "", "", nil, errors.New("incomplete encrypted eid payload")
+	}
+	if !isEndpointConfigTokenFresh(request.Timestamp) {
+		return "", "", nil, errors.New("eid token expired")
+	}
+
+	expectedToken := computeEndpointConfigToken(pinKey, request.ConfigID, request.Nonce, request.Timestamp, salt)
+	providedToken, err := hex.DecodeString(request.Token)
+	if err != nil {
+		return "", "", nil, errors.New("invalid eid token encoding")
+	}
+	expectedTokenBytes, _ := hex.DecodeString(expectedToken)
+	if !hmac.Equal(providedToken, expectedTokenBytes) {
+		return "", "", nil, errors.New("invalid eid token")
+	}
+	if err := registerEndpointConfigReplayToken(request.ConfigID, request.Nonce, request.Token, request.Timestamp); err != nil {
+		return "", "", nil, err
+	}
+	return request.ConfigID, salt, pinKey, nil
 }
 
 func writeEncryptedJSONWithTLSPin(w http.ResponseWriter, pinKey []byte, salt string, payload interface{}) error {

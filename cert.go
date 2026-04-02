@@ -11,8 +11,10 @@ import (
 	"log"
 	"math/big"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -29,6 +31,12 @@ var (
 
 	acmeDomainsMutex sync.RWMutex
 	acmeDomains      []string
+	acmeDomainSet    = make(map[string]struct{})
+
+	// Fast-reject domain index shared with mapping.go.
+	mappingDomainSet      = make(map[string]struct{})
+	mappingHasDynamicHost bool
+	mappingDomainConfig   *Config
 )
 
 const (
@@ -239,42 +247,11 @@ func fileExists(path string) bool {
 
 // InitACME initializes or refreshes the ACME certificate manager.
 func InitACME(config *Config) {
-	// 从配置中收集所有需要ACME证书的域名
-	var newDomains []string
-	for _, mapping := range config.Mappings {
-		// 检查与此mapping关联的server是否配置了acme
-		isACME := false
-		for _, serverName := range mapping.serverNames {
-			if server, ok := config.Servers[serverName]; ok {
-				if certStr, ok := server.Cert.(string); ok && certStr == "acme" {
-					isACME = true
-					break
-				}
-			}
-		}
+	refreshDomainIndexes(config)
 
-		if isACME {
-			fromConfig := mapping.GetFromConfig()
-			if fromConfig != nil && len(fromConfig.URLs) > 0 {
-				for _, u := range fromConfig.URLs {
-					domain := extractDomain(u)
-					if domain != "" && !containsString(newDomains, domain) {
-						newDomains = append(newDomains, domain)
-					}
-				}
-			} else {
-				domain := extractDomain(mapping.GetFromURL())
-				if domain != "" && !containsString(newDomains, domain) {
-					newDomains = append(newDomains, domain)
-				}
-			}
-		}
-	}
-
-	// 更新全局域名列表
-	acmeDomainsMutex.Lock()
-	acmeDomains = newDomains
-	acmeDomainsMutex.Unlock()
+	acmeDomainsMutex.RLock()
+	newDomains := append([]string(nil), acmeDomains...)
+	acmeDomainsMutex.RUnlock()
 
 	if len(newDomains) == 0 {
 		log.Println("[ACME] No domains configured for ACME, skipping initialization.")
@@ -283,12 +260,10 @@ func InitACME(config *Config) {
 
 	log.Printf("[ACME] Initializing/Refreshing for %d domains: %v", len(newDomains), newDomains)
 
-	// 如果 acmeManager 已经初始化，只需更新域名列表即可（由 dynamicHostPolicy 处理）
 	if acmeManager != nil {
 		return
 	}
 
-	// 确保ACME缓存目录存在
 	if err := os.MkdirAll(acmeDir, 0755); err != nil {
 		log.Fatalf("[ACME] Failed to create cache directory: %v", err)
 	}
@@ -300,12 +275,156 @@ func InitACME(config *Config) {
 	}
 }
 
+// refreshDomainIndexes rebuilds ACME whitelist and request-mapping fast-reject domains in one pass.
+func refreshDomainIndexes(config *Config) {
+	newACMEDomains := make([]string, 0)
+	newACMEDomainSet := make(map[string]struct{})
+	newMappingDomainSet := make(map[string]struct{})
+	hasDynamicMappingHost := false
+
+	if config != nil {
+		for i := range config.Mappings {
+			mapping := &config.Mappings[i]
+			isACME := mappingUsesACMEServer(config, mapping)
+
+			for _, rawFromURL := range mappingFromURLs(mapping) {
+				if isACME {
+					domain := strings.ToLower(extractDomain(rawFromURL))
+					if domain != "" {
+						if _, exists := newACMEDomainSet[domain]; !exists {
+							newACMEDomainSet[domain] = struct{}{}
+							newACMEDomains = append(newACMEDomains, domain)
+						}
+					}
+				}
+
+				host, schemeRelevant, dynamicHost := extractExactRuleHost(rawFromURL)
+				if !schemeRelevant {
+					continue
+				}
+				if dynamicHost {
+					hasDynamicMappingHost = true
+					continue
+				}
+				if host != "" {
+					newMappingDomainSet[host] = struct{}{}
+				}
+			}
+		}
+	}
+
+	acmeDomainsMutex.Lock()
+	acmeDomains = newACMEDomains
+	acmeDomainSet = newACMEDomainSet
+	mappingDomainSet = newMappingDomainSet
+	mappingHasDynamicHost = hasDynamicMappingHost
+	mappingDomainConfig = config
+	acmeDomainsMutex.Unlock()
+}
+
+func mappingUsesACMEServer(config *Config, mapping *Mapping) bool {
+	for _, serverName := range mapping.serverNames {
+		if server, ok := config.Servers[serverName]; ok {
+			if certStr, ok := server.Cert.(string); ok && certStr == "acme" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func mappingFromURLs(mapping *Mapping) []string {
+	fromConfig := mapping.GetFromConfig()
+	if fromConfig != nil && len(fromConfig.URLs) > 0 {
+		return fromConfig.URLs
+	}
+	if fromURL := mapping.GetFromURL(); fromURL != "" {
+		return []string{fromURL}
+	}
+	return nil
+}
+
+func extractExactRuleHost(rawURL string) (host string, schemeRelevant bool, dynamicHost bool) {
+	rawURL = strings.TrimSpace(rawURL)
+	if rawURL == "" {
+		return "", false, false
+	}
+
+	parsedURL, err := url.Parse(rawURL)
+	if err == nil {
+		scheme := strings.ToLower(parsedURL.Scheme)
+		if !isDomainIndexedScheme(scheme) {
+			return "", false, false
+		}
+
+		host = strings.ToLower(parsedURL.Hostname())
+		if host == "" {
+			if containsURLScheme(rawURL) {
+				return "", true, true
+			}
+			return "", true, false
+		}
+
+		if strings.IndexAny(host, `[](){}^$|\+?*`) != -1 {
+			return "", true, true
+		}
+
+		return host, true, false
+	}
+
+	if containsURLScheme(rawURL) {
+		return "", true, true
+	}
+
+	return "", false, false
+}
+
+func isDomainIndexedScheme(scheme string) bool {
+	switch strings.ToLower(scheme) {
+	case "http", "https", "ws", "wss", "*":
+		return true
+	default:
+		return false
+	}
+}
+
+func containsURLScheme(rawURL string) bool {
+	lower := strings.ToLower(rawURL)
+	return strings.Contains(lower, "http://") ||
+		strings.Contains(lower, "https://") ||
+		strings.Contains(lower, "ws://") ||
+		strings.Contains(lower, "wss://") ||
+		strings.Contains(lower, "*://")
+}
+
+func shouldFastRejectByDomain(config *Config, host string) bool {
+	if config == nil || host == "" {
+		return false
+	}
+
+	host = strings.ToLower(host)
+
+	acmeDomainsMutex.RLock()
+	defer acmeDomainsMutex.RUnlock()
+
+	if mappingDomainConfig != config {
+		return false
+	}
+
+	if mappingHasDynamicHost {
+		return false
+	}
+
+	_, exists := mappingDomainSet[host]
+	return !exists
+}
+
 // dynamicHostPolicy is a thread-safe host policy that checks against the current ACME domains.
 func dynamicHostPolicy(ctx context.Context, host string) error {
 	acmeDomainsMutex.RLock()
 	defer acmeDomainsMutex.RUnlock()
 
-	if containsString(acmeDomains, host) {
+	if _, ok := acmeDomainSet[strings.ToLower(host)]; ok {
 		return nil
 	}
 	return os.ErrPermission

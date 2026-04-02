@@ -13,9 +13,11 @@ import (
 	"io"
 	"log"
 	"math/big"
+	"strings"
 	"sync"
 	"time"
 
+	"golang.org/x/crypto/argon2"
 	"golang.org/x/crypto/pbkdf2"
 )
 
@@ -30,9 +32,16 @@ const (
 	SecureReplayWindow     = 5 * time.Minute  // Timestamp/replay window
 	SecureReplayMaxEntries = 20000            // Anti-replay cache cap
 
-	secureSaltLayout = "200601021504"
-	KeyDeriveRounds  = 4096
-	KeyDeriveSalt    = "aps:transport-key:v2"
+	secureSaltLayout     = "200601021504"
+	KDFVersionArgon2idV1 = "argon2id-v1"
+	KDFVersionPBKDF2V3   = "pbkdf2-sha256-v3"
+	DefaultKDFVersion    = KDFVersionArgon2idV1
+
+	kdfArgon2Time       = uint32(3)
+	kdfArgon2MemoryKB   = uint32(64 * 1024)
+	kdfArgon2Threads    = uint8(4)
+	kdfPBKDF2Rounds     = 600000
+	legacyKeyDeriveSalt = "aps:transport-key:v2"
 )
 
 // SessionKeyManager manages encryption keys with automatic rotation
@@ -50,6 +59,9 @@ type SessionKeyManager struct {
 	endpointName    string       // Name of the endpoint for logging purposes
 	secureEnabled   bool         // Whether secure transport mode is enabled
 	tlsPinHash      []byte       // SPKI hash used for key derivation hardening
+	transportCID    string       // Endpoint config ID bound to transport key derivation
+	kdfVersion      string       // KDF version (argon2id-v1 or pbkdf2-sha256-v3)
+	kdfSalt         string       // KDF salt from tunnel config
 	replaySeen      map[string]int64
 	replayOpCount   uint64
 	mu              sync.RWMutex
@@ -79,7 +91,39 @@ func NewSessionKeyManager(masterPassword string, endpointName string) *SessionKe
 	return &SessionKeyManager{
 		masterPassword: masterPassword,
 		endpointName:   endpointName,
+		kdfVersion:     DefaultKDFVersion,
 	}
+}
+
+func normalizeEndpointKDFVersion(version string) (string, error) {
+	version = strings.ToLower(strings.TrimSpace(version))
+	if version == "" {
+		return DefaultKDFVersion, nil
+	}
+	switch version {
+	case KDFVersionArgon2idV1, KDFVersionPBKDF2V3:
+		return version, nil
+	default:
+		return "", fmt.Errorf("unsupported kdfVersion: %s", version)
+	}
+}
+
+func (skm *SessionKeyManager) SetKDFParams(version, salt string) error {
+	normalizedVersion, err := normalizeEndpointKDFVersion(version)
+	if err != nil {
+		return err
+	}
+
+	salt = strings.TrimSpace(salt)
+	if salt == "" {
+		return errors.New("kdfSalt is required")
+	}
+
+	skm.mu.Lock()
+	skm.kdfVersion = normalizedVersion
+	skm.kdfSalt = salt
+	skm.mu.Unlock()
+	return nil
 }
 
 // DeriveInitialKey derives the initial session key from master password
@@ -87,35 +131,62 @@ func (skm *SessionKeyManager) DeriveInitialKey() error {
 	skm.mu.Lock()
 	defer skm.mu.Unlock()
 
-	// Derive key from master password using PBKDF2-HMAC-SHA256 (fixed iterations).
-	derivedKey := pbkdf2.Key([]byte(skm.masterPassword), []byte(KeyDeriveSalt), KeyDeriveRounds, KeySize, sha256.New)
+	kdfVersion := strings.TrimSpace(skm.kdfVersion)
+	if kdfVersion == "" {
+		kdfVersion = DefaultKDFVersion
+	}
+	kdfSalt := strings.TrimSpace(skm.kdfSalt)
+	if kdfSalt == "" {
+		return errors.New("kdfSalt is required before deriving initial key")
+	}
+
+	var derivedKey []byte
+	switch kdfVersion {
+	case KDFVersionArgon2idV1:
+		derivedKey = argon2.IDKey(
+			[]byte(skm.masterPassword),
+			[]byte(kdfSalt),
+			kdfArgon2Time,
+			kdfArgon2MemoryKB,
+			kdfArgon2Threads,
+			KeySize,
+		)
+	case KDFVersionPBKDF2V3:
+		derivedKey = pbkdf2.Key([]byte(skm.masterPassword), []byte(kdfSalt), kdfPBKDF2Rounds, KeySize, sha256.New)
+	default:
+		derivedKey = pbkdf2.Key([]byte(skm.masterPassword), []byte(legacyKeyDeriveSalt), kdfPBKDF2Rounds, KeySize, sha256.New)
+	}
+
 	skm.currentKey = derivedKey
 	skm.keyCreatedAt = time.Now()
 
-	DebugLog("[KEY] [%s] Initial session key derived (PBKDF2-%d)", skm.endpointName, KeyDeriveRounds)
+	DebugLog("[KEY] [%s] Initial session key derived (%s)", skm.endpointName, kdfVersion)
 	return nil
 }
 
-// EnableSecureTransport enables secure transport hardening with SPKI hash + ts salt.
-func (skm *SessionKeyManager) EnableSecureTransport(pinHash []byte) {
+// EnableSecureTransport enables secure transport hardening with SPKI hash + CID + ts salt.
+func (skm *SessionKeyManager) EnableSecureTransport(pinHash []byte, cid string) {
 	skm.mu.Lock()
 	defer skm.mu.Unlock()
+	cid = strings.TrimSpace(cid)
 
-	if len(pinHash) == 0 {
+	if len(pinHash) == 0 || cid == "" {
 		skm.secureEnabled = false
 		skm.tlsPinHash = nil
+		skm.transportCID = ""
 		skm.replaySeen = nil
 		skm.replayOpCount = 0
-		DebugLog("[SECURE] [%s] Secure transport disabled (empty pin hash)", skm.endpointName)
+		DebugLog("[SECURE] [%s] Secure transport disabled (pin hash or cid missing)", skm.endpointName)
 		return
 	}
 
 	skm.secureEnabled = true
 	skm.tlsPinHash = append([]byte(nil), pinHash...)
+	skm.transportCID = cid
 	if skm.replaySeen == nil {
 		skm.replaySeen = make(map[string]int64, 1024)
 	}
-	DebugLog("[SECURE] [%s] Secure transport enabled (SPKI hash %s)", skm.endpointName, hex.EncodeToString(pinHash))
+	DebugLog("[SECURE] [%s] Secure transport enabled (SPKI hash %s, cid %s)", skm.endpointName, hex.EncodeToString(pinHash), cid)
 }
 
 // StartAutoRotation starts the automatic key rotation timer
@@ -304,6 +375,7 @@ func (skm *SessionKeyManager) Encrypt(plaintext []byte) ([]byte, error) {
 	key := skm.currentKey
 	secureEnabled := skm.secureEnabled
 	pinHash := append([]byte(nil), skm.tlsPinHash...)
+	transportCID := skm.transportCID
 	skm.mu.RUnlock()
 
 	if key == nil {
@@ -311,7 +383,7 @@ func (skm *SessionKeyManager) Encrypt(plaintext []byte) ([]byte, error) {
 	}
 
 	if secureEnabled {
-		return skm.encryptSecureMessage(key, pinHash, plaintext)
+		return skm.encryptSecureMessage(key, pinHash, transportCID, plaintext)
 	}
 
 	return skm.encryptWithKey(key, plaintext)
@@ -325,13 +397,14 @@ func (skm *SessionKeyManager) Decrypt(ciphertext []byte) ([]byte, error) {
 	gracePeriodEnds := skm.gracePeriodEnds
 	secureEnabled := skm.secureEnabled
 	pinHash := append([]byte(nil), skm.tlsPinHash...)
+	transportCID := skm.transportCID
 	skm.mu.RUnlock()
 
 	if secureEnabled {
 		if len(ciphertext) < 1+8 || ciphertext[0] != SecureEnvelopeVersion {
 			return nil, errors.New("secure transport requires protected envelope")
 		}
-		return skm.decryptSecureMessage(currentKey, previousKey, gracePeriodEnds, pinHash, ciphertext)
+		return skm.decryptSecureMessage(currentKey, previousKey, gracePeriodEnds, pinHash, transportCID, ciphertext)
 	}
 
 	// Try current key first
@@ -354,13 +427,16 @@ func (skm *SessionKeyManager) Decrypt(ciphertext []byte) ([]byte, error) {
 	return nil, errors.New("failed to decrypt with any available key")
 }
 
-func (skm *SessionKeyManager) encryptSecureMessage(key, pinHash, plaintext []byte) ([]byte, error) {
+func (skm *SessionKeyManager) encryptSecureMessage(key, pinHash []byte, cid string, plaintext []byte) ([]byte, error) {
 	if len(pinHash) == 0 {
 		return nil, errors.New("secure transport pin hash missing")
 	}
+	if strings.TrimSpace(cid) == "" {
+		return nil, errors.New("secure transport cid missing")
+	}
 
 	ts := time.Now().UTC().Unix()
-	derivedKey := deriveSecureMessageKey(key, pinHash, ts)
+	derivedKey := deriveSecureMessageKey(key, pinHash, cid, ts)
 	innerCiphertext, err := skm.encryptWithKey(derivedKey, plaintext)
 	if err != nil {
 		return nil, err
@@ -373,9 +449,12 @@ func (skm *SessionKeyManager) encryptSecureMessage(key, pinHash, plaintext []byt
 	return envelope, nil
 }
 
-func (skm *SessionKeyManager) decryptSecureMessage(currentKey, previousKey []byte, gracePeriodEnds time.Time, pinHash, ciphertext []byte) ([]byte, error) {
+func (skm *SessionKeyManager) decryptSecureMessage(currentKey, previousKey []byte, gracePeriodEnds time.Time, pinHash []byte, cid string, ciphertext []byte) ([]byte, error) {
 	if len(pinHash) == 0 {
 		return nil, errors.New("secure transport pin hash missing")
+	}
+	if strings.TrimSpace(cid) == "" {
+		return nil, errors.New("secure transport cid missing")
 	}
 	if len(ciphertext) < 1+8 {
 		return nil, errors.New("secure envelope too short")
@@ -389,7 +468,7 @@ func (skm *SessionKeyManager) decryptSecureMessage(currentKey, previousKey []byt
 	innerCiphertext := ciphertext[9:]
 
 	if currentKey != nil {
-		derivedKey := deriveSecureMessageKey(currentKey, pinHash, ts)
+		derivedKey := deriveSecureMessageKey(currentKey, pinHash, cid, ts)
 		plaintext, err := skm.decryptWithKey(derivedKey, innerCiphertext)
 		if err == nil {
 			if replayErr := skm.registerReplayCiphertext(ciphertext, ts); replayErr != nil {
@@ -400,7 +479,7 @@ func (skm *SessionKeyManager) decryptSecureMessage(currentKey, previousKey []byt
 	}
 
 	if previousKey != nil && time.Now().Before(gracePeriodEnds) {
-		derivedKey := deriveSecureMessageKey(previousKey, pinHash, ts)
+		derivedKey := deriveSecureMessageKey(previousKey, pinHash, cid, ts)
 		plaintext, err := skm.decryptWithKey(derivedKey, innerCiphertext)
 		if err == nil {
 			if replayErr := skm.registerReplayCiphertext(ciphertext, ts); replayErr != nil {
@@ -414,12 +493,14 @@ func (skm *SessionKeyManager) decryptSecureMessage(currentKey, previousKey []byt
 	return nil, errors.New("failed to decrypt secure envelope with any available key")
 }
 
-func deriveSecureMessageKey(baseKey, pinHash []byte, ts int64) []byte {
+func deriveSecureMessageKey(baseKey, pinHash []byte, cid string, ts int64) []byte {
 	salt := time.Unix(ts, 0).UTC().Format(secureSaltLayout)
 	h := sha256.New()
 	h.Write(baseKey)
 	h.Write([]byte{':'})
 	h.Write(pinHash)
+	h.Write([]byte{':'})
+	h.Write([]byte(strings.TrimSpace(cid)))
 	h.Write([]byte{':'})
 	h.Write([]byte(salt))
 	return h.Sum(nil)

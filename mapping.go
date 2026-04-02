@@ -93,6 +93,11 @@ func (p *MapRemoteProxy) mapRequest(r *http.Request) (string, bool, *Mapping, st
 	originalURL := p.buildOriginalURL(r)
 	isWebSocketUpgrade := isWebSocketUpgradeRequest(r)
 
+	if p.shouldFastRejectRequestByDomain(originalURL) {
+		logMatchFailure(originalURL, "domain_not_in_rules")
+		return originalURL, false, nil, ""
+	}
+
 	// Build cache key: serverName|originalURL|method|isWebSocketUpgrade
 	// Method is included because same URL with different methods may match different rules
 	cacheKey := p.serverName + "|" + originalURL + "|" + r.Method + "|" + boolCachePart(isWebSocketUpgrade)
@@ -133,6 +138,26 @@ func (p *MapRemoteProxy) mapRequest(r *http.Request) (string, bool, *Mapping, st
 
 	logMatchFailure(originalURL, "no_rule_matched")
 	return originalURL, false, nil, ""
+}
+
+func (p *MapRemoteProxy) shouldFastRejectRequestByDomain(originalURL string) bool {
+	parsedOriginalURL, err := url.Parse(originalURL)
+	if err != nil {
+		return false
+	}
+
+	switch strings.ToLower(parsedOriginalURL.Scheme) {
+	case "http", "https", "ws", "wss":
+	default:
+		return false
+	}
+
+	host := strings.ToLower(parsedOriginalURL.Hostname())
+	if host == "" {
+		return false
+	}
+
+	return shouldFastRejectByDomain(p.config, host)
 }
 
 func (p *MapRemoteProxy) calculateMatchScore(mapping *Mapping, r *http.Request, originalURL string, isWebSocketUpgrade bool) (int, string, string) {

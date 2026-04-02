@@ -34,6 +34,9 @@ var (
 	name           = flag.String("name", "default-endpoint", "[DEPRECATED] unique name for this endpoint client")
 	tunnelName     = flag.String("tunnel", "", "[DEPRECATED] name of the tunnel to connect to")
 	tunnelPassword = flag.String("password", "", "[DEPRECATED] tunnel password for encryption")
+	mtlsCertFile   = flag.String("mtls-cert", "", "Client certificate PEM path for mTLS tunnel")
+	mtlsKeyFile    = flag.String("mtls-key", "", "Client private key PEM path for mTLS tunnel")
+	mtlsCAFile     = flag.String("mtls-ca", "", "Custom CA PEM bundle for APS tunnel TLS verification")
 	debug          = flag.Bool("debug", false, "enable debug logging")
 
 	install   = flag.Bool("install", false, "install system service")
@@ -448,8 +451,13 @@ func copyFile(src, dst string) error {
 }
 
 func runClientSession(ctx context.Context) bool {
+	connCtx, err := BuildImmutableConnectionContext(*serverAddr, *configID)
+	if err != nil {
+		log.Printf("Failed to build immutable connection context: %v", err)
+		return true
+	}
 	// Use TCP tunnel by default
-	return runTCPTunnelSession(ctx)
+	return runTCPTunnelSession(ctx, *connCtx)
 }
 
 // parseServerAddresses parses comma-separated server addresses
@@ -495,20 +503,17 @@ func runServerConnection(ctx context.Context, serverAddress string) {
 			connCtx, connCancel := context.WithCancel(ctx)
 			connectionManager.SetActive(serverAddress, connCancel)
 
-			// Override global serverAddr and configID temporarily
-			oldServerAddr := *serverAddr
-			oldConfigID := *configID
-			*serverAddr = cfg.Address
-			if cfg.ConfigID != "" {
-				*configID = cfg.ConfigID
+			immutableCtx, buildErr := BuildImmutableConnectionContext(cfg.Address, cfg.ConfigID)
+			if buildErr != nil {
+				connectionManager.CloseConnection(serverAddress)
+				connectionManager.IncrementRetry(serverAddress)
+				log.Printf("[%s] Failed to build immutable connection context: %v", cfg.Address, buildErr)
+				time.Sleep(reconnectDelay)
+				continue
 			}
 
-			// Run the session
-			shouldReconnect := runTCPTunnelSession(connCtx)
-
-			// Restore global values
-			*serverAddr = oldServerAddr
-			*configID = oldConfigID
+			// Run the session with immutable context
+			shouldReconnect := runTCPTunnelSession(connCtx, *immutableCtx)
 
 			connectionManager.CloseConnection(serverAddress)
 
@@ -522,21 +527,6 @@ func runServerConnection(ctx context.Context, serverAddress string) {
 
 			// Increment retry counter
 			connectionManager.IncrementRetry(serverAddress)
-
-			// Re-fetch configuration if using CID mode (ensures fresh config after any disruption)
-			if cfg.ConfigID != "" {
-				DebugLog("[%s] Re-fetching configuration before reconnect", serverAddress)
-				newConfig, err := FetchConfigFromAPS(cfg.Address, cfg.ConfigID)
-				if err == nil {
-					runtimeConfigMu.Lock()
-					runtimeConfig = newConfig
-					runtimeConfigMu.Unlock()
-					DebugLog("[%s] Configuration refreshed: tunnel=%s, endpoint=%s",
-						serverAddress, newConfig.TunnelName, newConfig.EndpointName)
-				} else {
-					DebugLog("[%s] Failed to refresh config (will use existing): %v", serverAddress, err)
-				}
-			}
 
 			// Log and sleep before retry
 			retryInfo := ""
@@ -553,14 +543,12 @@ func runServerConnection(ctx context.Context, serverAddress string) {
 
 // runClientSessionWithServer runs a client session with a specific server address
 func runClientSessionWithServer(ctx context.Context, serverAddress string) bool {
-	// Temporarily override the global serverAddr for this connection
-	oldServerAddr := *serverAddr
-	*serverAddr = serverAddress
-	defer func() {
-		*serverAddr = oldServerAddr
-	}()
-
-	return runTCPTunnelSession(ctx)
+	connCtx, err := BuildImmutableConnectionContext(serverAddress, *configID)
+	if err != nil {
+		log.Printf("[%s] Failed to build immutable connection context: %v", serverAddress, err)
+		return true
+	}
+	return runTCPTunnelSession(ctx, *connCtx)
 }
 
 func isPermanentError(err error) bool {

@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/tls"
@@ -14,6 +15,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -42,6 +44,13 @@ type EncryptedPayloadEnvelope struct {
 	Alg       string `json:"alg"`
 	Salt      string `json:"salt"`
 	Payload   string `json:"payload"`
+}
+
+type encryptedEndpointConfigRequest struct {
+	ConfigID  string `json:"cid"`
+	Nonce     string `json:"nonce"`
+	Timestamp int64  `json:"ts"`
+	Token     string `json:"token"`
 }
 
 type endpointTLSPin struct {
@@ -348,6 +357,36 @@ func currentEndpointTLSPinSalt() string {
 	return time.Now().UTC().Format(endpointTLSPinSaltLayout)
 }
 
+func deriveEndpointConfigTokenKey(pinKey []byte, salt string) []byte {
+	h := sha256.New()
+	h.Write(pinKey)
+	h.Write([]byte{':'})
+	h.Write([]byte(salt))
+	h.Write([]byte(":eid-token-v1"))
+	return h.Sum(nil)
+}
+
+func computeEndpointConfigToken(pinKey []byte, cid, nonce string, ts int64, salt string) string {
+	key := deriveEndpointConfigTokenKey(pinKey, salt)
+	msg := strings.Join([]string{
+		strings.TrimSpace(cid),
+		strings.TrimSpace(nonce),
+		strconv.FormatInt(ts, 10),
+		strings.TrimSpace(salt),
+	}, "|")
+	mac := hmac.New(sha256.New, key)
+	mac.Write([]byte(msg))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+func generateEndpointRequestNonce() (string, error) {
+	nonce := make([]byte, 16)
+	if _, err := rand.Read(nonce); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(nonce), nil
+}
+
 func deriveEndpointTLSPinAESKey(keyMaterial []byte, salt string) []byte {
 	base := keyMaterial
 	if len(base) != 32 {
@@ -408,7 +447,22 @@ func buildEncryptedConfigIDForServer(serverAddress, configID string) (string, st
 	}
 
 	salt := currentEndpointTLSPinSalt()
-	ciphertext, err := encryptWithEndpointTLSPin(key, salt, []byte(configID))
+	nonce, err := generateEndpointRequestNonce()
+	if err != nil {
+		return "", "", nil, err
+	}
+	ts := time.Now().UTC().Unix()
+	request := encryptedEndpointConfigRequest{
+		ConfigID:  strings.TrimSpace(configID),
+		Nonce:     nonce,
+		Timestamp: ts,
+		Token:     computeEndpointConfigToken(key, strings.TrimSpace(configID), nonce, ts, salt),
+	}
+	payload, err := json.Marshal(request)
+	if err != nil {
+		return "", "", nil, err
+	}
+	ciphertext, err := encryptWithEndpointTLSPin(key, salt, payload)
 	if err != nil {
 		return "", "", nil, err
 	}

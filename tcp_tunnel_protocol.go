@@ -45,8 +45,8 @@ const (
 )
 
 const (
-	// SecureCipherSuiteSPKITS enables SPKI-hash + timestamp-salt derivation and replay defense.
-	SecureCipherSuiteSPKITS = "spki-ts-v1"
+	// SecureCipherSuiteSPKICIDTS enforces SPKI + CID + Timestamp secure transport.
+	SecureCipherSuiteSPKITS = "spki-cid-ts-v2"
 )
 
 // Message header size: 4 bytes length + 1 byte type
@@ -65,7 +65,10 @@ type TunnelMessage struct {
 type RegisterPayload struct {
 	TunnelName   string `json:"tunnel_name"`
 	EndpointName string `json:"endpoint_name"`
-	Password     string `json:"password"`
+	ServerName   string `json:"server_name,omitempty"`
+	ConfigID     string `json:"cid"`
+	Timestamp    int64  `json:"ts"`
+	AuthProof    string `json:"auth_proof"`
 	ServerHost   string `json:"server_host,omitempty"`
 	PinHash      string `json:"pin_hash,omitempty"`
 	CipherSuite  string `json:"cipher_suite,omitempty"`
