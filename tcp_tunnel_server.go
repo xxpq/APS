@@ -474,6 +474,15 @@ func (s *TCPTunnelServer) handleConnection(conn net.Conn) {
 		tc.Close()
 		return
 	}
+	if !isHostInACMEWhitelist(reg.ServerHost) {
+		DebugLog("[TCP TUNNEL] server_host '%s' is not in ACME whitelist from %s", reg.ServerHost, remoteAddr)
+		tc.SendJSON(MsgTypeRegisterAck, RegisterAckPayload{
+			Success: false,
+			Error:   "server_host not in ACME whitelist",
+		})
+		tc.Close()
+		return
+	}
 	expectedPinHash, ok := lookupTLSPinHashForHost(reg.ServerHost)
 	if !ok {
 		DebugLog("[TCP TUNNEL] TLS pin hash unavailable for host '%s' from %s", reg.ServerHost, remoteAddr)

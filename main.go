@@ -475,17 +475,17 @@ func main() {
 	harManager := NewHarLoggerManager(config)
 	defer harManager.Shutdown()
 
-	tunnelManager := NewHybridTunnelManager(config, nil, statsDB) // 浣跨敤娣峰悎闅ч亾绠＄悊鍣?
+	tunnelManager := NewHybridTunnelManager(config, nil, statsDB) // 娴ｈ法鏁ゅǎ宄版値闂呇囦壕缁狅紕鎮婇崳?
 	scriptRunner := NewScriptRunner(config.Scripting)
 	trafficShaper := NewTrafficShaper(initialQuotaUsage)
 	statsCollector := NewStatsCollector(config)
 	defer statsCollector.Close() // Ensure graceful shutdown of async stats workers
 
-	// 鍒濆鍖栭潤鎬佹枃浠剁紦瀛樼鐞嗗櫒
+	// 閸掓繂顫愰崠鏍饯閹焦鏋冩禒鍓佺处鐎涙顓搁悶鍡楁珤
 	staticCache := NewStaticCacheManager(config.StaticCache)
 	defer staticCache.Stop()
 
-	// 璁剧疆tunnelManager鐨剆tatsCollector锛屽疄鐜扮鐐圭粺璁＄殑闆嗕腑寮忕鐞?
+	// 鐠佸墽鐤唗unnelManager閻ㄥ墕tatsCollector閿涘苯鐤勯悳鎵伂閻愬湱绮虹拋锛勬畱闂嗗棔鑵戝蹇曨吀閻?
 	tunnelManager.SetStatsCollector(statsCollector)
 	replayManager := NewReplayManager(config)
 
@@ -512,7 +512,7 @@ func main() {
 	}
 	log.Println("===========================================")
 	fmt.Println()
-	fmt.Println("馃攼 HTTPS Interception Setup:")
+	fmt.Println("HTTPS Interception Setup:")
 	fmt.Println("   1. Configure your system or browser to use one of the proxy servers.")
 	fmt.Println("   2. Visit '/.ssl' on any server with 'cert: \"auto\"' to download the root certificate.")
 	fmt.Println()
@@ -529,7 +529,7 @@ func (sm *ServerManager) StartAll() {
 	sm.config.mu.RLock()
 	defer sm.config.mu.RUnlock()
 
-	// 妫€鏌ユ槸鍚︽湁鏈嶅姟閰嶇疆浜咥CME
+	// 濡偓閺屻儲妲搁崥锔芥箒閺堝秴濮熼柊宥囩枂娴滃挜CME
 	needsACMEChallengeServer := false
 	for _, serverConfig := range sm.config.Servers {
 		if certStr, ok := serverConfig.Cert.(string); ok && certStr == "acme" {
@@ -538,7 +538,7 @@ func (sm *ServerManager) StartAll() {
 		}
 	}
 
-	// 濡傛灉闇€瑕丄CME锛岀‘淇濇湁涓€涓叕鍏辩殑80绔彛鏈嶅姟鍣?
+	// 婵″倹鐏夐棁鈧憰涓凜ME閿涘瞼鈥樻穱婵囨箒娑撯偓娑擃亜鍙曢崗杈╂畱80缁旑垰褰涢張宥呭閸?
 	if needsACMEChallengeServer {
 		foundPort80 := false
 		for _, serverConfig := range sm.config.Servers {
@@ -558,7 +558,7 @@ func (sm *ServerManager) StartAll() {
 		}
 	}
 
-	// 灏?mappings 鎸?server name 鍒嗙粍
+	// Group mappings by server name.
 	serverMappings := make(map[string][]*Mapping)
 	for i := range sm.config.Mappings {
 		mapping := &sm.config.Mappings[i]
@@ -567,7 +567,7 @@ func (sm *ServerManager) StartAll() {
 		}
 	}
 
-	// 涓烘瘡涓?server 鍒涘缓骞跺惎鍔ㄤ竴涓鐞嗗櫒
+	// Start each configured server.
 	for name, serverConfig := range sm.config.Servers {
 		if serverConfig == nil {
 			continue
@@ -580,25 +580,24 @@ func createServerHandler(serverName string, mappings []*Mapping, serverConfig *L
 	mux := http.NewServeMux()
 	proxy := NewMapRemoteProxy(config, harManager, tunnelManager, scriptRunner, trafficShaper, stats, staticCache, loggingDB, serverName, rateLimiter)
 
-	// 濡傛灉 cert 鏄?auto锛屾敞鍐岃瘉涔︿笅杞藉鐞嗗櫒
+	// Register auto-cert endpoints when cert is set to "auto".
 	if certStr, ok := serverConfig.Cert.(string); ok && certStr == "auto" {
 		certHandlers := &CertHandlers{}
 		certHandlers.RegisterHandlers(mux)
 	}
 
-	// 娉ㄥ唽 Auth 绠＄悊鎺ュ彛
 	authHandlers := &AuthHandlers{}
 	authHandlers.RegisterHandlers(mux)
 
-	// 娣诲姞閲嶆斁绔偣锛堝缁堝彲鐢級
 	mux.HandleFunc("/.replay", replayManager.ServeHTTP)
 
 	requireTunnelMTLS := serverConfig.TunnelMTLS != nil && *serverConfig.TunnelMTLS
 	tunnelBound := isServerBoundToAnyTunnel(config, serverName)
+	var tunnelConnectHandler http.Handler
 
 	if tunnelBound {
 		// HTTP CONNECT tunnel entry is only exposed on servers bound by tunnels.<name>.servers.
-		mux.HandleFunc("/.tunnel", func(w http.ResponseWriter, r *http.Request) {
+		tunnelConnectHandler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.Method != http.MethodConnect {
 				http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 				return
@@ -648,42 +647,54 @@ func createServerHandler(serverName string, mappings []*Mapping, serverConfig *L
 				serverName: serverName,
 			})
 		})
+		mux.Handle("/.tunnel", tunnelConnectHandler)
 	} else {
 		DebugLog("[TCP TUNNEL] Server '%s' is not bound by any tunnel; '/.tunnel' is not registered", serverName)
 	}
 
-	// 鏍规嵁 panel 鎺у埗 /.api 涓?/.admin 鐨勬敞鍐?
+	// 閺嶈宓?panel 閹貉冨煑 /.api 娑?/.admin 閻ㄥ嫭鏁為崘?
 	if serverConfig.Panel != nil && *serverConfig.Panel {
-		// 娣诲姞缁熻鏁版嵁绔偣
+		// 濞ｈ濮炵紒鐔活吀閺佺増宓佺粩顖滃仯
 		mux.HandleFunc("/.api/stats", stats.ServeHTTP)
 
-		// 娉ㄥ唽绠＄悊闈㈡澘澶勭悊鍣?
+		// 濞夈劌鍞界粻锛勬倞闂堛垺婢樻径鍕倞閸?
 		adminHandlers := NewAdminHandlers(config, configFile, serverName, stats, statsDB, loggingDB, logBroadcaster, rateLimiter)
-		// 璁剧疆tunnel绠＄悊鍣ㄥ紩鐢紝鐢ㄤ簬鏌ヨendpoint鐘舵€?
+		// 鐠佸墽鐤唗unnel缁狅紕鎮婇崳銊ョ穿閻㈩煉绱濋悽銊ょ艾閺屻儴顕梕ndpoint閻樿埖鈧?
 		adminHandlers.SetTunnelManager(tunnelManager)
 		adminHandlers.RegisterHandlers(mux)
 	}
 
-	// 鍒涘缓涓€涓粺涓€鐨勫鐞嗗櫒鏉ュ鐞嗘墍鏈夎姹?
+	// 閸掓稑缂撴稉鈧稉顏嗙埠娑撯偓閻ㄥ嫬顦╅悶鍡楁珤閺夈儱顦╅悶鍡樺閺堝顕Ч?
 	var baseHandler http.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// 妫€鏌?mux 涓槸鍚︽湁鏇村叿浣撶殑鍖归厤 (渚嬪璇佷功涓嬭浇椤甸潰鎴栫浉瀵硅矾寰?
+		// CONNECT /.tunnel must bypass generic proxy CONNECT handling.
+		// Some clients use CONNECT target forms that do not match ServeMux path routing.
+		if isTunnelConnectRequest(r) {
+			if tunnelBound && tunnelConnectHandler != nil {
+				tunnelConnectHandler.ServeHTTP(w, r)
+				return
+			}
+			http.Error(w, "Tunnel service is not enabled on this server", http.StatusForbidden)
+			return
+		}
+
+		// 濡偓閺?mux 娑擃厽妲搁崥锔芥箒閺囨潙鍙挎担鎾舵畱閸栧綊鍘?(娓氬顩х拠浣峰姛娑撳娴囨い鐢告桨閹存牜娴夌€电鐭惧?
 		handler, pattern := mux.Handler(r)
 		if pattern != "" {
 			handler.ServeHTTP(w, r)
 			return
 		}
 
-		// 浠ｇ悊璇锋眰 (CONNECT)
+		// 娴狅絿鎮婄拠閿嬬湴 (CONNECT)
 		if r.Method == http.MethodConnect {
 			proxy.ServeHTTP(w, r)
 			return
 		}
 
-		// 榛樿澶勭悊 HTTP 璇锋眰杞彂
+		// Fallback for all non-CONNECT requests.
 		proxy.ServeHTTP(w, r)
 	})
 
-	// 濡傛灉鏄?0绔彛锛屽苟涓斿叏灞€鍚敤浜咥CME锛屽垯鍖呰澶勭悊鍣ㄤ互澶勭悊ACME鎸戞垬
+	// Apply ACME challenge wrapper for public port 80 handlers when enabled.
 	if serverConfig.Port == 80 && isACMEEnabled {
 		baseHandler = GetACMEHandler(baseHandler)
 	}
@@ -699,6 +710,35 @@ func createServerHandler(serverName string, mappings []*Mapping, serverConfig *L
 
 	// Use h2c with configured server
 	return h2c.NewHandler(baseHandler, http2Server)
+}
+
+func isTunnelConnectRequest(r *http.Request) bool {
+	if r == nil || r.Method != http.MethodConnect {
+		return false
+	}
+
+	if r.URL != nil {
+		if strings.TrimSpace(r.URL.Path) == "/.tunnel" {
+			return true
+		}
+		opaque := strings.TrimSpace(r.URL.Opaque)
+		if opaque == "/.tunnel" || opaque == ".tunnel" {
+			return true
+		}
+	}
+
+	target := strings.TrimSpace(r.RequestURI)
+	if target == "/.tunnel" || target == ".tunnel" {
+		return true
+	}
+
+	if target != "" {
+		if parsed, err := url.ParseRequestURI(target); err == nil && strings.TrimSpace(parsed.Path) == "/.tunnel" {
+			return true
+		}
+	}
+
+	return false
 }
 
 func isServerBoundToAnyTunnel(config *Config, serverName string) bool {

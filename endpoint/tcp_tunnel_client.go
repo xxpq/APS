@@ -96,7 +96,7 @@ const (
 )
 
 const headerSize = 5
-const connectHandshakeTimeout = 5 * time.Second
+const connectHandshakeTimeout = 15 * time.Second
 
 const (
 	defaultMaxMessageSize    = 32 * 1024 * 1024
@@ -498,15 +498,14 @@ func connectWithHTTPTunnelHandshake(conn net.Conn, serverAddress string) (net.Co
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
+		bodyBytes := []byte{}
+		if resp.Body != nil {
+			bodyBytes, _ = io.ReadAll(io.LimitReader(resp.Body, 256))
+			resp.Body.Close()
+		}
 		return nil, fmt.Errorf("unexpected status %d: %s", resp.StatusCode, strings.TrimSpace(string(bodyBytes)))
-	}
-
-	if _, err := io.Copy(io.Discard, resp.Body); err != nil {
-		return nil, err
 	}
 
 	buffered := reader.Buffered()
@@ -559,7 +558,7 @@ type TunnelSessionState struct {
 func runTCPTunnelSession(ctx context.Context, connCtx ImmutableConnectionContext) bool {
 	serverAddress := normalizeServerAddressForSession(connCtx.ServerAddress)
 	DebugLog("Connecting to TCP tunnel server at %s", serverAddress)
-	DebugLog("[CONN] Tunnel transport mode: strict TLS + CONNECT /.tunnel (raw TCP disabled)")
+	DebugLog("[CONN] Tunnel transport mode: strict TLS + CONNECT /.tunnel")
 
 	// 如果serverAddr不包含端口，则添加默认端口
 	if serverAddress == "" {

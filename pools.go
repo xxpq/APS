@@ -71,45 +71,6 @@ func GetOrCompileRegex(pattern string) (*regexp.Regexp, error) {
 }
 
 // ============================================================================
-// Protocol Detection Lookup Table - O(1) instead of O(n) slice iteration
-// ============================================================================
-
-// httpMethodFirstBytes is a lookup table for HTTP request first bytes
-var httpMethodFirstBytes = map[byte]bool{
-	'G': true, // GET
-	'P': true, // POST, PUT, PATCH
-	'H': true, // HEAD
-	'D': true, // DELETE
-	'O': true, // OPTIONS
-	'C': true, // CONNECT
-	'T': true, // TRACE
-}
-
-// validTunnelTypes is a lookup table for valid tunnel message types
-var validTunnelTypes = map[byte]bool{
-	MsgTypeRegister:         true,
-	MsgTypeRegisterAck:      true,
-	MsgTypeRequest:          true,
-	MsgTypeResponse:         true,
-	MsgTypeResponseHeader:   true,
-	MsgTypeResponseChunk:    true,
-	MsgTypeResponseEnd:      true,
-	MsgTypeRequestStart:     true,
-	MsgTypeRequestChunkBin:  true,
-	MsgTypeRequestEnd:       true,
-	MsgTypeResponseChunkBin: true,
-	MsgTypeProxyConnect:     true,
-	MsgTypeProxyConnectAck:  true,
-	MsgTypeProxyStreamMode:  true,
-	MsgTypeProxyDataBinary:  true,
-	MsgTypeProxyClose:       true,
-	MsgTypeHeartbeat:        true,
-	MsgTypeCancel:           true,
-	MsgTypeProbePing:        true,
-	MsgTypeProbePong:        true,
-}
-
-// ============================================================================
 // Pool Helper Functions
 // ============================================================================
 

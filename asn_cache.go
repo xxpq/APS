@@ -171,13 +171,23 @@ func GetIPLocation(ip string) (*LocationInfo, error) {
 func (c *ASNCache) lookup(ip string) (*IPGeolocation, error) {
 	// 1. Check memory cache
 	if geo := c.getFromMemory(ip); geo != nil {
-		DebugLog("[ASN] Memory cache hit for %s", ip)
+		DebugLogThrottled(
+			"asn_memory_cache_hit|"+ip,
+			30*time.Second,
+			"[ASN] Memory cache hit for %s",
+			ip,
+		)
 		return geo, nil
 	}
 
 	// 2. Check database cache
 	if geo := c.getFromDatabase(ip); geo != nil {
-		DebugLog("[ASN] Database cache hit for %s", ip)
+		DebugLogThrottled(
+			"asn_database_cache_hit|"+ip,
+			30*time.Second,
+			"[ASN] Database cache hit for %s",
+			ip,
+		)
 		// Add to memory cache
 		c.addToMemory(ip, geo)
 		return geo, nil

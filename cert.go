@@ -14,6 +14,7 @@ import (
 	"io"
 	"log"
 	"math/big"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -582,12 +583,56 @@ func shouldFastRejectByDomain(config *Config, host string) bool {
 	return !exists
 }
 
-// dynamicHostPolicy is a thread-safe host policy that checks against the current ACME domains.
-func dynamicHostPolicy(ctx context.Context, host string) error {
+func normalizeACMEWhitelistLookupHost(host string) string {
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return ""
+	}
+
+	if parsedHost, _, err := net.SplitHostPort(host); err == nil {
+		host = parsedHost
+	}
+
+	host = strings.TrimSpace(host)
+	host = strings.Trim(host, "[]")
+	host = strings.TrimSuffix(host, ".")
+	return strings.ToLower(host)
+}
+
+func isHostInACMEWhitelistLocked(host string) bool {
+	if host == "" {
+		return false
+	}
+
+	if _, ok := acmeDomainSet[host]; ok {
+		return true
+	}
+
+	parts := strings.Split(host, ".")
+	for i := 1; i < len(parts)-1; i++ {
+		wildcard := "*." + strings.Join(parts[i:], ".")
+		if _, ok := acmeDomainSet[wildcard]; ok {
+			return true
+		}
+	}
+
+	return false
+}
+
+func isHostInACMEWhitelist(host string) bool {
+	host = normalizeACMEWhitelistLookupHost(host)
+	if host == "" {
+		return false
+	}
+
 	acmeDomainsMutex.RLock()
 	defer acmeDomainsMutex.RUnlock()
+	return isHostInACMEWhitelistLocked(host)
+}
 
-	if _, ok := acmeDomainSet[strings.ToLower(host)]; ok {
+// dynamicHostPolicy is a thread-safe host policy that checks against the current ACME domains.
+func dynamicHostPolicy(ctx context.Context, host string) error {
+	if isHostInACMEWhitelist(host) {
 		return nil
 	}
 	return os.ErrPermission

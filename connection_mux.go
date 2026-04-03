@@ -1,25 +1,22 @@
 package main
 
 import (
-	"bufio"
 	"errors"
-	"io"
 	"net"
 	"sync"
 	"sync/atomic"
 )
 
-// ConnectionMux multiplexes connections based on protocol detection
-// It reads the first bytes to determine if it's HTTP or TCP Tunnel protocol
+// ConnectionMux routes accepted sockets into the HTTP server pipeline.
+// Raw TCP tunnel protocol at this layer is intentionally removed.
 type ConnectionMux struct {
-	listener      net.Listener
-	httpHandler   func(net.Conn) // Handler for HTTP connections
-	tunnelHandler func(net.Conn) // Handler for TCP tunnel connections
-	rateLimiter   *RateLimitEngine
-	ruleNames     []string
-	serverName    string
-	mu            sync.RWMutex
-	running       bool
+	listener    net.Listener
+	httpHandler func(net.Conn) // Handler for HTTP connections
+	rateLimiter *RateLimitEngine
+	ruleNames   []string
+	serverName  string
+	mu          sync.RWMutex
+	running     bool
 }
 
 // RateLimitConn wraps a net.Conn to track connection end
@@ -72,13 +69,6 @@ func (m *ConnectionMux) SetHTTPHandler(handler func(net.Conn)) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.httpHandler = handler
-}
-
-// SetTunnelHandler sets the handler for TCP tunnel connections
-func (m *ConnectionMux) SetTunnelHandler(handler func(net.Conn)) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.tunnelHandler = handler
 }
 
 // SetRateLimiter sets the rate limiter for connection tracking
@@ -166,79 +156,17 @@ func (m *ConnectionMux) handleConnection(conn net.Conn) {
 		}
 	}
 
-	reader := bufio.NewReader(conn)
-
-	// Peek first 5 bytes (our tunnel header size)
-	header, err := reader.Peek(5)
-	if err != nil {
-		if err != io.EOF {
-			conn.Close()
-		}
-		return
-	}
-
-	// Drain all currently buffered bytes into a prefix replay connection so that
-	// downstream protocols (HTTP/TLS/smux tunnel) read directly from the raw
-	// socket after the initial protocol sniffing step.
-	buffered := reader.Buffered()
-	prefixBytes, err := reader.Peek(buffered)
-	if err != nil {
-		conn.Close()
-		return
-	}
-	prefix := make([]byte, len(prefixBytes))
-	copy(prefix, prefixBytes)
-	routedConn := &prefixedConn{Conn: conn, prefix: prefix}
-
+	// Raw tunnel protocol is removed. All inbound traffic is routed through HTTP stack
+	// (including CONNECT /.tunnel over TLS).
 	m.mu.RLock()
 	httpHandler := m.httpHandler
-	tunnelHandler := m.tunnelHandler
 	m.mu.RUnlock()
 
-	// Detect protocol based on first bytes
-	if isTunnelProtocol(header) {
-		// TCP Tunnel protocol
-		if tunnelHandler != nil {
-			tunnelHandler(routedConn)
-		} else {
-			DebugLog("[MUX] Raw tunnel protocol connection rejected from %s (raw tunnel disabled)", conn.RemoteAddr().String())
-			conn.Close()
-		}
+	if httpHandler != nil {
+		httpHandler(conn)
 	} else {
-		// Assume HTTP
-		if httpHandler != nil {
-			httpHandler(routedConn)
-		} else {
-			routedConn.Close()
-		}
+		conn.Close()
 	}
-}
-
-// isTunnelProtocol checks if the data looks like our tunnel protocol
-// Our tunnel messages start with 4-byte length + 1-byte type
-// HTTP requests start with method (GET, POST, PUT, etc.)
-func isTunnelProtocol(header []byte) bool {
-	if len(header) < 5 {
-		return false
-	}
-
-	// Check if first byte looks like ASCII HTTP method using O(1) lookup
-	firstByte := header[0]
-	if httpMethodFirstBytes[firstByte] {
-		return false // Looks like HTTP
-	}
-
-	// Stricter check for Tunnel Protocol
-	// Our protocol uses a 4-byte Big Endian length prefix.
-	// Registration frames are expected to be small, so requiring MSB=0 is a fast filter.
-	// This effectively filters out TLS (starts with 0x16) and many other protocols.
-	if firstByte != 0x00 {
-		return false
-	}
-
-	// Check if message type is valid tunnel type using O(1) lookup
-	msgType := header[4]
-	return validTunnelTypes[msgType]
 }
 
 // ChannelListener implements net.Listener using a channel
