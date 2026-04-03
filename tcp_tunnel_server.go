@@ -21,6 +21,8 @@ import (
 	"github.com/xtaci/smux"
 )
 
+const responseRouteEnqueueTimeout = 10 * time.Second
+
 // TCPTunnelServer handles TCP connections from endpoints
 type TCPTunnelServer struct {
 	mu            sync.RWMutex
@@ -1191,18 +1193,37 @@ func (ep *TCPEndpoint) handleResponseMessage(msg *TunnelMessage) {
 			msg.Type,
 			requestID,
 		)
-	default:
-		debugLogTCPTunnelThrottled(
-			scopeSourceIP,
-			ep.EndpointName,
-			ep.ID,
-			scopeTargetAddr,
-			"response_channel_full",
-			"%s [TCP TUNNEL] Response channel full for request %s",
-			logPrefix,
-			requestID,
-		)
+	case <-ep.done:
+		return
+	case <-time.After(responseRouteEnqueueTimeout):
+		dropErr := fmt.Errorf("response routing timeout (type=%d): channel congested", msg.Type)
+		DebugLog("%s [TCP TUNNEL] %v for request %s", logPrefix, dropErr, requestID)
+		ep.failPendingRequest(requestID, pending, dropErr, logPrefix)
 	}
+}
+
+func (ep *TCPEndpoint) failPendingRequest(requestID string, pending *tcpPendingRequest, cause error, logPrefix string) {
+	ep.mu.Lock()
+	current, ok := ep.pendingRequests[requestID]
+	if ok && current == pending {
+		delete(ep.pendingRequests, requestID)
+	}
+	ep.mu.Unlock()
+
+	if !ok || current != pending {
+		return
+	}
+
+	if pending.pipeWriter != nil {
+		_ = pending.pipeWriter.CloseWithError(cause)
+	}
+
+	defer func() {
+		if r := recover(); r != nil {
+			DebugLog("%s [TCP TUNNEL] Recovered closing pending response channel for %s: %v", logPrefix, requestID, r)
+		}
+	}()
+	close(pending.responseChan)
 }
 
 // handleProxyConnectAck handles proxy connection acknowledgement

@@ -17,6 +17,18 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+func shouldUseLegacyBackendTLS(host string, insecureMode bool) bool {
+	if insecureMode {
+		return true
+	}
+
+	ip := net.ParseIP(strings.TrimSpace(host))
+	if ip == nil {
+		return false
+	}
+	return ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast()
+}
+
 // handleWebSocket handles WebSocket upgrade requests and proxies the connection.
 func (p *MapRemoteProxy) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	startTime := time.Now()
@@ -230,6 +242,8 @@ func (p *MapRemoteProxy) handleWebSocket(w http.ResponseWriter, r *http.Request)
 				}
 			}
 
+			legacyTLSMode := shouldUseLegacyBackendTLS(host, insecureMode)
+
 			// Choose appropriate ServerName based on mode
 			serverName := ""
 			if insecureMode {
@@ -244,11 +258,16 @@ func (p *MapRemoteProxy) handleWebSocket(w http.ResponseWriter, r *http.Request)
 				}
 			}
 
-			dialer.TLSClientConfig = &tls.Config{
+			tlsConfig := &tls.Config{
 				InsecureSkipVerify: insecureMode,
 				ServerName:         serverName,
 			}
-			DebugLog("%s[WS] TLS config: ServerName=%s, InsecureSkipVerify=%v", logPrefix, serverName, insecureMode)
+			if legacyTLSMode {
+				tlsConfig.MinVersion = tls.VersionTLS10
+				tlsConfig.Renegotiation = tls.RenegotiateFreelyAsClient
+			}
+			dialer.TLSClientConfig = tlsConfig
+			DebugLog("%s[WS] TLS config: ServerName=%s, InsecureSkipVerify=%v, LegacyTLS=%v", logPrefix, serverName, insecureMode, legacyTLSMode)
 		}
 
 		// Copy relevant headers from original request
@@ -319,15 +338,25 @@ func (p *MapRemoteProxy) handleWebSocket(w http.ResponseWriter, r *http.Request)
 		serverHeader := http.Header{}
 		copyHeaders(serverHeader, r.Header)
 
-		// Check if insecure is set
-		dialer := websocket.DefaultDialer
+		dialer := *websocket.DefaultDialer
+		insecureMode := false
 		if mapping != nil {
 			toConfig := mapping.GetToConfig()
 			if toConfig != nil && toConfig.Insecure != nil && *toConfig.Insecure {
-				dialer = &websocket.Dialer{
-					TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-				}
+				insecureMode = true
 			}
+		}
+		if targetWsURL.Scheme == "wss" {
+			legacyTLSMode := shouldUseLegacyBackendTLS(targetWsURL.Hostname(), insecureMode)
+			tlsConfig := &tls.Config{
+				InsecureSkipVerify: insecureMode,
+			}
+			if legacyTLSMode {
+				tlsConfig.MinVersion = tls.VersionTLS10
+				tlsConfig.Renegotiation = tls.RenegotiateFreelyAsClient
+			}
+			dialer.TLSClientConfig = tlsConfig
+			DebugLog("%s[WS] Direct TLS config: InsecureSkipVerify=%v, LegacyTLS=%v, target=%s", logPrefix, insecureMode, legacyTLSMode, targetWsURL.Hostname())
 		}
 
 		DebugLog("%s[WS] Dialing backend WebSocket directly: %s", logPrefix, targetWsURL.String())

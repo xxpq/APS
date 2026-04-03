@@ -351,7 +351,7 @@ func (tm *TCPTunnelManager) SendRequestStream(ctx context.Context, tunnelName, e
 
 	// Register pending request
 	pending := &tcpPendingRequest{
-		responseChan: make(chan *TunnelMessage, 100), // Increased from 10 to 100
+		responseChan: make(chan *TunnelMessage, 512),
 		pipeWriter:   pipeWriter,
 		sourceIP:     sourceIP,
 		targetAddr:   targetAddr,
