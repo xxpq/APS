@@ -507,6 +507,7 @@ func connectWithHTTPTunnelHandshake(conn net.Conn, serverAddress string) (net.Co
 		}
 		return nil, fmt.Errorf("unexpected status %d: %s", resp.StatusCode, strings.TrimSpace(string(bodyBytes)))
 	}
+	// CONNECT 200 switches to tunnel mode immediately. Do not consume resp.Body here.
 
 	buffered := reader.Buffered()
 	if buffered == 0 {
