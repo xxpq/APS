@@ -97,6 +97,7 @@ const (
 
 const headerSize = 5
 const connectHandshakeTimeout = 15 * time.Second
+const pooledFrameMaxSize = 256 * 1024
 
 const (
 	defaultMaxMessageSize    = 32 * 1024 * 1024
@@ -106,6 +107,11 @@ const (
 )
 
 var maxMessageSize = loadTunnelMaxMessageSize()
+var framePool = sync.Pool{
+	New: func() any {
+		return make([]byte, pooledFrameMaxSize)
+	},
+}
 
 // TunnelMessage represents a message in the TCP tunnel protocol
 type TunnelMessage struct {
@@ -281,7 +287,20 @@ func (tc *TunnelConn) WriteMessage(msg *TunnelMessage) error {
 		return fmt.Errorf("message too large: %d bytes", len(msg.Payload))
 	}
 
-	frame := make([]byte, headerSize+len(msg.Payload))
+	frameLen := headerSize + len(msg.Payload)
+
+	var frame []byte
+	var pooled []byte
+	if frameLen <= pooledFrameMaxSize {
+		pooled = framePool.Get().([]byte)
+		frame = pooled[:frameLen]
+	} else {
+		frame = make([]byte, frameLen)
+	}
+	if pooled != nil {
+		defer framePool.Put(pooled)
+	}
+
 	binary.BigEndian.PutUint32(frame[:4], uint32(len(msg.Payload)))
 	frame[4] = msg.Type
 	copy(frame[headerSize:], msg.Payload)
@@ -434,7 +453,7 @@ func computeSecureRegistrationProof(password, cid, tunnelName, endpointName, ser
 
 func buildTunnelTLSConfig(serverHost string, expectedPinHash []byte, connCtx ImmutableConnectionContext) (*tls.Config, error) {
 	tlsConfig := &tls.Config{
-		MinVersion: tls.VersionTLS12,
+		MinVersion: tls.VersionTLS13,
 		ServerName: serverHost,
 		VerifyConnection: func(cs tls.ConnectionState) error {
 			if len(cs.PeerCertificates) == 0 {

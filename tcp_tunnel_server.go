@@ -36,7 +36,7 @@ type TCPTunnelServer struct {
 	replaySeen    map[string]int64
 }
 
-const secureRegistrationWindow = 2 * time.Minute
+const secureRegistrationWindow = 90 * time.Second
 
 // EndpointStats holds statistics for an endpoint
 type EndpointStats struct {

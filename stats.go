@@ -82,6 +82,7 @@ type StatsCollector struct {
 
 	// Asynchronous processing
 	recordChan chan RecordData // Channel for async stats processing
+	stopCh     chan struct{}   // Signals background workers to stop immediately
 	wg         sync.WaitGroup  // Wait for all workers to finish
 	closed     atomic.Bool     // Closed flag for graceful shutdown
 
@@ -95,6 +96,7 @@ func NewStatsCollector(config *Config) *StatsCollector {
 		StartTime:  time.Now(),
 		Config:     config,
 		recordChan: make(chan RecordData, 10000), // Buffer 10000 records
+		stopCh:     make(chan struct{}),
 	}
 
 	// Start worker goroutines for async stats processing
@@ -221,6 +223,9 @@ func (sc *StatsCollector) Close() {
 		return // Already closed
 	}
 
+	// Wake up long-sleeping workers immediately.
+	close(sc.stopCh)
+
 	// Close the channel to signal workers to exit
 	close(sc.recordChan)
 
@@ -298,14 +303,14 @@ func (sc *StatsCollector) ipStatsCleanupWorker() {
 	defer ticker.Stop()
 
 	for {
-		// Block until ticker fires or we need to shut down
-		if sc.closed.Load() {
-			return
-		}
-
 		select {
 		case <-ticker.C:
+			if sc.closed.Load() {
+				return
+			}
 			sc.cleanupOldIPTimestamps()
+		case <-sc.stopCh:
+			return
 		}
 	}
 }

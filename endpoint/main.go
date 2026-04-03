@@ -6,13 +6,11 @@ import (
 	"crypto/cipher"
 	"crypto/rand"
 	"crypto/sha256"
-	"crypto/tls"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"log"
-	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -57,23 +55,7 @@ var (
 	connectionManager *ConnectionManager // Manages multiple APS connections
 )
 
-var sharedClient = &http.Client{
-	Transport: &http.Transport{
-		TLSClientConfig:       &tls.Config{MinVersion: tls.VersionTLS12, InsecureSkipVerify: true},
-		MaxIdleConns:          1000,
-		MaxIdleConnsPerHost:   100,
-		MaxConnsPerHost:       0,
-		IdleConnTimeout:       90 * time.Second,
-		TLSHandshakeTimeout:   10 * time.Second,
-		ExpectContinueTimeout: 1 * time.Second,
-		DisableCompression:    true,
-		ForceAttemptHTTP2:     true,
-	},
-	CheckRedirect: func(req *http.Request, via []*http.Request) error {
-		return http.ErrUseLastResponse
-	},
-	Timeout: 5 * time.Minute,
-}
+var sharedClient = newSharedBackendHTTPClient()
 
 const (
 	endpointVersion    = "1.0.0"

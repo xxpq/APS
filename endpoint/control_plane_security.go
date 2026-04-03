@@ -16,7 +16,7 @@ import (
 
 const (
 	controlPlaneFrameVersion  = uint8(1)
-	controlPlaneReplayWindow  = 2 * time.Minute
+	controlPlaneReplayWindow  = 90 * time.Second
 	controlPlaneReplayEntries = 32768
 )
 

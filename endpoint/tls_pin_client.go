@@ -179,7 +179,7 @@ func fetchServerSPKIHashOverHTTPS(authority, serverName string) ([]byte, string,
 		ForceAttemptHTTP2:   true,
 		TLSHandshakeTimeout: 10 * time.Second,
 		TLSClientConfig: &tls.Config{
-			MinVersion: tls.VersionTLS12,
+			MinVersion: tls.VersionTLS13,
 			ServerName: serverName,
 		},
 	}
@@ -236,7 +236,7 @@ func newPinnedHTTPClient(pin *endpointTLSPin) *http.Client {
 		IdleConnTimeout:     90 * time.Second,
 		TLSHandshakeTimeout: 10 * time.Second,
 		TLSClientConfig: &tls.Config{
-			MinVersion: tls.VersionTLS12,
+			MinVersion: tls.VersionTLS13,
 			ServerName: pin.serverName,
 			VerifyConnection: func(cs tls.ConnectionState) error {
 				if len(cs.PeerCertificates) == 0 {

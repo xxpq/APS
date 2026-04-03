@@ -783,13 +783,13 @@ func configureTunnelMTLSForServer(name string, serverConfig *ListenConfig, tlsCo
 	}
 
 	tlsConfig.ClientCAs = clientCAPool
-	if tlsConfig.ClientAuth < tls.VerifyClientCertIfGiven {
-		tlsConfig.ClientAuth = tls.VerifyClientCertIfGiven
-	}
-
 	if requireTunnelMTLS {
+		tlsConfig.ClientAuth = tls.RequireAndVerifyClientCert
 		log.Printf("[TCP TUNNEL] Server '%s' requires mTLS on /.tunnel (CA: %s)", name, caPath)
 	} else {
+		if tlsConfig.ClientAuth < tls.VerifyClientCertIfGiven {
+			tlsConfig.ClientAuth = tls.VerifyClientCertIfGiven
+		}
 		log.Printf("[TCP TUNNEL] Server '%s' enables client cert verification for /.tunnel (CA: %s)", name, caPath)
 	}
 
@@ -883,8 +883,8 @@ func startServer(name string, config *ListenConfig, handler http.Handler, rateLi
 				}
 			}
 
-			if tlsConfig.MinVersion == 0 || tlsConfig.MinVersion < tls.VersionTLS12 {
-				tlsConfig.MinVersion = tls.VersionTLS12
+			if tlsConfig.MinVersion == 0 || tlsConfig.MinVersion < tls.VersionTLS13 {
+				tlsConfig.MinVersion = tls.VersionTLS13
 			}
 			if err := configureTunnelMTLSForServer(name, config, tlsConfig); err != nil {
 				log.Printf("Server '%s' TLS setup failed: %v", name, err)

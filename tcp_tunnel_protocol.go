@@ -59,6 +59,7 @@ const (
 
 // Message header size: 4 bytes length + 1 byte type
 const headerSize = 5
+const pooledFrameMaxSize = 256 * 1024
 
 const (
 	defaultMaxMessageSize    = 32 * 1024 * 1024
@@ -68,6 +69,11 @@ const (
 )
 
 var maxMessageSize = loadTunnelMaxMessageSize()
+var framePool = sync.Pool{
+	New: func() any {
+		return make([]byte, pooledFrameMaxSize)
+	},
+}
 
 // TunnelMessage represents a message in the TCP tunnel protocol
 type TunnelMessage struct {
@@ -255,8 +261,21 @@ func (tc *TunnelConn) WriteMessage(msg *TunnelMessage) error {
 		return fmt.Errorf("message too large: %d bytes", len(msg.Payload))
 	}
 
+	frameLen := headerSize + len(msg.Payload)
+
+	var frame []byte
+	var pooled []byte
+	if frameLen <= pooledFrameMaxSize {
+		pooled = framePool.Get().([]byte)
+		frame = pooled[:frameLen]
+	} else {
+		frame = make([]byte, frameLen)
+	}
+	if pooled != nil {
+		defer framePool.Put(pooled)
+	}
+
 	// Build frame: length (4) + type (1) + payload
-	frame := make([]byte, headerSize+len(msg.Payload))
 	binary.BigEndian.PutUint32(frame[:4], uint32(len(msg.Payload)))
 	frame[4] = msg.Type
 	copy(frame[headerSize:], msg.Payload)
@@ -274,6 +293,7 @@ func (tc *TunnelConn) WriteMessage(msg *TunnelMessage) error {
 			return io.ErrShortWrite
 		}
 	}
+
 	return nil
 }
 
