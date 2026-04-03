@@ -325,16 +325,18 @@ func registerEndpointConfigReplayToken(statsDB *StatsDB, cid, nonce, token strin
 		strings.TrimSpace(token),
 	}, "|")
 
-	if statsDB != nil {
-		isReplay, err := statsDB.CheckAndStoreReplayToken("eid_fetch", replayToken, expiry)
-		if err != nil {
-			log.Printf("[TLS-PIN] Persistent eid replay check failed: %v", err)
-		} else if isReplay {
-			return errors.New("endpoint config request replay detected")
-		}
-		if err := statsDB.DeleteExpiredReplayTokens(now); err != nil {
-			log.Printf("[TLS-PIN] Persistent eid replay cleanup failed: %v", err)
-		}
+	if statsDB == nil {
+		return errors.New("persistent replay storage unavailable")
+	}
+	isReplay, err := statsDB.CheckAndStoreReplayToken("eid_fetch", replayToken, expiry)
+	if err != nil {
+		return fmt.Errorf("persistent eid replay check failed: %w", err)
+	}
+	if isReplay {
+		return errors.New("endpoint config request replay detected")
+	}
+	if err := statsDB.DeleteExpiredReplayTokens(now); err != nil {
+		return fmt.Errorf("persistent eid replay cleanup failed: %w", err)
 	}
 
 	endpointConfigReplay.mu.Lock()

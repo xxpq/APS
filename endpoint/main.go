@@ -59,20 +59,20 @@ var (
 
 var sharedClient = &http.Client{
 	Transport: &http.Transport{
-		TLSClientConfig:       &tls.Config{InsecureSkipVerify: true},
-		MaxIdleConns:          1000,             // 最大空闲连接数
-		MaxIdleConnsPerHost:   100,              // 每个主机最大空闲连接
-		MaxConnsPerHost:       0,                // 0表示无限制
-		IdleConnTimeout:       90 * time.Second, // 空闲连接超时
-		TLSHandshakeTimeout:   10 * time.Second, // TLS握手超时
-		ExpectContinueTimeout: 1 * time.Second,  // 100-continue超时
-		DisableCompression:    true,             // 禁用压缩减少CPU开销
-		ForceAttemptHTTP2:     true,             // 启用HTTP/2
+		TLSClientConfig:       &tls.Config{MinVersion: tls.VersionTLS12, InsecureSkipVerify: true},
+		MaxIdleConns:          1000,
+		MaxIdleConnsPerHost:   100,
+		MaxConnsPerHost:       0,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+		DisableCompression:    true,
+		ForceAttemptHTTP2:     true,
 	},
 	CheckRedirect: func(req *http.Request, via []*http.Request) error {
 		return http.ErrUseLastResponse
 	},
-	Timeout: 5 * time.Minute, // 请求总超时
+	Timeout: 5 * time.Minute,
 }
 
 const (

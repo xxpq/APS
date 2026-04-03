@@ -16,8 +16,7 @@ import (
 
 const (
 	controlPlaneFrameVersion  = uint8(1)
-	controlPlaneSeqWindow     = uint64(4096)
-	controlPlaneReplayWindow  = 5 * time.Minute
+	controlPlaneReplayWindow  = 2 * time.Minute
 	controlPlaneReplayEntries = 32768
 )
 
@@ -77,7 +76,7 @@ func (s *ControlPlaneInboundState) registerFrame(seq uint64, ts int64, configVer
 	}
 
 	now := time.Now().UTC().Unix()
-	if !isSecureTimestampFresh(ts) {
+	if !isControlPlaneTimestampFresh(ts) {
 		return errors.New("control frame timestamp out of window")
 	}
 
@@ -94,8 +93,15 @@ func (s *ControlPlaneInboundState) registerFrame(seq uint64, ts int64, configVer
 		return fmt.Errorf("control config version rollback detected: %d < %d", configVersion, s.lastConfigVersion)
 	}
 
-	if s.highestSeq > controlPlaneSeqWindow && seq+controlPlaneSeqWindow < s.highestSeq {
-		return errors.New("control sequence outside replay window")
+	if s.highestSeq == 0 {
+		if seq != 1 {
+			return fmt.Errorf("unexpected initial control sequence: %d", seq)
+		}
+	} else if seq != s.highestSeq+1 {
+		if seq <= s.highestSeq {
+			return errors.New("control frame replay or out-of-order sequence detected")
+		}
+		return fmt.Errorf("control sequence gap detected: got %d want %d", seq, s.highestSeq+1)
 	}
 
 	if exp, exists := s.seenSeq[seq]; exists && exp >= now {
@@ -123,6 +129,15 @@ func (s *ControlPlaneInboundState) registerFrame(seq uint64, ts int64, configVer
 	}
 
 	return nil
+}
+
+func isControlPlaneTimestampFresh(ts int64) bool {
+	now := time.Now().UTC().Unix()
+	delta := now - ts
+	if delta < 0 {
+		delta = -delta
+	}
+	return time.Duration(delta)*time.Second <= controlPlaneReplayWindow
 }
 
 func controlPlaneAAD(version, msgType uint8, seq uint64, ts int64, configVersion int64) []byte {

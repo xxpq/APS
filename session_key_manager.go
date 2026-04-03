@@ -33,6 +33,7 @@ const (
 	SecureEnvelopeVersion  = 0xA1             // Secure envelope marker
 	SecureReplayWindow     = 5 * time.Minute  // Timestamp/replay window
 	SecureReplayMaxEntries = 20000            // Anti-replay cache cap
+	KeyMaterialMaxLifetime = KeyRotationMaxInterval + KeyGracePeriod + 10*time.Minute
 
 	secureSaltLayout    = "200601021504"
 	kdfArgon2Time       = uint32(3)
@@ -216,6 +217,7 @@ func (skm *SessionKeyManager) StopAutoRotation() {
 		skm.rotationTimer.Stop()
 		skm.rotationTimer = nil
 	}
+	skm.zeroizeKeyMaterialLocked(true)
 }
 
 // randomRotationInterval returns a random interval between min and max
@@ -225,16 +227,59 @@ func (skm *SessionKeyManager) randomRotationInterval() time.Duration {
 	return KeyRotationMinInterval + time.Duration(randomDiff.Int64())
 }
 
-func deriveForwardSecureRotatedKey(currentKey, sharedSecret, reqNonce, respNonce, initiatorPub, responderPub []byte) ([]byte, error) {
-	if len(currentKey) == 0 {
-		return nil, errors.New("current key is empty")
+func zeroBytes(buf []byte) {
+	for i := range buf {
+		buf[i] = 0
 	}
+}
+
+func (skm *SessionKeyManager) zeroizeKeyMaterialLocked(clearCurrent bool) {
+	if skm.previousKey != nil {
+		zeroBytes(skm.previousKey)
+		skm.previousKey = nil
+	}
+	if clearCurrent && skm.currentKey != nil {
+		zeroBytes(skm.currentKey)
+		skm.currentKey = nil
+	}
+	if skm.pendingKey != nil {
+		zeroBytes(skm.pendingKey)
+		skm.pendingKey = nil
+	}
+	if skm.pendingNonce != nil {
+		zeroBytes(skm.pendingNonce)
+		skm.pendingNonce = nil
+	}
+	if skm.pendingECDHPub != nil {
+		zeroBytes(skm.pendingECDHPub)
+		skm.pendingECDHPub = nil
+	}
+	skm.pendingECDHPriv = nil
+}
+
+func (skm *SessionKeyManager) enforceKeyMaterialLifetime(now time.Time) error {
+	skm.mu.Lock()
+	defer skm.mu.Unlock()
+
+	if skm.previousKey != nil && !skm.gracePeriodEnds.IsZero() && now.After(skm.gracePeriodEnds) {
+		zeroBytes(skm.previousKey)
+		skm.previousKey = nil
+	}
+	if skm.currentKey == nil {
+		return errors.New("no encryption key available")
+	}
+	if !skm.keyCreatedAt.IsZero() && now.Sub(skm.keyCreatedAt) > KeyMaterialMaxLifetime {
+		skm.zeroizeKeyMaterialLocked(true)
+		return errors.New("session key material lifetime exceeded; reconnect required")
+	}
+	return nil
+}
+
+func deriveForwardSecureRotatedKey(sharedSecret, reqNonce, respNonce, initiatorPub, responderPub []byte) ([]byte, error) {
 	if len(sharedSecret) == 0 {
 		return nil, errors.New("shared secret is empty")
 	}
 	saltH := sha256.New()
-	saltH.Write(currentKey)
-	saltH.Write([]byte{':'})
 	saltH.Write(reqNonce)
 	saltH.Write([]byte{':'})
 	saltH.Write(respNonce)
@@ -312,7 +357,6 @@ func (skm *SessionKeyManager) HandleKeyRequest(req *KeyRequestPayload) (*KeyResp
 		return nil, fmt.Errorf("failed to compute ecdh shared secret: %w", err)
 	}
 	newKey, err := deriveForwardSecureRotatedKey(
-		skm.currentKey,
 		sharedSecret,
 		req.Nonce,
 		respNonce,
@@ -360,7 +404,6 @@ func (skm *SessionKeyManager) HandleKeyResponse(resp *KeyResponsePayload) (*KeyC
 		return nil, fmt.Errorf("failed to compute ecdh shared secret: %w", err)
 	}
 	newKey, err := deriveForwardSecureRotatedKey(
-		skm.currentKey,
 		sharedSecret,
 		skm.pendingNonce,
 		resp.Nonce,
@@ -402,6 +445,9 @@ func (skm *SessionKeyManager) HandleKeyConfirm(confirm *KeyConfirmPayload) error
 	}
 
 	// Activate new key
+	if skm.previousKey != nil {
+		zeroBytes(skm.previousKey)
+	}
 	skm.previousKey = skm.currentKey
 	skm.currentKey = skm.pendingKey
 	skm.pendingKey = nil
@@ -431,6 +477,9 @@ func (skm *SessionKeyManager) ActivateKey() error {
 	}
 
 	// Activate new key
+	if skm.previousKey != nil {
+		zeroBytes(skm.previousKey)
+	}
 	skm.previousKey = skm.currentKey
 	skm.currentKey = skm.pendingKey
 	skm.pendingKey = nil
@@ -452,6 +501,10 @@ func (skm *SessionKeyManager) ActivateKey() error {
 
 // Encrypt encrypts data with the current key
 func (skm *SessionKeyManager) Encrypt(plaintext []byte) ([]byte, error) {
+	if err := skm.enforceKeyMaterialLifetime(time.Now().UTC()); err != nil {
+		return nil, err
+	}
+
 	skm.mu.RLock()
 	key := skm.currentKey
 	secureEnabled := skm.secureEnabled
@@ -472,6 +525,10 @@ func (skm *SessionKeyManager) Encrypt(plaintext []byte) ([]byte, error) {
 
 // Decrypt decrypts data, trying current key first, then previous key during grace period
 func (skm *SessionKeyManager) Decrypt(ciphertext []byte) ([]byte, error) {
+	if err := skm.enforceKeyMaterialLifetime(time.Now().UTC()); err != nil {
+		return nil, err
+	}
+
 	skm.mu.RLock()
 	currentKey := skm.currentKey
 	previousKey := skm.previousKey
@@ -595,16 +652,18 @@ func (skm *SessionKeyManager) registerReplayCiphertext(ciphertext []byte, ts int
 	now := time.Now().UTC().Unix()
 	expiry := ts + int64((SecureReplayWindow + time.Minute).Seconds())
 
-	if skm.replayStatsDB != nil {
-		isReplay, err := skm.replayStatsDB.CheckAndStoreReplayToken(skm.replayScope(), token, expiry)
-		if err != nil {
-			log.Printf("[SECURE] [%s] Persistent replay check failed: %v", skm.endpointName, err)
-		} else if isReplay {
-			return errors.New("replay detected")
-		}
-		if err := skm.replayStatsDB.DeleteExpiredReplayTokens(now); err != nil {
-			log.Printf("[SECURE] [%s] Persistent replay cleanup failed: %v", skm.endpointName, err)
-		}
+	if skm.replayStatsDB == nil {
+		return errors.New("persistent replay storage unavailable")
+	}
+	isReplay, err := skm.replayStatsDB.CheckAndStoreReplayToken(skm.replayScope(), token, expiry)
+	if err != nil {
+		return fmt.Errorf("persistent replay check failed: %w", err)
+	}
+	if isReplay {
+		return errors.New("replay detected")
+	}
+	if err := skm.replayStatsDB.DeleteExpiredReplayTokens(now); err != nil {
+		return fmt.Errorf("persistent replay cleanup failed: %w", err)
 	}
 
 	skm.mu.Lock()

@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net"
@@ -33,7 +34,7 @@ type TCPTunnelServer struct {
 	replaySeen    map[string]int64
 }
 
-const secureRegistrationWindow = 5 * time.Minute
+const secureRegistrationWindow = 2 * time.Minute
 
 // EndpointStats holds statistics for an endpoint
 type EndpointStats struct {
@@ -170,16 +171,19 @@ func (s *TCPTunnelServer) registerSecureRegistrationReplayToken(cid string, ts i
 	expiry := ts + int64((secureRegistrationWindow + time.Minute).Seconds())
 	token := cid + "|" + strconv.FormatInt(ts, 10) + "|" + proof
 
-	if s.statsDB != nil {
-		isReplay, err := s.statsDB.CheckAndStoreReplayToken("secure_reg", token, expiry)
-		if err != nil {
-			DebugLog("[TCP TUNNEL] Persistent registration replay check failed: %v", err)
-		} else if isReplay {
-			return errors.New("registration replay detected")
-		}
-		if err := s.statsDB.DeleteExpiredReplayTokens(now); err != nil {
-			DebugLog("[TCP TUNNEL] Persistent registration replay cleanup failed: %v", err)
-		}
+	if s.statsDB == nil {
+		return errors.New("persistent replay storage unavailable")
+	}
+
+	isReplay, err := s.statsDB.CheckAndStoreReplayToken("secure_reg", token, expiry)
+	if err != nil {
+		return fmt.Errorf("persistent registration replay check failed: %w", err)
+	}
+	if isReplay {
+		return errors.New("registration replay detected")
+	}
+	if err := s.statsDB.DeleteExpiredReplayTokens(now); err != nil {
+		return fmt.Errorf("persistent registration replay cleanup failed: %w", err)
 	}
 
 	s.replayMu.Lock()

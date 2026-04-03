@@ -806,11 +806,14 @@ func startServer(name string, config *ListenConfig, handler http.Handler, rateLi
 					log.Printf("Failed to load certificate for server '%s': %v", name, err)
 					return
 				}
+				EnsureOCSPStaple(&tlsConfig.Certificates[0], "server:"+name)
 				registerTLSPinHash(&tlsConfig.Certificates[0])
 			} else if config.Cert == "auto" {
 				tlsConfig.GetCertificate = func(info *tls.ClientHelloInfo) (*tls.Certificate, error) {
 					cert, certErr := GenerateCertForHost(info.ServerName)
 					if certErr == nil && cert != nil {
+						cert = cloneTLSCertificate(cert)
+						EnsureOCSPStaple(cert, "auto:"+info.ServerName)
 						registerTLSPinHash(cert, info.ServerName)
 					}
 					return cert, certErr
@@ -823,6 +826,7 @@ func startServer(name string, config *ListenConfig, handler http.Handler, rateLi
 				}
 				tlsConfig = acmeTLSConfig.Clone()
 				for i := range tlsConfig.Certificates {
+					EnsureOCSPStaple(&tlsConfig.Certificates[i], "acme-static:"+name)
 					registerTLSPinHash(&tlsConfig.Certificates[i])
 				}
 				if tlsConfig.GetCertificate != nil {
@@ -830,6 +834,8 @@ func startServer(name string, config *ListenConfig, handler http.Handler, rateLi
 					tlsConfig.GetCertificate = func(info *tls.ClientHelloInfo) (*tls.Certificate, error) {
 						cert, certErr := baseGetCertificate(info)
 						if certErr == nil && cert != nil {
+							cert = cloneTLSCertificate(cert)
+							EnsureOCSPStaple(cert, "acme:"+info.ServerName)
 							registerTLSPinHash(cert, info.ServerName)
 						}
 						return cert, certErr
