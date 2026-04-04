@@ -18,6 +18,7 @@ type RequestPayload struct {
 	HeaderData []byte
 	Body       io.ReadCloser
 	Timeout    time.Duration
+	GridFrame  *ForwardFrame
 }
 
 // EndpointInfo contains information about a connected endpoint
@@ -40,7 +41,7 @@ type TunnelManagerInterface interface {
 
 	// 通用隧道操作方法
 	SendRequestStream(ctx context.Context, tunnelName, endpointName string, reqPayload *RequestPayload) (io.ReadCloser, []byte, error)
-	SendProxyConnect(ctx context.Context, tunnelName, endpointName string, host string, port int, useTLS bool, clientConn net.Conn, clientIP string) (<-chan struct{}, error)
+	SendProxyConnect(ctx context.Context, tunnelName, endpointName string, host string, port int, useTLS bool, clientConn net.Conn, clientIP string, frame *ForwardFrame) (<-chan struct{}, error)
 	GetRandomEndpointFromTunnels(tunnelNames []string) (string, string, error)
 	FindTunnelForEndpoint(endpointName string) (string, bool)
 	GetEndpointsInfo(tunnelName string, stats *StatsCollector) map[string]*EndpointInfo

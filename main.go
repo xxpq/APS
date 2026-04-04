@@ -417,6 +417,19 @@ func main() {
 		log.Fatalf("Failed to load config: %v", err)
 	}
 
+	if err := ReconcileGlobalGridRuntime(config); err != nil {
+		log.Fatalf("Failed to initialize grid runtime: %v", err)
+	}
+	gridRuntime := GetGlobalGridRuntime()
+	if gridRuntime != nil {
+		defer func() {
+			if err := gridRuntime.Close(); err != nil {
+				log.Printf("[GRID] Failed to close grid runtime: %v", err)
+			}
+		}()
+		log.Printf("[GRID] Enabled deployment mode: %s", config.Grid.Deployment.Mode)
+	}
+
 	InitACME(config)
 
 	// Initialize shared database
@@ -588,6 +601,11 @@ func createServerHandler(serverName string, mappings []*Mapping, serverConfig *L
 
 	authHandlers := &AuthHandlers{}
 	authHandlers.RegisterHandlers(mux)
+
+	if gridRuntime := GetGlobalGridRuntime(); gridRuntime != nil {
+		gridHandlers := NewGridHandlers(config, gridRuntime, serverName)
+		gridHandlers.RegisterHandlers(mux)
+	}
 
 	mux.HandleFunc("/.replay", replayManager.ServeHTTP)
 

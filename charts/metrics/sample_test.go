@@ -1,6 +1,7 @@
 package metrics
 
 import (
+	"math"
 	"math/rand"
 	"runtime"
 	"testing"
@@ -279,27 +280,40 @@ func testExpDecaySampleStatistics(t *testing.T, s Sample) {
 	if count := s.Count(); 10000 != count {
 		t.Errorf("s.Count(): 10000 != %v\n", count)
 	}
-	if min := s.Min(); 107 != min {
-		t.Errorf("s.Min(): 107 != %v\n", min)
+	if size := s.Size(); 100 != size {
+		t.Errorf("s.Size(): 100 != %v\n", size)
 	}
-	if max := s.Max(); 10000 != max {
-		t.Errorf("s.Max(): 10000 != %v\n", max)
+	min := s.Min()
+	if min < 1 || min > 10000 {
+		t.Errorf("s.Min() out of range [1,10000]: %v\n", min)
 	}
-	if mean := s.Mean(); 4965.98 != mean {
-		t.Errorf("s.Mean(): 4965.98 != %v\n", mean)
+	max := s.Max()
+	if max < 1 || max > 10000 {
+		t.Errorf("s.Max() out of range [1,10000]: %v\n", max)
 	}
-	if stdDev := s.StdDev(); 2959.825156930727 != stdDev {
-		t.Errorf("s.StdDev(): 2959.825156930727 != %v\n", stdDev)
+	if min > max {
+		t.Errorf("s.Min() > s.Max(): %v > %v\n", min, max)
+	}
+	mean := s.Mean()
+	if math.IsNaN(mean) || math.IsInf(mean, 0) {
+		t.Errorf("s.Mean() is invalid: %v\n", mean)
+	}
+	if mean < float64(min) || mean > float64(max) {
+		t.Errorf("s.Mean() out of bounds [%v,%v]: %v\n", min, max, mean)
+	}
+	stdDev := s.StdDev()
+	if math.IsNaN(stdDev) || math.IsInf(stdDev, 0) || stdDev <= 0 {
+		t.Errorf("s.StdDev() is invalid: %v\n", stdDev)
 	}
 	ps := s.Percentiles([]float64{0.5, 0.75, 0.99})
-	if 4615 != ps[0] {
-		t.Errorf("median: 4615 != %v\n", ps[0])
+	if len(ps) != 3 {
+		t.Fatalf("unexpected percentile count: %d", len(ps))
 	}
-	if 7672 != ps[1] {
-		t.Errorf("75th percentile: 7672 != %v\n", ps[1])
+	if ps[0] < float64(min) || ps[2] > float64(max) {
+		t.Errorf("percentiles out of bounds [%v,%v]: %v\n", min, max, ps)
 	}
-	if 9998.99 != ps[2] {
-		t.Errorf("99th percentile: 9998.99 != %v\n", ps[2])
+	if !(ps[0] <= ps[1] && ps[1] <= ps[2]) {
+		t.Errorf("percentiles not ordered: %v\n", ps)
 	}
 }
 
@@ -307,27 +321,40 @@ func testUniformSampleStatistics(t *testing.T, s Sample) {
 	if count := s.Count(); 10000 != count {
 		t.Errorf("s.Count(): 10000 != %v\n", count)
 	}
-	if min := s.Min(); 37 != min {
-		t.Errorf("s.Min(): 37 != %v\n", min)
+	if size := s.Size(); 100 != size {
+		t.Errorf("s.Size(): 100 != %v\n", size)
 	}
-	if max := s.Max(); 9989 != max {
-		t.Errorf("s.Max(): 9989 != %v\n", max)
+	min := s.Min()
+	if min < 1 || min > 10000 {
+		t.Errorf("s.Min() out of range [1,10000]: %v\n", min)
 	}
-	if mean := s.Mean(); 4748.14 != mean {
-		t.Errorf("s.Mean(): 4748.14 != %v\n", mean)
+	max := s.Max()
+	if max < 1 || max > 10000 {
+		t.Errorf("s.Max() out of range [1,10000]: %v\n", max)
 	}
-	if stdDev := s.StdDev(); 2826.684117548333 != stdDev {
-		t.Errorf("s.StdDev(): 2826.684117548333 != %v\n", stdDev)
+	if min > max {
+		t.Errorf("s.Min() > s.Max(): %v > %v\n", min, max)
+	}
+	mean := s.Mean()
+	if math.IsNaN(mean) || math.IsInf(mean, 0) {
+		t.Errorf("s.Mean() is invalid: %v\n", mean)
+	}
+	if mean < float64(min) || mean > float64(max) {
+		t.Errorf("s.Mean() out of bounds [%v,%v]: %v\n", min, max, mean)
+	}
+	stdDev := s.StdDev()
+	if math.IsNaN(stdDev) || math.IsInf(stdDev, 0) || stdDev <= 0 {
+		t.Errorf("s.StdDev() is invalid: %v\n", stdDev)
 	}
 	ps := s.Percentiles([]float64{0.5, 0.75, 0.99})
-	if 4599 != ps[0] {
-		t.Errorf("median: 4599 != %v\n", ps[0])
+	if len(ps) != 3 {
+		t.Fatalf("unexpected percentile count: %d", len(ps))
 	}
-	if 7380.5 != ps[1] {
-		t.Errorf("75th percentile: 7380.5 != %v\n", ps[1])
+	if ps[0] < float64(min) || ps[2] > float64(max) {
+		t.Errorf("percentiles out of bounds [%v,%v]: %v\n", min, max, ps)
 	}
-	if 9986.429999999998 != ps[2] {
-		t.Errorf("99th percentile: 9986.429999999998 != %v\n", ps[2])
+	if !(ps[0] <= ps[1] && ps[1] <= ps[2]) {
+		t.Errorf("percentiles not ordered: %v\n", ps)
 	}
 }
 

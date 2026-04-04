@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"crypto/tls"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -103,6 +105,24 @@ func NewMapRemoteProxy(config *Config, harManager *HarLoggerManager, tunnelManag
 	}
 
 	return p
+}
+
+func (p *MapRemoteProxy) sendRequestStreamViaDataPlane(ctx context.Context, tunnelName, endpointName string, reqPayload *RequestPayload) (io.ReadCloser, []byte, error) {
+	if runtime := GetGlobalGridRuntime(); runtime != nil {
+		if engine := NewGridExecutionEngine(runtime, p.tunnelManager, p.serverName); engine != nil {
+			return engine.SendRequestStream(ctx, tunnelName, endpointName, reqPayload)
+		}
+	}
+	return p.tunnelManager.SendRequestStream(ctx, tunnelName, endpointName, reqPayload)
+}
+
+func (p *MapRemoteProxy) sendProxyConnectViaDataPlane(ctx context.Context, tunnelName, endpointName string, host string, port int, useTLS bool, clientConn net.Conn, clientIP string) (<-chan struct{}, error) {
+	if runtime := GetGlobalGridRuntime(); runtime != nil {
+		if engine := NewGridExecutionEngine(runtime, p.tunnelManager, p.serverName); engine != nil {
+			return engine.SendProxyConnect(ctx, tunnelName, endpointName, host, port, useTLS, clientConn, clientIP)
+		}
+	}
+	return p.tunnelManager.SendProxyConnect(ctx, tunnelName, endpointName, host, port, useTLS, clientConn, clientIP, nil)
 }
 
 // createProxyClient 为指定的代理 URL 创建 HTTP 客户端

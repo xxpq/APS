@@ -8,20 +8,25 @@ import (
 
 // ImmutableConnectionContext contains all immutable inputs required to establish one tunnel session.
 type ImmutableConnectionContext struct {
-	ServerAddress     string
-	ConfigID          string
-	ServerName        string
-	TunnelName        string
-	EndpointName      string
-	SessionCredential string
-	SessionExpiresAt  int64
-	KDFVersion        string
-	KDFSalt           string
-	PortMappings      []PortMappingConfig
-	SSH               *EndpointSSHConfig
-	MTLSCertFile      string
-	MTLSKeyFile       string
-	MTLSCAFile        string
+	ServerAddress       string
+	ConfigID            string
+	ServerName          string
+	TunnelName          string
+	EndpointName        string
+	SessionCredential   string
+	SessionExpiresAt    int64
+	KDFVersion          string
+	KDFSalt             string
+	PortMappings        []PortMappingConfig
+	GatewayListen       string
+	GatewayAddress      string
+	GatewayToken        string
+	GatewayDiscovery    bool
+	GatewayDiscoverPort int
+	SSH                 *EndpointSSHConfig
+	MTLSCertFile        string
+	MTLSKeyFile         string
+	MTLSCAFile          string
 }
 
 func normalizeServerAddressForSession(serverAddress string) string {
@@ -117,9 +122,19 @@ func BuildImmutableConnectionContext(serverAddress, configID string) (*Immutable
 		KDFVersion:        strings.TrimSpace(cfg.KDFVersion),
 		KDFSalt:           strings.TrimSpace(cfg.KDFSalt),
 		PortMappings:      clonePortMappingsForContext(cfg.PortMappings),
-		SSH:               cloneEndpointSSHConfigForContext(cfg.SSH),
-		MTLSCertFile:      strings.TrimSpace(*mtlsCertFile),
-		MTLSKeyFile:       strings.TrimSpace(*mtlsKeyFile),
-		MTLSCAFile:        strings.TrimSpace(*mtlsCAFile),
+		GatewayListen:     strings.TrimSpace(cfg.GatewayListen),
+		GatewayAddress:    strings.TrimSpace(cfg.GatewayAddress),
+		GatewayToken:      strings.TrimSpace(cfg.GatewayToken),
+		GatewayDiscovery:  cfg.GatewayDiscovery,
+		GatewayDiscoverPort: func() int {
+			if cfg.GatewayDiscoverPort > 0 {
+				return cfg.GatewayDiscoverPort
+			}
+			return defaultGatewayDiscoverPort
+		}(),
+		SSH:          cloneEndpointSSHConfigForContext(cfg.SSH),
+		MTLSCertFile: strings.TrimSpace(*mtlsCertFile),
+		MTLSKeyFile:  strings.TrimSpace(*mtlsKeyFile),
+		MTLSCAFile:   strings.TrimSpace(*mtlsCAFile),
 	}, nil
 }

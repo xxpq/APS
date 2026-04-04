@@ -2,10 +2,23 @@ package pty
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"os"
 	"testing"
 )
+
+func openOrSkip(t *testing.T) (*os.File, *os.File) {
+	t.Helper()
+	ptyFile, ttyFile, err := Open()
+	if errors.Is(err, ErrUnsupported) {
+		t.Skipf("pty is unsupported on this platform: %v", err)
+	}
+	if err != nil {
+		t.Fatalf("Unexpected error from Open: %v", err)
+	}
+	return ptyFile, ttyFile
+}
 
 // Will fill p from reader r
 func readBytes(r io.Reader, p []byte) error {
@@ -23,12 +36,9 @@ func readBytes(r io.Reader, p []byte) error {
 func TestOpen(t *testing.T) {
 	t.Parallel()
 
-	pty, tty, err := Open()
-	if err != nil {
-		t.Errorf("Unexpected error from Open: %s", err)
-	}
+	pty, tty := openOrSkip(t)
 
-	err = tty.Close()
+	err := tty.Close()
 	if err != nil {
 		t.Errorf("Unexpected error from tty Close: %s", err)
 	}
@@ -42,10 +52,7 @@ func TestOpen(t *testing.T) {
 func TestName(t *testing.T) {
 	t.Parallel()
 
-	pty, tty, err := Open()
-	if err != nil {
-		t.Errorf("Unexpected error from Open: %s", err)
-	}
+	pty, tty := openOrSkip(t)
 
 	// Check name isn't empty. There's variation on what exactly the OS calls these files.
 	if pty.Name() == "" {
@@ -55,7 +62,7 @@ func TestName(t *testing.T) {
 		t.Error("tty name was empty")
 	}
 
-	err = tty.Close()
+	err := tty.Close()
 	if err != nil {
 		t.Errorf("Unexpected error from tty Close: %s", err)
 	}
@@ -72,10 +79,7 @@ func TestName(t *testing.T) {
 func TestOpenByName(t *testing.T) {
 	t.Parallel()
 
-	pty, tty, err := Open()
-	if err != nil {
-		t.Fatal(err)
-	}
+	pty, tty := openOrSkip(t)
 	defer pty.Close()
 	defer tty.Close()
 
@@ -107,10 +111,7 @@ func TestOpenByName(t *testing.T) {
 func TestGetsize(t *testing.T) {
 	t.Parallel()
 
-	pty, tty, err := Open()
-	if err != nil {
-		t.Errorf("Unexpected error from Open: %s", err)
-	}
+	pty, tty := openOrSkip(t)
 
 	prows, pcols, err := Getsize(pty)
 	if err != nil {
@@ -143,12 +144,12 @@ func TestGetsize(t *testing.T) {
 func TestGetsizefull(t *testing.T) {
 	t.Parallel()
 
-	pty, tty, err := Open()
-	if err != nil {
-		t.Errorf("Unexpected error from Open: %s", err)
-	}
+	pty, tty := openOrSkip(t)
 
 	psize, err := GetsizeFull(pty)
+	if errors.Is(err, ErrUnsupported) {
+		t.Skipf("pty size APIs unsupported on this platform: %v", err)
+	}
 	if err != nil {
 		t.Errorf("Unexpected error from GetsizeFull: %s", err)
 	}
@@ -185,12 +186,12 @@ func TestGetsizefull(t *testing.T) {
 func TestSetsize(t *testing.T) {
 	t.Parallel()
 
-	pty, tty, err := Open()
-	if err != nil {
-		t.Errorf("Unexpected error from Open: %s", err)
-	}
+	pty, tty := openOrSkip(t)
 
 	psize, err := GetsizeFull(pty)
+	if errors.Is(err, ErrUnsupported) {
+		t.Skipf("pty size APIs unsupported on this platform: %v", err)
+	}
 	if err != nil {
 		t.Errorf("Unexpected error from GetsizeFull: %s", err)
 	}
@@ -237,10 +238,7 @@ func TestSetsize(t *testing.T) {
 func TestReadWriteText(t *testing.T) {
 	t.Parallel()
 
-	pty, tty, err := Open()
-	if err != nil {
-		t.Errorf("Unexpected error from Open: %s", err)
-	}
+	pty, tty := openOrSkip(t)
 
 	// Write to tty, read from pty
 	text := []byte("ping")
@@ -307,10 +305,7 @@ func TestReadWriteText(t *testing.T) {
 func TestReadWriteControls(t *testing.T) {
 	t.Parallel()
 
-	pty, tty, err := Open()
-	if err != nil {
-		t.Errorf("Unexpected error from Open: %s", err)
-	}
+	pty, tty := openOrSkip(t)
 
 	// Write the start of a line to pty
 	text := []byte("pind")

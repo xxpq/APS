@@ -1011,6 +1011,11 @@ func (h *AdminHandlers) handleEndpointConfigs(w http.ResponseWriter, r *http.Req
 				"kdfVersion":        kdfVersion,
 				"kdfSalt":           kdfSalt,
 				"portMappings":      endpoint.PortMappings,
+				"gatewayListen":     endpoint.GatewayListen,
+				"gatewayAddress":    endpoint.GatewayAddress,
+				"gatewayToken":      endpoint.GatewayToken,
+				"gatewayDiscovery":  endpoint.GatewayDiscovery,
+				"gatewayDiscoverPort": endpoint.GatewayDiscoverPort,
 				"ssh":               endpoint.SSH,
 			},
 		})
@@ -1136,6 +1141,11 @@ func (h *AdminHandlers) pushConfigToEndpoint(configID, tunnelName, endpointName 
 		"kdfVersion":        kdfVersion,
 		"kdfSalt":           kdfSalt,
 		"portMappings":      config.PortMappings,
+		"gatewayListen":     config.GatewayListen,
+		"gatewayAddress":    config.GatewayAddress,
+		"gatewayToken":      config.GatewayToken,
+		"gatewayDiscovery":  config.GatewayDiscovery,
+		"gatewayDiscoverPort": config.GatewayDiscoverPort,
 		"ssh":               config.SSH,
 	}
 

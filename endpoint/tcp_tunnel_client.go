@@ -35,6 +35,10 @@ var (
 	largeBufPool         = sync.Pool{New: func() any { return make([]byte, 256*1024) }}
 	activeTunnelRequests int64
 	requestStreams       sync.Map // map[string]*requestStreamState
+	sessionHolder        = struct {
+		mu      sync.RWMutex
+		session *smux.Session
+	}{}
 )
 
 func GetMediumBuffer() []byte { return mediumBufPool.Get().([]byte) }
@@ -48,6 +52,18 @@ func PutLargeBuffer(b []byte) {
 	if cap(b) >= 256*1024 {
 		largeBufPool.Put(b[:256*1024])
 	}
+}
+
+func setActiveTunnelSession(session *smux.Session) {
+	sessionHolder.mu.Lock()
+	sessionHolder.session = session
+	sessionHolder.mu.Unlock()
+}
+
+func getActiveTunnelSession() *smux.Session {
+	sessionHolder.mu.RLock()
+	defer sessionHolder.mu.RUnlock()
+	return sessionHolder.session
 }
 
 // TCP Tunnel Protocol Message Types (must match APS side)
@@ -104,6 +120,7 @@ const (
 	maxMessageSizeUpperBound = 32 * 1024 * 1024
 	minMessageSizeLowerBound = 1 * 1024 * 1024
 	maxFrameSizeEnv          = "APS_TUNNEL_MAX_FRAME_MB"
+	endpointHopGuardMax      = 128
 )
 
 var maxMessageSize = loadTunnelMaxMessageSize()
@@ -134,22 +151,57 @@ type RegisterPayload struct {
 
 // RegisterAckPayload for registration response
 type RegisterAckPayload struct {
-	Success     bool   `json:"success"`
-	Error       string `json:"error,omitempty"`
-	CipherSuite string `json:"cipher_suite,omitempty"`
+	Success            bool   `json:"success"`
+	Error              string `json:"error,omitempty"`
+	CipherSuite        string `json:"cipher_suite,omitempty"`
+	GridNodeID         string `json:"grid_node_id,omitempty"`
+	GridSessionToken   string `json:"grid_session_token,omitempty"`
+	GridSessionExpires int64  `json:"grid_session_expires,omitempty"`
 }
 
 // RequestPayloadTCP for HTTP request
 type RequestPayloadTCP struct {
-	ID   string `json:"id"`
-	URL  string `json:"url"`
-	Data []byte `json:"data"`
+	ID                string   `json:"id"`
+	URL               string   `json:"url"`
+	Data              []byte   `json:"data"`
+	RouteID           string   `json:"route_id,omitempty"`
+	RouteEpoch        int64    `json:"route_epoch,omitempty"`
+	HopCount          int      `json:"hop_count,omitempty"`
+	TraceID           string   `json:"trace_id,omitempty"`
+	GridRouteTo       string   `json:"grid_route_to,omitempty"`
+	GridNextHop       string   `json:"grid_next_hop,omitempty"`
+	GridHops          []string `json:"grid_hops,omitempty"`
+	GridFinalHost     string   `json:"grid_final_host,omitempty"`
+	GridFinalPort     int      `json:"grid_final_port,omitempty"`
+	GridFinalTLS      bool     `json:"grid_final_tls,omitempty"`
+	GridEnableQUIC    bool     `json:"grid_enable_quic,omitempty"`
+	GridEnableTCP     bool     `json:"grid_enable_tcp,omitempty"`
+	GridParallel      bool     `json:"grid_parallel,omitempty"`
+	GridEnableICE     bool     `json:"grid_enable_ice,omitempty"`
+	GridICECandidates []string `json:"grid_ice_candidates,omitempty"`
+	GridPayloadPlain  bool     `json:"grid_payload_plain,omitempty"`
 }
 
 type RequestStartPayloadTCP struct {
-	ID     string `json:"id"`
-	URL    string `json:"url"`
-	Header []byte `json:"header"`
+	ID                string   `json:"id"`
+	URL               string   `json:"url"`
+	Header            []byte   `json:"header"`
+	RouteID           string   `json:"route_id,omitempty"`
+	RouteEpoch        int64    `json:"route_epoch,omitempty"`
+	HopCount          int      `json:"hop_count,omitempty"`
+	TraceID           string   `json:"trace_id,omitempty"`
+	GridRouteTo       string   `json:"grid_route_to,omitempty"`
+	GridNextHop       string   `json:"grid_next_hop,omitempty"`
+	GridHops          []string `json:"grid_hops,omitempty"`
+	GridFinalHost     string   `json:"grid_final_host,omitempty"`
+	GridFinalPort     int      `json:"grid_final_port,omitempty"`
+	GridFinalTLS      bool     `json:"grid_final_tls,omitempty"`
+	GridEnableQUIC    bool     `json:"grid_enable_quic,omitempty"`
+	GridEnableTCP     bool     `json:"grid_enable_tcp,omitempty"`
+	GridParallel      bool     `json:"grid_parallel,omitempty"`
+	GridEnableICE     bool     `json:"grid_enable_ice,omitempty"`
+	GridICECandidates []string `json:"grid_ice_candidates,omitempty"`
+	GridPayloadPlain  bool     `json:"grid_payload_plain,omitempty"`
 }
 
 // ResponseHeaderPayloadTCP for HTTP response header
@@ -182,14 +234,51 @@ type requestStreamState struct {
 	km         *SessionKeyManager
 }
 
+type multiReadCloser struct {
+	reader  io.Reader
+	closers []io.Closer
+}
+
+func (m *multiReadCloser) Read(p []byte) (int, error) {
+	return m.reader.Read(p)
+}
+
+func (m *multiReadCloser) Close() error {
+	var closeErr error
+	for _, closer := range m.closers {
+		if closer == nil {
+			continue
+		}
+		if err := closer.Close(); err != nil && closeErr == nil {
+			closeErr = err
+		}
+	}
+	return closeErr
+}
+
 // ProxyConnectPayload for TCP proxy connect
 type ProxyConnectPayload struct {
-	ConnectionID string `json:"connection_id"`
-	Host         string `json:"host"`
-	Port         int    `json:"port"`
-	TLS          bool   `json:"tls"`
-	ClientIP     string `json:"client_ip"`
-	StreamMode   bool   `json:"stream_mode"`
+	ConnectionID      string   `json:"connection_id"`
+	Host              string   `json:"host"`
+	Port              int      `json:"port"`
+	TLS               bool     `json:"tls"`
+	ClientIP          string   `json:"client_ip"`
+	StreamMode        bool     `json:"stream_mode"`
+	RouteID           string   `json:"route_id,omitempty"`
+	RouteEpoch        int64    `json:"route_epoch,omitempty"`
+	HopCount          int      `json:"hop_count,omitempty"`
+	TraceID           string   `json:"trace_id,omitempty"`
+	GridRouteTo       string   `json:"grid_route_to,omitempty"`
+	GridNextHop       string   `json:"grid_next_hop,omitempty"`
+	GridHops          []string `json:"grid_hops,omitempty"`
+	GridFinalHost     string   `json:"grid_final_host,omitempty"`
+	GridFinalPort     int      `json:"grid_final_port,omitempty"`
+	GridFinalTLS      bool     `json:"grid_final_tls,omitempty"`
+	GridEnableQUIC    bool     `json:"grid_enable_quic,omitempty"`
+	GridEnableTCP     bool     `json:"grid_enable_tcp,omitempty"`
+	GridParallel      bool     `json:"grid_parallel,omitempty"`
+	GridEnableICE     bool     `json:"grid_enable_ice,omitempty"`
+	GridICECandidates []string `json:"grid_ice_candidates,omitempty"`
 }
 
 // ProxyConnectAckPayload for proxy connect response
@@ -547,17 +636,41 @@ func dialTunnelServer(serverAddress, serverHost string, expectedPinHash []byte, 
 		return nil, err
 	}
 
-	dialer := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}
-	conn, err := tls.DialWithDialer(dialer, "tcp", serverAddress, tlsConfig)
-	if err != nil {
+	var baseConn net.Conn
+	gatewayAddress := resolveGatewayAddress(connCtx)
+	if gatewayAddress != "" {
+		baseConn, err = dialTunnelServerViaGateway(gatewayAddress, serverAddress, connCtx.GatewayToken, connCtx.ConfigID)
+		if err != nil {
+			return nil, fmt.Errorf("dial via gateway %s failed: %w", gatewayAddress, err)
+		}
+		DebugLog("[GATEWAY] Using gateway %s for APS %s", gatewayAddress, serverAddress)
+	} else {
+		dialer := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}
+		baseConn, err = dialer.Dial("tcp", serverAddress)
+		if err != nil {
+			return nil, err
+		}
+	}
+	defer func() {
+		if baseConn != nil {
+			_ = baseConn.Close()
+		}
+	}()
+
+	tlsConn := tls.Client(baseConn, tlsConfig)
+	if err := tlsConn.SetDeadline(time.Now().Add(30 * time.Second)); err != nil {
 		return nil, err
 	}
+	if err := tlsConn.Handshake(); err != nil {
+		return nil, err
+	}
+	_ = tlsConn.SetDeadline(time.Time{})
 
-	upgradedConn, err := connectWithHTTPTunnelHandshake(conn, serverAddress)
+	upgradedConn, err := connectWithHTTPTunnelHandshake(tlsConn, serverAddress)
 	if err != nil {
-		conn.Close()
 		return nil, fmt.Errorf("CONNECT /.tunnel over TLS failed: %w", err)
 	}
+	baseConn = nil
 
 	DebugLog("[CONN] CONNECT /.tunnel handshake over TLS succeeded")
 	return upgradedConn, nil
@@ -565,21 +678,46 @@ func dialTunnelServer(serverAddress, serverHost string, expectedPinHash []byte, 
 
 // runTCPTunnelSession connects to APS via TCP tunnel protocol
 type TunnelSessionState struct {
-	mu                sync.RWMutex
-	TunnelName        string
-	EndpointName      string
-	SessionCredential string
-	SessionExpiresAt  int64
-	PortMappings      []PortMappingConfig
-	SSH               *EndpointSSHConfig
-	KDFVersion        string
-	KDFSalt           string
+	mu                  sync.RWMutex
+	TunnelName          string
+	EndpointName        string
+	SessionCredential   string
+	SessionExpiresAt    int64
+	GridNodeID          string
+	GridSessionToken    string
+	GridSessionExpires  int64
+	PortMappings        []PortMappingConfig
+	GatewayListen       string
+	GatewayAddress      string
+	GatewayToken        string
+	GatewayDiscovery    bool
+	GatewayDiscoverPort int
+	SSH                 *EndpointSSHConfig
+	KDFVersion          string
+	KDFSalt             string
+}
+
+func endpointGridBootstrapFromRegisterAck(ack RegisterAckPayload) (string, string, int64, error) {
+	gridNodeID := strings.TrimSpace(ack.GridNodeID)
+	if gridNodeID == "" {
+		return "", "", 0, errors.New("registration failed: aps does not provide grid_node_id; endpoint requires grid-capable APS")
+	}
+	gridSessionToken := strings.TrimSpace(ack.GridSessionToken)
+	if gridSessionToken == "" {
+		return "", "", 0, errors.New("registration failed: aps does not provide grid_session_token; endpoint requires grid-capable APS")
+	}
+	if ack.GridSessionExpires <= 0 {
+		return "", "", 0, errors.New("registration failed: aps does not provide valid grid_session_expires; endpoint requires grid-capable APS")
+	}
+	return gridNodeID, gridSessionToken, ack.GridSessionExpires, nil
 }
 
 func runTCPTunnelSession(ctx context.Context, connCtx ImmutableConnectionContext) bool {
 	serverAddress := normalizeServerAddressForSession(connCtx.ServerAddress)
 	DebugLog("Connecting to TCP tunnel server at %s", serverAddress)
 	DebugLog("[CONN] Tunnel transport mode: strict TLS + CONNECT /.tunnel")
+	ensureGatewayRuntime(connCtx)
+	ensureEndpointICEConnectivityRuntime(connCtx)
 
 	// 如果serverAddr不包含端口，则添加默认端口
 	if serverAddress == "" {
@@ -686,8 +824,16 @@ func runTCPTunnelSession(ctx context.Context, connCtx ImmutableConnectionContext
 		log.Printf("Registration failed: secure cipher suite negotiation failed (expected %s, got %s)", SecureCipherSuiteSPKITS, ack.CipherSuite)
 		return false
 	}
+	gridNodeID, gridSessionToken, gridSessionExpires, gridBootstrapErr := endpointGridBootstrapFromRegisterAck(ack)
+	if gridBootstrapErr != nil {
+		log.Printf("%v", gridBootstrapErr)
+		return true
+	}
 
 	log.Println("Successfully registered with TCP tunnel server")
+	setEndpointGridControlSession(gridNodeID, gridSessionToken, gridSessionExpires)
+	triggerEndpointGridControlMaintenance(serverAddress, connCtx, true)
+	triggerEndpointGridICEMaintenance(serverAddress, connCtx, true)
 
 	// Initialize session key manager
 	keyManager := NewSessionKeyManager(sessionCredential, connCtx.EndpointName)
@@ -711,7 +857,9 @@ func runTCPTunnelSession(ctx context.Context, connCtx ImmutableConnectionContext
 		log.Printf("Failed to create SMUX client: %v", err)
 		return false
 	}
+	setActiveTunnelSession(session)
 	defer session.Close()
+	defer setActiveTunnelSession(nil)
 
 	// Open control stream
 	controlStream, err := session.OpenStream()
@@ -728,15 +876,24 @@ func runTCPTunnelSession(ctx context.Context, connCtx ImmutableConnectionContext
 	go acceptStreams(session, tc, keyManager)
 
 	sessionState := &TunnelSessionState{
-		TunnelName:        connCtx.TunnelName,
-		EndpointName:      connCtx.EndpointName,
-		SessionCredential: connCtx.SessionCredential,
-		SessionExpiresAt:  connCtx.SessionExpiresAt,
-		PortMappings:      clonePortMappingsForContext(connCtx.PortMappings),
-		SSH:               cloneEndpointSSHConfigForContext(connCtx.SSH),
-		KDFVersion:        connCtx.KDFVersion,
-		KDFSalt:           connCtx.KDFSalt,
+		TunnelName:          connCtx.TunnelName,
+		EndpointName:        connCtx.EndpointName,
+		SessionCredential:   connCtx.SessionCredential,
+		SessionExpiresAt:    connCtx.SessionExpiresAt,
+		GridNodeID:          gridNodeID,
+		GridSessionToken:    gridSessionToken,
+		GridSessionExpires:  gridSessionExpires,
+		PortMappings:        clonePortMappingsForContext(connCtx.PortMappings),
+		GatewayListen:       strings.TrimSpace(connCtx.GatewayListen),
+		GatewayAddress:      strings.TrimSpace(connCtx.GatewayAddress),
+		GatewayToken:        strings.TrimSpace(connCtx.GatewayToken),
+		GatewayDiscovery:    connCtx.GatewayDiscovery,
+		GatewayDiscoverPort: connCtx.GatewayDiscoverPort,
+		SSH:                 cloneEndpointSSHConfigForContext(connCtx.SSH),
+		KDFVersion:          connCtx.KDFVersion,
+		KDFSalt:             connCtx.KDFSalt,
 	}
+	_ = EnsureNetCore()
 	if err := endpointSSHManager.Apply(connCtx.SSH); err != nil {
 		log.Printf("[SSH] Failed to apply runtime SSH config: %v", err)
 	}
@@ -798,6 +955,8 @@ func runTCPTunnelSession(ctx context.Context, connCtx ImmutableConnectionContext
 		case <-done:
 			return true
 		case <-heartbeatTicker.C:
+			triggerEndpointGridControlMaintenance(serverAddress, connCtx, false)
+			triggerEndpointGridICEMaintenance(serverAddress, connCtx, false)
 			tc.SendJSON(MsgTypeHeartbeat, HeartbeatPayload{Timestamp: time.Now().UnixNano()})
 		}
 	}
@@ -869,6 +1028,17 @@ func handleTCPRequestStart(tc *TunnelConn, msg *TunnelMessage, km *SessionKeyMan
 
 	requestID := reqPayload.ID
 	if requestID == "" {
+		return
+	}
+	if err := applyGridFrameMetadata(
+		extractGridDestination(reqPayload.URL),
+		reqPayload.RouteID,
+		reqPayload.RouteEpoch,
+		reqPayload.HopCount,
+		reqPayload.TraceID,
+	); err != nil {
+		log.Printf("[ERROR %s] %v", requestID, err)
+		sendTCPErrorResponse(tc, requestID, err.Error())
 		return
 	}
 
@@ -1047,12 +1217,65 @@ func sendScopedBinaryMessage(tc *TunnelConn, msgType uint8, scopeID string, data
 	})
 }
 
+func writeAllToPipe(pipeWriter *io.PipeWriter, data []byte) error {
+	offset := 0
+	for offset < len(data) {
+		n, err := pipeWriter.Write(data[offset:])
+		offset += n
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func handleTCPProbePing(tc *TunnelConn, msg *TunnelMessage) {
 	var payload ProbePayload
 	if err := msg.ParseJSON(&payload); err != nil {
 		return
 	}
 	_ = tc.SendJSON(MsgTypeProbePong, payload)
+}
+
+func extractGridDestination(rawURL string) string {
+	parsed, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil {
+		return strings.TrimSpace(rawURL)
+	}
+	if host := strings.TrimSpace(parsed.Hostname()); host != "" {
+		return host
+	}
+	return strings.TrimSpace(rawURL)
+}
+
+func applyGridFrameMetadata(destination, routeID string, routeEpoch int64, hopCount int, traceID string) error {
+	if hopCount > endpointHopGuardMax {
+		return fmt.Errorf("hop_guard rejected frame hop_count=%d max_hop=%d", hopCount, endpointHopGuardMax)
+	}
+	if strings.TrimSpace(routeID) != "" || strings.TrimSpace(traceID) != "" {
+		DebugLog("[GRID] frame dst=%s route=%s epoch=%d hop=%d trace=%s", strings.TrimSpace(destination), strings.TrimSpace(routeID), routeEpoch, hopCount, strings.TrimSpace(traceID))
+	}
+	RecordRelayPath(destination, strings.TrimSpace(routeID), routeEpoch, hopCount)
+	return nil
+}
+
+func normalizeGridHops(hops []string) []string {
+	if len(hops) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(hops))
+	for _, hop := range hops {
+		h := strings.TrimSpace(hop)
+		if h == "" {
+			continue
+		}
+		out = append(out, h)
+	}
+	return out
+}
+
+func generateRelayConnectionID() string {
+	return fmt.Sprintf("relay-%d", time.Now().UTC().UnixNano())
 }
 
 // handleTCPRequest handles HTTP request via TCP tunnel
@@ -1070,6 +1293,17 @@ func handleTCPRequest(tc *TunnelConn, msg *TunnelMessage, km *SessionKeyManager)
 	startAt := time.Now()
 	DebugLog("[REQ %s] Started: %s", requestID, reqPayload.URL)
 	DebugLog("[DEBUG %s] Handling TCP request, URL: %s", requestID, reqPayload.URL)
+	if err := applyGridFrameMetadata(
+		extractGridDestination(reqPayload.URL),
+		reqPayload.RouteID,
+		reqPayload.RouteEpoch,
+		reqPayload.HopCount,
+		reqPayload.TraceID,
+	); err != nil {
+		log.Printf("[ERROR %s] %v", requestID, err)
+		sendTCPErrorResponse(tc, requestID, err.Error())
+		return
+	}
 
 	// Use KeyManager.Decrypt instead of password-based decrypt
 	// This will try both currentKey and previousKey during grace period
@@ -1190,6 +1424,16 @@ func handleTCPProxyConnect(tc *TunnelConn, msg *TunnelMessage) {
 	connID := payload.ConnectionID
 	address := net.JoinHostPort(payload.Host, fmt.Sprintf("%d", payload.Port))
 	DebugLog("[PROXY %s] Connecting to %s (client: %s)", connID, address, payload.ClientIP)
+	if err := applyGridFrameMetadata(payload.Host, payload.RouteID, payload.RouteEpoch, payload.HopCount, payload.TraceID); err != nil {
+		log.Printf("[PROXY %s] %v", connID, err)
+		ack := ProxyConnectAckPayload{
+			ConnectionID: connID,
+			Success:      false,
+			Error:        err.Error(),
+		}
+		tc.SendJSON(MsgTypeProxyConnectAck, ack)
+		return
+	}
 
 	// Connect to target
 	conn, err := net.DialTimeout("tcp", address, 30*time.Second)
@@ -1330,14 +1574,19 @@ func sendTCPErrorResponse(tc *TunnelConn, requestID, errorMsg string) {
 
 // ConfigUpdatePayload is the payload for config update messages from APS
 type ConfigUpdatePayload struct {
-	TunnelName        string              `json:"tunnelName"`
-	EndpointName      string              `json:"endpointName"`
-	SessionCredential string              `json:"sessionCredential,omitempty"`
-	SessionExpiresAt  int64               `json:"sessionExpiresAt,omitempty"`
-	KDFVersion        string              `json:"kdfVersion,omitempty"`
-	KDFSalt           string              `json:"kdfSalt,omitempty"`
-	PortMappings      []PortMappingConfig `json:"portMappings,omitempty"`
-	SSH               *EndpointSSHConfig  `json:"ssh,omitempty"`
+	TunnelName          string              `json:"tunnelName"`
+	EndpointName        string              `json:"endpointName"`
+	SessionCredential   string              `json:"sessionCredential,omitempty"`
+	SessionExpiresAt    int64               `json:"sessionExpiresAt,omitempty"`
+	KDFVersion          string              `json:"kdfVersion,omitempty"`
+	KDFSalt             string              `json:"kdfSalt,omitempty"`
+	PortMappings        []PortMappingConfig `json:"portMappings,omitempty"`
+	GatewayListen       string              `json:"gatewayListen,omitempty"`
+	GatewayAddress      string              `json:"gatewayAddress,omitempty"`
+	GatewayToken        string              `json:"gatewayToken,omitempty"`
+	GatewayDiscovery    bool                `json:"gatewayDiscovery,omitempty"`
+	GatewayDiscoverPort int                 `json:"gatewayDiscoverPort,omitempty"`
+	SSH                 *EndpointSSHConfig  `json:"ssh,omitempty"`
 }
 
 // MirrorUpdatePayload is sent by APS to inform endpoint of mirror addresses
@@ -1347,10 +1596,19 @@ type MirrorUpdatePayload struct {
 
 // handleConfigUpdate handles configuration update pushed from APS
 func handleConfigUpdate(tc *TunnelConn, msg *TunnelMessage, sessionState *TunnelSessionState) {
-	var payload ConfigUpdatePayload
+	payload := ConfigUpdatePayload{
+		GatewayDiscovery:    true,
+		GatewayDiscoverPort: defaultGatewayDiscoverPort,
+	}
 	if err := msg.ParseJSON(&payload); err != nil {
 		log.Printf("[CONFIG] Failed to parse config update: %v", err)
 		return
+	}
+	payload.GatewayListen = strings.TrimSpace(payload.GatewayListen)
+	payload.GatewayAddress = strings.TrimSpace(payload.GatewayAddress)
+	payload.GatewayToken = strings.TrimSpace(payload.GatewayToken)
+	if payload.GatewayDiscoverPort <= 0 {
+		payload.GatewayDiscoverPort = defaultGatewayDiscoverPort
 	}
 
 	DebugLog("[CONFIG] Received config update from APS")
@@ -1366,6 +1624,11 @@ func handleConfigUpdate(tc *TunnelConn, msg *TunnelMessage, sessionState *Tunnel
 	oldSessionCredential := sessionState.SessionCredential
 	oldKDFVersion := sessionState.KDFVersion
 	oldKDFSalt := sessionState.KDFSalt
+	oldGatewayListen := sessionState.GatewayListen
+	oldGatewayAddress := sessionState.GatewayAddress
+	oldGatewayToken := sessionState.GatewayToken
+	oldGatewayDiscovery := sessionState.GatewayDiscovery
+	oldGatewayDiscoverPort := sessionState.GatewayDiscoverPort
 
 	// Check for critical changes that require reconnection
 	shouldReconnect := false
@@ -1382,6 +1645,12 @@ func handleConfigUpdate(tc *TunnelConn, msg *TunnelMessage, sessionState *Tunnel
 		shouldReconnect = true
 	}
 	if payload.KDFSalt != "" && payload.KDFSalt != oldKDFSalt {
+		shouldReconnect = true
+	}
+	if payload.GatewayAddress != oldGatewayAddress ||
+		payload.GatewayToken != oldGatewayToken ||
+		payload.GatewayDiscovery != oldGatewayDiscovery ||
+		payload.GatewayDiscoverPort != oldGatewayDiscoverPort {
 		shouldReconnect = true
 	}
 
@@ -1407,16 +1676,39 @@ func handleConfigUpdate(tc *TunnelConn, msg *TunnelMessage, sessionState *Tunnel
 	if payload.PortMappings != nil {
 		sessionState.PortMappings = clonePortMappingsForContext(payload.PortMappings)
 	}
+	sessionState.GatewayListen = payload.GatewayListen
+	sessionState.GatewayAddress = payload.GatewayAddress
+	sessionState.GatewayToken = payload.GatewayToken
+	sessionState.GatewayDiscovery = payload.GatewayDiscovery
+	sessionState.GatewayDiscoverPort = payload.GatewayDiscoverPort
 	sessionState.SSH = cloneEndpointSSHConfigForContext(payload.SSH)
+	updatedGatewayListen := sessionState.GatewayListen
+	updatedGatewayToken := sessionState.GatewayToken
+	updatedGatewayDiscoverPort := sessionState.GatewayDiscoverPort
 
 	sessionState.mu.Unlock()
+
+	if updatedGatewayListen != "" {
+		ensureGatewayRuntime(ImmutableConnectionContext{
+			GatewayListen:       updatedGatewayListen,
+			GatewayToken:        updatedGatewayToken,
+			GatewayDiscoverPort: updatedGatewayDiscoverPort,
+		})
+	}
+	ensureEndpointICEConnectivityRuntime(ImmutableConnectionContext{
+		GatewayListen:       updatedGatewayListen,
+		GatewayDiscoverPort: updatedGatewayDiscoverPort,
+	})
+	if oldGatewayListen != "" && updatedGatewayListen != "" && oldGatewayListen != updatedGatewayListen {
+		log.Printf("[GATEWAY] gatewayListen changed from %s to %s; runtime keeps first listener until process restart", oldGatewayListen, updatedGatewayListen)
+	}
 
 	if err := endpointSSHManager.Apply(payload.SSH); err != nil {
 		log.Printf("[SSH] Failed to apply SSH config update: %v", err)
 	}
 
 	if shouldReconnect {
-		log.Printf("[CONFIG] Critical configuration changed (tunnel/endpoint/sessionCredential/KDF), reconnecting...")
+		log.Printf("[CONFIG] Critical configuration changed (tunnel/endpoint/sessionCredential/KDF/gateway route), reconnecting...")
 		closeTunnelConnWithReason(tc, "config update requires reconnect")
 		return
 	}
@@ -1425,8 +1717,15 @@ func handleConfigUpdate(tc *TunnelConn, msg *TunnelMessage, sessionState *Tunnel
 	if payload.SSH != nil {
 		sshState = "configured"
 	}
-	DebugLog("[CONFIG] Updated runtime config: tunnel=%s, endpoint=%s, portMappings=%d, ssh=%s",
-		payload.TunnelName, payload.EndpointName, len(payload.PortMappings), sshState)
+	DebugLog("[CONFIG] Updated runtime config: tunnel=%s, endpoint=%s, portMappings=%d, gateway=%s, discovery=%v:%d, ssh=%s",
+		payload.TunnelName,
+		payload.EndpointName,
+		len(payload.PortMappings),
+		payload.GatewayAddress,
+		payload.GatewayDiscovery,
+		payload.GatewayDiscoverPort,
+		sshState,
+	)
 }
 
 // handleMirrorUpdate processes mirror address updates from APS
@@ -1569,6 +1868,7 @@ func handleKeyConfirm(tc *TunnelConn, msg *TunnelMessage, km *SessionKeyManager)
 
 // acceptStreams handles incoming streams from SMUX session
 func acceptStreams(session *smux.Session, controlTc *TunnelConn, km *SessionKeyManager) {
+	_ = km
 	for {
 		stream, err := session.AcceptStream()
 		if err != nil {
@@ -1579,8 +1879,15 @@ func acceptStreams(session *smux.Session, controlTc *TunnelConn, km *SessionKeyM
 	}
 }
 
+func handleEndpointGridTransitConnection(conn net.Conn) {
+	if conn == nil {
+		return
+	}
+	handleIncomingStream(conn, nil)
+}
+
 // handleIncomingStream handles a new stream from APS
-func handleIncomingStream(stream *smux.Stream, controlTc *TunnelConn) {
+func handleIncomingStream(stream net.Conn, controlTc *TunnelConn) {
 	defer stream.Close()
 
 	// Read ProxyConnectPayload from the stream
@@ -1592,6 +1899,10 @@ func handleIncomingStream(stream *smux.Stream, controlTc *TunnelConn) {
 	}
 
 	if msg.Type != MsgTypeProxyConnect {
+		if msg.Type == MsgTypeRequestStart {
+			handleIncomingRequestStream(tc, stream, msg)
+			return
+		}
 		log.Printf("Unexpected message type on new stream: %d", msg.Type)
 		return
 	}
@@ -1603,37 +1914,140 @@ func handleIncomingStream(stream *smux.Stream, controlTc *TunnelConn) {
 	}
 
 	connID := payload.ConnectionID
-	address := net.JoinHostPort(payload.Host, fmt.Sprintf("%d", payload.Port))
-	DebugLog("[PROXY %s] Connecting to %s (client: %s)", connID, address, payload.ClientIP)
-
-	// Dial backend
-	backendConn, err := net.DialTimeout("tcp", address, 30*time.Second)
-
-	ack := ProxyConnectAckPayload{
-		ConnectionID: connID,
-		Success:      err == nil,
+	finalHost := strings.TrimSpace(payload.GridFinalHost)
+	if finalHost == "" {
+		finalHost = strings.TrimSpace(payload.Host)
 	}
-	if err != nil {
-		ack.Error = err.Error()
-		log.Printf("[PROXY %s] Connection failed: %v", connID, err)
-	} else {
-		DebugLog("[PROXY %s] TCP connection established to %s", connID, address)
+	finalPort := payload.GridFinalPort
+	if finalPort <= 0 {
+		finalPort = payload.Port
 	}
+	finalTLS := payload.TLS
+	if payload.GridFinalHost != "" {
+		finalTLS = payload.GridFinalTLS
+	}
+	nextHop := strings.TrimSpace(payload.GridNextHop)
+	remainingHops := normalizeGridHops(payload.GridHops)
 
-	// Send Ack on control channel
-	if err := controlTc.SendJSON(MsgTypeProxyConnectAck, ack); err != nil {
-		log.Printf("[PROXY %s] Failed to send ack: %v", connID, err)
-		if backendConn != nil {
-			backendConn.Close()
+	if err := applyGridFrameMetadata(finalHost, payload.RouteID, payload.RouteEpoch, payload.HopCount, payload.TraceID); err != nil {
+		log.Printf("[PROXY %s] %v", connID, err)
+		if controlTc != nil {
+			ack := ProxyConnectAckPayload{
+				ConnectionID: connID,
+				Success:      false,
+				Error:        err.Error(),
+			}
+			_ = controlTc.SendJSON(MsgTypeProxyConnectAck, ack)
 		}
 		return
 	}
 
-	if err != nil {
+	var (
+		backendConn       net.Conn
+		relayConn         net.Conn
+		connErr           error
+		selectedTransport string
+		relayMode         string
+	)
+	if nextHop != "" {
+		selectedTransport = "relay"
+		relayMode = "p2p"
+		relayConn, connErr = dialGatewayPeerGrid(nextHop)
+		if connErr != nil {
+			relayMode = "aps-relay"
+			relaySession := getActiveTunnelSession()
+			if relaySession == nil {
+				connErr = errors.New("relay session not available")
+			} else {
+				relayConn, connErr = relaySession.OpenStream()
+			}
+		}
+		if connErr == nil {
+			nextForReceiver := ""
+			tail := []string(nil)
+			if len(remainingHops) > 0 {
+				nextForReceiver = remainingHops[0]
+				if len(remainingHops) > 1 {
+					tail = append(tail, remainingHops[1:]...)
+				}
+			}
+
+			relayTC := NewTunnelConn(relayConn)
+			relayPayload := ProxyConnectPayload{
+				ConnectionID:      generateRelayConnectionID(),
+				Host:              finalHost,
+				Port:              finalPort,
+				TLS:               finalTLS,
+				ClientIP:          payload.ClientIP,
+				RouteID:           payload.RouteID,
+				RouteEpoch:        payload.RouteEpoch,
+				HopCount:          payload.HopCount + 1,
+				TraceID:           payload.TraceID,
+				GridNextHop:       nextForReceiver,
+				GridHops:          tail,
+				GridFinalHost:     finalHost,
+				GridFinalPort:     finalPort,
+				GridFinalTLS:      finalTLS,
+				GridEnableQUIC:    payload.GridEnableQUIC,
+				GridEnableTCP:     payload.GridEnableTCP,
+				GridParallel:      payload.GridParallel,
+				GridEnableICE:     payload.GridEnableICE,
+				GridICECandidates: append([]string(nil), payload.GridICECandidates...),
+			}
+			if relayMode == "aps-relay" {
+				relayPayload.GridRouteTo = nextHop
+			}
+			connErr = relayTC.SendJSON(MsgTypeProxyConnect, relayPayload)
+			if connErr != nil && relayConn != nil {
+				_ = relayConn.Close()
+				relayConn = nil
+			}
+		}
+		if connErr == nil {
+			selectedTransport = relayMode
+		}
+		DebugLog("[PROXY %s] Transit relay next=%s remaining=%v final=%s:%d mode=%s", connID, nextHop, remainingHops, finalHost, finalPort, relayMode)
+	} else {
+		selectedTransport = "tcp"
+		backendConn, selectedTransport, connErr = dialGridBackendWithPolicy(finalHost, finalPort, finalTLS, payload)
+		DebugLog("[PROXY %s] Connecting to final backend %s:%d via %s (client: %s)", connID, finalHost, finalPort, selectedTransport, payload.ClientIP)
+	}
+
+	ack := ProxyConnectAckPayload{
+		ConnectionID: connID,
+		Success:      connErr == nil,
+	}
+	if connErr != nil {
+		ack.Error = connErr.Error()
+		log.Printf("[PROXY %s] Connection failed: %v", connID, connErr)
+	} else {
+		DebugLog("[PROXY %s] Proxy connection established (transit=%v transport=%s)", connID, relayConn != nil, selectedTransport)
+	}
+
+	// Send Ack on control channel
+	if controlTc != nil {
+		if err := controlTc.SendJSON(MsgTypeProxyConnectAck, ack); err != nil {
+			log.Printf("[PROXY %s] Failed to send ack: %v", connID, err)
+			if backendConn != nil {
+				backendConn.Close()
+			}
+			if relayConn != nil {
+				relayConn.Close()
+			}
+			return
+		}
+	}
+
+	if connErr != nil {
 		return
 	}
 
-	defer backendConn.Close()
+	if backendConn != nil {
+		defer backendConn.Close()
+	}
+	if relayConn != nil {
+		defer relayConn.Close()
+	}
 
 	// Bidirectional copy
 	DebugLog("[PROXY %s] Starting stream copy", connID)
@@ -1642,14 +2056,232 @@ func handleIncomingStream(stream *smux.Stream, controlTc *TunnelConn) {
 
 	go func() {
 		defer wg.Done()
-		io.Copy(stream, backendConn)
+		if relayConn != nil {
+			_, _ = io.Copy(stream, relayConn)
+			return
+		}
+		_, _ = io.Copy(stream, backendConn)
 	}()
 
 	go func() {
 		defer wg.Done()
-		io.Copy(backendConn, stream)
+		if relayConn != nil {
+			_, _ = io.Copy(relayConn, stream)
+			return
+		}
+		_, _ = io.Copy(backendConn, stream)
 	}()
 
 	wg.Wait()
 	DebugLog("[PROXY %s] Stream copy finished", connID)
+}
+
+func handleIncomingRequestStream(tc *TunnelConn, stream net.Conn, bootstrap *TunnelMessage) {
+	var payload RequestStartPayloadTCP
+	if err := bootstrap.ParseJSON(&payload); err != nil {
+		log.Printf("[GRID] Failed to parse request start payload: %v", err)
+		return
+	}
+
+	requestID := strings.TrimSpace(payload.ID)
+	if requestID == "" {
+		requestID = generateRelayConnectionID()
+	}
+
+	finalHost := strings.TrimSpace(payload.GridFinalHost)
+	if finalHost == "" {
+		finalHost = extractGridDestination(payload.URL)
+	}
+	if err := applyGridFrameMetadata(finalHost, payload.RouteID, payload.RouteEpoch, payload.HopCount, payload.TraceID); err != nil {
+		log.Printf("[GRID-REQ %s] %v", requestID, err)
+		sendTCPErrorResponse(tc, requestID, err.Error())
+		return
+	}
+
+	nextHop := strings.TrimSpace(payload.GridNextHop)
+	remainingHops := normalizeGridHops(payload.GridHops)
+	if nextHop != "" {
+		relayMode := "p2p"
+		relayConn, err := dialGatewayPeerGrid(nextHop)
+		if err != nil {
+			relayMode = "aps-relay"
+			relaySession := getActiveTunnelSession()
+			if relaySession == nil {
+				sendTCPErrorResponse(tc, requestID, "relay session not available")
+				return
+			}
+			relayConn, err = relaySession.OpenStream()
+			if err != nil {
+				sendTCPErrorResponse(tc, requestID, err.Error())
+				return
+			}
+		}
+		defer relayConn.Close()
+
+		nextForReceiver := ""
+		tail := []string(nil)
+		if len(remainingHops) > 0 {
+			nextForReceiver = remainingHops[0]
+			if len(remainingHops) > 1 {
+				tail = append(tail, remainingHops[1:]...)
+			}
+		}
+
+		relayPayload := payload
+		relayPayload.GridRouteTo = ""
+		relayPayload.GridNextHop = nextForReceiver
+		relayPayload.GridHops = tail
+		relayPayload.HopCount = payload.HopCount + 1
+		if relayMode == "aps-relay" {
+			relayPayload.GridRouteTo = nextHop
+		}
+
+		relayTC := NewTunnelConn(relayConn)
+		if err := relayTC.SendJSON(MsgTypeRequestStart, relayPayload); err != nil {
+			sendTCPErrorResponse(tc, requestID, err.Error())
+			return
+		}
+		DebugLog("[GRID-REQ %s] Transit relay next=%s remaining=%v final=%s mode=%s", requestID, nextHop, remainingHops, finalHost, relayMode)
+
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			_, _ = io.Copy(relayConn, stream)
+		}()
+		go func() {
+			defer wg.Done()
+			_, _ = io.Copy(stream, relayConn)
+		}()
+		wg.Wait()
+		return
+	}
+
+	if !payload.GridPayloadPlain {
+		sendTCPErrorResponse(tc, requestID, "encrypted request stream over relay is not supported")
+		return
+	}
+
+	req, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(payload.Header)))
+	if err != nil {
+		sendTCPErrorResponse(tc, requestID, "cannot read request header")
+		return
+	}
+
+	targetURL, err := url.Parse(payload.URL)
+	if err != nil {
+		sendTCPErrorResponse(tc, requestID, "invalid target url")
+		return
+	}
+	req.URL = targetURL
+	req.RequestURI = ""
+
+	pipeReader, pipeWriter := io.Pipe()
+	initialBody := req.Body
+	if initialBody != nil {
+		req.Body = &multiReadCloser{
+			reader:  io.MultiReader(initialBody, pipeReader),
+			closers: []io.Closer{initialBody, pipeReader},
+		}
+	} else {
+		req.Body = pipeReader
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		executeIncomingStreamHTTPRequest(tc, requestID, req)
+	}()
+
+	for {
+		msg, readErr := tc.ReadMessage()
+		if readErr != nil {
+			_ = pipeWriter.CloseWithError(readErr)
+			<-done
+			return
+		}
+		switch msg.Type {
+		case MsgTypeRequestChunkBin:
+			scopeID, chunkData, err := ParseScopedBinaryPayload(msg.Payload)
+			if err != nil {
+				_ = pipeWriter.CloseWithError(err)
+				<-done
+				return
+			}
+			if scopeID != requestID {
+				continue
+			}
+			if err := writeAllToPipe(pipeWriter, chunkData); err != nil {
+				_ = pipeWriter.CloseWithError(err)
+				<-done
+				return
+			}
+		case MsgTypeRequestEnd:
+			var endPayload RequestEndPayloadTCP
+			if err := msg.ParseJSON(&endPayload); err != nil {
+				_ = pipeWriter.CloseWithError(err)
+				<-done
+				return
+			}
+			if endPayload.ID != requestID {
+				continue
+			}
+			if endPayload.Error != "" {
+				_ = pipeWriter.CloseWithError(errors.New(endPayload.Error))
+			} else {
+				_ = pipeWriter.Close()
+			}
+			<-done
+			return
+		}
+	}
+}
+
+func executeIncomingStreamHTTPRequest(tc *TunnelConn, requestID string, req *http.Request) {
+	atomic.AddInt64(&activeTunnelRequests, 1)
+	defer atomic.AddInt64(&activeTunnelRequests, -1)
+	if req != nil && req.Body != nil {
+		defer req.Body.Close()
+	}
+
+	resp, err := sharedClient.Do(req)
+	if err != nil {
+		sendTCPErrorResponse(tc, requestID, err.Error())
+		return
+	}
+	defer resp.Body.Close()
+
+	headerBytes, err := httputil.DumpResponse(resp, false)
+	if err != nil {
+		sendTCPErrorResponse(tc, requestID, "failed to dump response")
+		return
+	}
+
+	if err := tc.SendJSON(MsgTypeResponseHeader, ResponseHeaderPayloadTCP{
+		ID:     requestID,
+		Header: headerBytes,
+	}); err != nil {
+		return
+	}
+
+	buf := GetLargeBuffer()
+	defer PutLargeBuffer(buf)
+
+	for {
+		n, readErr := resp.Body.Read(buf)
+		if n > 0 {
+			if err := sendScopedBinaryMessage(tc, MsgTypeResponseChunkBin, requestID, buf[:n]); err != nil {
+				return
+			}
+		}
+		if readErr == io.EOF {
+			break
+		}
+		if readErr != nil {
+			sendTCPErrorResponse(tc, requestID, "read body error")
+			return
+		}
+	}
+
+	_ = tc.SendJSON(MsgTypeResponseEnd, ResponseEndPayloadTCP{ID: requestID})
 }

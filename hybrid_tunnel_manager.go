@@ -74,9 +74,9 @@ func (htm *HybridTunnelManager) SendRequestStream(ctx context.Context, tunnelNam
 }
 
 // SendProxyConnect establishes a TCP proxy connection through the tunnel.
-func (htm *HybridTunnelManager) SendProxyConnect(ctx context.Context, tunnelName, endpointName string, host string, port int, useTLS bool, clientConn net.Conn, clientIP string) (<-chan struct{}, error) {
+func (htm *HybridTunnelManager) SendProxyConnect(ctx context.Context, tunnelName, endpointName string, host string, port int, useTLS bool, clientConn net.Conn, clientIP string, frame *ForwardFrame) (<-chan struct{}, error) {
 	if htm.tcpManager != nil {
-		return htm.tcpManager.SendProxyConnect(ctx, tunnelName, endpointName, host, port, useTLS, clientConn, clientIP)
+		return htm.tcpManager.SendProxyConnect(ctx, tunnelName, endpointName, host, port, useTLS, clientConn, clientIP, frame)
 	}
 	return nil, errors.New("no available tunnel manager for proxy connection")
 }

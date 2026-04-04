@@ -1,5 +1,34 @@
 {
   "debug": true,
+  "grid": {
+    "deployment": {
+      "enabled": true,
+      "mode": "standalone",
+      "sqlite_path": "aps_grid.db"
+    },
+    "routing": {
+      "strategy": "reliability",
+      "hop_guard": true,
+      "max_hop": 128,
+      "path_ttl_seconds": 120
+    },
+    "security": {
+      "default_token_ttl_seconds": 300
+    },
+    "relay": {
+      "enabled": true,
+      "max_relay_hops": 6,
+      "fallback_timeout_ms": 3000
+    },
+    "transport": {
+      "enable_quic": true,
+      "enable_tcp": true,
+      "parallel": true
+    },
+    "ice": {
+      "enabled": true
+    }
+  },
   "servers": {
     "default": {
       "port": 80,

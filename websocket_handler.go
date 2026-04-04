@@ -198,7 +198,7 @@ func (p *MapRemoteProxy) handleWebSocket(w http.ResponseWriter, r *http.Request)
 		// Get client IP for security audit logging
 		clientIP := r.RemoteAddr
 		DebugLog("%s[WS] Sending ProxyConnect to tunnel %s for %s:%d (TLS=%v)", logPrefix, tunnelName, host, port, useTLS)
-		_, err = p.tunnelManager.SendProxyConnect(ctx, tunnelName, endpointName, host, port, useTLS, serverSide, clientIP)
+		_, err = p.sendProxyConnectViaDataPlane(ctx, tunnelName, endpointName, host, port, useTLS, serverSide, clientIP)
 		if err != nil {
 			isError = true
 			log.Printf("%s[WS] Failed to establish proxy connection through tunnel: %v", logPrefix, err)

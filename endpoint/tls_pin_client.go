@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/hmac"
@@ -226,10 +227,37 @@ func fetchServerSPKIHashOverHTTPS(authority, serverName string) ([]byte, string,
 	return append([]byte(nil), hash...), hashHex, nil
 }
 
-func newPinnedHTTPClient(pin *endpointTLSPin) *http.Client {
+func (p *endpointTLSPin) verifyPinnedTLSConnection(cs tls.ConnectionState) error {
+	if len(cs.PeerCertificates) == 0 {
+		DebugLog("[CONN-INIT] Missing peer certificate while verifying %s", p.serverAddress)
+		return fmt.Errorf("%w: connectivity test failed", errEndpointTLSPinMismatch)
+	}
+	sum := sha256.Sum256(cs.PeerCertificates[0].RawSubjectPublicKeyInfo)
+	hashHex := hex.EncodeToString(sum[:])
+
+	p.mu.Lock()
+	_, ok := p.allowed[hashHex]
+	if ok {
+		p.activeHash = hashHex
+	}
+	summary := p.allowedSummaryLocked()
+	p.mu.Unlock()
+
+	if !ok {
+		DebugLog("[CONN-INIT] Pin mismatch for %s. cached=%s got=%s", p.serverAddress, summary, hashHex)
+		return fmt.Errorf("%w: connectivity test failed", errEndpointTLSPinMismatch)
+	}
+	return nil
+}
+
+func newPinnedHTTPClientWithDialContext(pin *endpointTLSPin, dialContext func(context.Context, string, string) (net.Conn, error)) *http.Client {
+	if dialContext == nil {
+		dialer := &net.Dialer{Timeout: 15 * time.Second, KeepAlive: 30 * time.Second}
+		dialContext = dialer.DialContext
+	}
 	transport := &http.Transport{
 		Proxy:               http.ProxyFromEnvironment,
-		DialContext:         (&net.Dialer{Timeout: 15 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+		DialContext:         dialContext,
 		ForceAttemptHTTP2:   true,
 		MaxIdleConns:        64,
 		MaxIdleConnsPerHost: 16,
@@ -238,28 +266,7 @@ func newPinnedHTTPClient(pin *endpointTLSPin) *http.Client {
 		TLSClientConfig: &tls.Config{
 			MinVersion: tls.VersionTLS13,
 			ServerName: pin.serverName,
-			VerifyConnection: func(cs tls.ConnectionState) error {
-				if len(cs.PeerCertificates) == 0 {
-					DebugLog("[CONN-INIT] Missing peer certificate while verifying %s", pin.serverAddress)
-					return fmt.Errorf("%w: connectivity test failed", errEndpointTLSPinMismatch)
-				}
-				sum := sha256.Sum256(cs.PeerCertificates[0].RawSubjectPublicKeyInfo)
-				hashHex := hex.EncodeToString(sum[:])
-
-				pin.mu.Lock()
-				_, ok := pin.allowed[hashHex]
-				if ok {
-					pin.activeHash = hashHex
-				}
-				summary := pin.allowedSummaryLocked()
-				pin.mu.Unlock()
-
-				if !ok {
-					DebugLog("[CONN-INIT] Pin mismatch for %s. cached=%s got=%s", pin.serverAddress, summary, hashHex)
-					return fmt.Errorf("%w: connectivity test failed", errEndpointTLSPinMismatch)
-				}
-				return nil
-			},
+			VerifyConnection: pin.verifyPinnedTLSConnection,
 		},
 	}
 
@@ -267,6 +274,10 @@ func newPinnedHTTPClient(pin *endpointTLSPin) *http.Client {
 		Transport: transport,
 		Timeout:   30 * time.Second,
 	}
+}
+
+func newPinnedHTTPClient(pin *endpointTLSPin) *http.Client {
+	return newPinnedHTTPClientWithDialContext(pin, nil)
 }
 
 func ensureEndpointTLSPin(serverAddress string) (*endpointTLSPin, error) {

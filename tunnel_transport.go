@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"fmt"
+	"io"
 	"log"
 	"math/rand"
 	"net/http"
@@ -76,7 +77,16 @@ func (t *TunnelRoundTripper) roundTripViaTunnel(req *http.Request, mapping *Mapp
 
 	// Send the request via the tunnel manager's gRPC stream
 	DebugLog("[TUNNEL] Sending request for %s via tunnel '%s' to endpoint '%s'", req.URL.String(), tunnelName, endpointName)
-	bodyStream, headerBytes, err := t.tunnelManager.SendRequestStream(req.Context(), tunnelName, endpointName, reqPayload)
+	var bodyStream io.ReadCloser
+	var headerBytes []byte
+	if runtime := GetGlobalGridRuntime(); runtime != nil {
+		if engine := NewGridExecutionEngine(runtime, t.tunnelManager, "http-roundtripper"); engine != nil {
+			bodyStream, headerBytes, err = engine.SendRequestStream(req.Context(), tunnelName, endpointName, reqPayload)
+		}
+	}
+	if bodyStream == nil && err == nil {
+		bodyStream, headerBytes, err = t.tunnelManager.SendRequestStream(req.Context(), tunnelName, endpointName, reqPayload)
+	}
 	if err != nil {
 		if bodyForTunnel != nil && bodyForTunnel != req.Body {
 			bodyForTunnel.Close()

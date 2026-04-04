@@ -33,6 +33,8 @@ const (
 	ServerTypeTCPUDP  = 4
 	ServerTypeHTTPUDP = 5
 	ServerTypeHTTP3   = 6 // Reserved
+
+	DefaultGatewayDiscoverPort = 37990
 )
 
 type Config struct {
@@ -44,6 +46,7 @@ type Config struct {
 	Tunnels           map[string]*TunnelConfig       `json:"tunnels,omitempty"`
 	Endpoints         map[string]*EndpointConfig_APS `json:"endpoints,omitempty"` // Endpoint configurations
 	Mirrors           map[string][]string            `json:"mirrors,omitempty"`   // Mirror groups
+	Grid              *GridConfig                    `json:"grid,omitempty"`
 	Auth              *AuthConfig                    `json:"auth,omitempty"`
 	AuthProviders     map[string]*AuthProviderConfig `json:"authProviders,omitempty"` // 第三方认证提供商配置
 	P12s              map[string]*P12Config          `json:"p12s,omitempty"`
@@ -58,15 +61,39 @@ type Config struct {
 
 // EndpointConfig_APS holds configuration for an endpoint in APS
 type EndpointConfig_APS struct {
-	TunnelName        string                `json:"tunnelName"`
-	EndpointName      string                `json:"endpointName"`
-	Password          string                `json:"password,omitempty"`
-	AllowMultiNode    bool                  `json:"allowMultiNode,omitempty"`
-	Mirror            string                `json:"mirror,omitempty"` // Reference to mirrors group
-	PortMappings      []EndpointPortMapping `json:"portMappings,omitempty"`
-	SSH               *EndpointSSHConfig    `json:"ssh,omitempty"`
-	LogLevel          *int                  `json:"logLevel,omitempty"`
-	LogRetentionHours *int                  `json:"logRetentionHours,omitempty"`
+	TunnelName          string                `json:"tunnelName"`
+	EndpointName        string                `json:"endpointName"`
+	Password            string                `json:"password,omitempty"`
+	AllowMultiNode      bool                  `json:"allowMultiNode,omitempty"`
+	Mirror              string                `json:"mirror,omitempty"` // Reference to mirrors group
+	PortMappings        []EndpointPortMapping `json:"portMappings,omitempty"`
+	GatewayListen       string                `json:"gatewayListen,omitempty"`       // gateway endpoint: local listen addr for leaf relay
+	GatewayAddress      string                `json:"gatewayAddress,omitempty"`      // leaf endpoint: gateway addr to reach APS
+	GatewayToken        string                `json:"gatewayToken,omitempty"`        // optional shared token for gateway relay auth
+	GatewayDiscovery    bool                  `json:"gatewayDiscovery,omitempty"`    // default true: leaf endpoint discovers gateway via LAN broadcast
+	GatewayDiscoverPort int                   `json:"gatewayDiscoverPort,omitempty"` // UDP discovery port
+	SSH                 *EndpointSSHConfig    `json:"ssh,omitempty"`
+	LogLevel            *int                  `json:"logLevel,omitempty"`
+	LogRetentionHours   *int                  `json:"logRetentionHours,omitempty"`
+}
+
+func (c *EndpointConfig_APS) UnmarshalJSON(data []byte) error {
+	type alias EndpointConfig_APS
+	defaulted := alias{
+		GatewayDiscovery:    true,
+		GatewayDiscoverPort: DefaultGatewayDiscoverPort,
+	}
+	if err := json.Unmarshal(data, &defaulted); err != nil {
+		return err
+	}
+	defaulted.GatewayListen = strings.TrimSpace(defaulted.GatewayListen)
+	defaulted.GatewayAddress = strings.TrimSpace(defaulted.GatewayAddress)
+	defaulted.GatewayToken = strings.TrimSpace(defaulted.GatewayToken)
+	if defaulted.GatewayDiscoverPort <= 0 {
+		defaulted.GatewayDiscoverPort = DefaultGatewayDiscoverPort
+	}
+	*c = EndpointConfig_APS(defaulted)
+	return nil
 }
 
 // EndpointPortMapping defines a port mapping between endpoints
@@ -865,6 +892,10 @@ func LoadConfig(filename string) (*Config, error) {
 }
 
 func processConfig(config *Config) error {
+	if err := ensureGridConfigSettings(config); err != nil {
+		return err
+	}
+
 	// 解析并验证每个 mapping
 	validMappings := make([]Mapping, 0, len(config.Mappings))
 	for i := range config.Mappings {
@@ -1077,6 +1108,7 @@ func (c *Config) Reload(filename string) (map[string]*ListenConfig, error) {
 	c.Scripting = newConfig.Scripting
 	c.Mappings = newConfig.Mappings
 	c.Auth = newConfig.Auth
+	c.Grid = newConfig.Grid
 	c.Debug = newConfig.Debug
 	c.Firewalls = newConfig.Firewalls // Add firewall hot reload
 	c.mu.Unlock()

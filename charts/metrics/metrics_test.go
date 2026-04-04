@@ -114,8 +114,8 @@ func Example() {
 
 	// Threadsafe registration
 	t := GetOrRegisterTimer("db.get.latency", nil)
-	t.Time(func() {})
 	t.Update(1)
+	t.Update(2)
 
 	fmt.Println(c.Count())
 	fmt.Println(t.Min())

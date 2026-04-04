@@ -96,23 +96,58 @@ type RegisterPayload struct {
 
 // RegisterAckPayload is sent by APS to acknowledge registration
 type RegisterAckPayload struct {
-	Success     bool   `json:"success"`
-	Error       string `json:"error,omitempty"`
-	CipherSuite string `json:"cipher_suite,omitempty"`
+	Success            bool   `json:"success"`
+	Error              string `json:"error,omitempty"`
+	CipherSuite        string `json:"cipher_suite,omitempty"`
+	GridNodeID         string `json:"grid_node_id,omitempty"`
+	GridSessionToken   string `json:"grid_session_token,omitempty"`
+	GridSessionExpires int64  `json:"grid_session_expires,omitempty"`
 }
 
 // RequestPayloadTCP represents an HTTP request sent via tunnel
 type RequestPayloadTCP struct {
-	ID   string `json:"id"`
-	URL  string `json:"url"`
-	Data []byte `json:"data"` // Encrypted HTTP request bytes
+	ID                string   `json:"id"`
+	URL               string   `json:"url"`
+	Data              []byte   `json:"data"` // HTTP request bytes (encrypted unless GridPayloadPlain=true)
+	RouteID           string   `json:"route_id,omitempty"`
+	RouteEpoch        int64    `json:"route_epoch,omitempty"`
+	HopCount          int      `json:"hop_count,omitempty"`
+	TraceID           string   `json:"trace_id,omitempty"`
+	GridRouteTo       string   `json:"grid_route_to,omitempty"`   // APS-side immediate route target endpoint
+	GridNextHop       string   `json:"grid_next_hop,omitempty"`   // receiver-side next hop endpoint
+	GridHops          []string `json:"grid_hops,omitempty"`       // remaining receiver-side hop list
+	GridFinalHost     string   `json:"grid_final_host,omitempty"` // final egress host on last endpoint
+	GridFinalPort     int      `json:"grid_final_port,omitempty"` // final egress port on last endpoint
+	GridFinalTLS      bool     `json:"grid_final_tls,omitempty"`  // final egress tls flag on last endpoint
+	GridEnableQUIC    bool     `json:"grid_enable_quic,omitempty"`
+	GridEnableTCP     bool     `json:"grid_enable_tcp,omitempty"`
+	GridParallel      bool     `json:"grid_parallel,omitempty"`
+	GridEnableICE     bool     `json:"grid_enable_ice,omitempty"`
+	GridICECandidates []string `json:"grid_ice_candidates,omitempty"`
+	GridPayloadPlain  bool     `json:"grid_payload_plain,omitempty"` // stream payload is plain bytes (not KeyManager encrypted)
 }
 
 // RequestStartPayloadTCP represents an HTTP request header for streaming mode
 type RequestStartPayloadTCP struct {
-	ID     string `json:"id"`
-	URL    string `json:"url"`
-	Header []byte `json:"header"` // Encrypted HTTP request header bytes
+	ID                string   `json:"id"`
+	URL               string   `json:"url"`
+	Header            []byte   `json:"header"` // HTTP request header bytes (encrypted unless GridPayloadPlain=true)
+	RouteID           string   `json:"route_id,omitempty"`
+	RouteEpoch        int64    `json:"route_epoch,omitempty"`
+	HopCount          int      `json:"hop_count,omitempty"`
+	TraceID           string   `json:"trace_id,omitempty"`
+	GridRouteTo       string   `json:"grid_route_to,omitempty"`   // APS-side immediate route target endpoint
+	GridNextHop       string   `json:"grid_next_hop,omitempty"`   // receiver-side next hop endpoint
+	GridHops          []string `json:"grid_hops,omitempty"`       // remaining receiver-side hop list
+	GridFinalHost     string   `json:"grid_final_host,omitempty"` // final egress host on last endpoint
+	GridFinalPort     int      `json:"grid_final_port,omitempty"` // final egress port on last endpoint
+	GridFinalTLS      bool     `json:"grid_final_tls,omitempty"`  // final egress tls flag on last endpoint
+	GridEnableQUIC    bool     `json:"grid_enable_quic,omitempty"`
+	GridEnableTCP     bool     `json:"grid_enable_tcp,omitempty"`
+	GridParallel      bool     `json:"grid_parallel,omitempty"`
+	GridEnableICE     bool     `json:"grid_enable_ice,omitempty"`
+	GridICECandidates []string `json:"grid_ice_candidates,omitempty"`
+	GridPayloadPlain  bool     `json:"grid_payload_plain,omitempty"` // stream payload is plain bytes (not KeyManager encrypted)
 }
 
 // ResponseHeaderPayloadTCP represents HTTP response header
@@ -141,12 +176,27 @@ type ResponseEndPayloadTCP struct {
 
 // ProxyConnectPayload is sent by APS to request TCP proxy connection
 type ProxyConnectPayload struct {
-	ConnectionID string `json:"connection_id"`
-	Host         string `json:"host"`
-	Port         int    `json:"port"`
-	TLS          bool   `json:"tls"`
-	ClientIP     string `json:"client_ip"`   // Real client IP for audit
-	StreamMode   bool   `json:"stream_mode"` // If true, switch to zero-copy stream mode
+	ConnectionID      string   `json:"connection_id"`
+	Host              string   `json:"host"`
+	Port              int      `json:"port"`
+	TLS               bool     `json:"tls"`
+	ClientIP          string   `json:"client_ip"`   // Real client IP for audit
+	StreamMode        bool     `json:"stream_mode"` // If true, switch to zero-copy stream mode
+	RouteID           string   `json:"route_id,omitempty"`
+	RouteEpoch        int64    `json:"route_epoch,omitempty"`
+	HopCount          int      `json:"hop_count,omitempty"`
+	TraceID           string   `json:"trace_id,omitempty"`
+	GridRouteTo       string   `json:"grid_route_to,omitempty"`   // APS-side immediate route target endpoint
+	GridNextHop       string   `json:"grid_next_hop,omitempty"`   // receiver-side next hop endpoint
+	GridHops          []string `json:"grid_hops,omitempty"`       // remaining receiver-side hop list
+	GridFinalHost     string   `json:"grid_final_host,omitempty"` // final egress host on last endpoint
+	GridFinalPort     int      `json:"grid_final_port,omitempty"` // final egress port on last endpoint
+	GridFinalTLS      bool     `json:"grid_final_tls,omitempty"`  // final egress tls flag on last endpoint
+	GridEnableQUIC    bool     `json:"grid_enable_quic,omitempty"`
+	GridEnableTCP     bool     `json:"grid_enable_tcp,omitempty"`
+	GridParallel      bool     `json:"grid_parallel,omitempty"`
+	GridEnableICE     bool     `json:"grid_enable_ice,omitempty"`
+	GridICECandidates []string `json:"grid_ice_candidates,omitempty"`
 }
 
 // ProxyConnectAckPayload is sent by endpoint to acknowledge proxy connection

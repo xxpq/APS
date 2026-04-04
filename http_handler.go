@@ -960,7 +960,7 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 			Body:       proxyReq.Body,
 		}
 
-		bodyStream, headerBytes, err := p.tunnelManager.SendRequestStream(r.Context(), tunnelName, endpointName, reqPayload)
+		bodyStream, headerBytes, err := p.sendRequestStreamViaDataPlane(r.Context(), tunnelName, endpointName, reqPayload)
 		if err != nil {
 			isError = true
 			http.Error(w, "Failed to send request through tunnel: "+err.Error(), http.StatusBadGateway)

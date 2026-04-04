@@ -13,16 +13,40 @@ import (
 
 // EndpointRuntimeConfig holds the configuration fetched from APS
 type EndpointRuntimeConfig struct {
-	ID                string              `json:"id"`
-	ServerName        string              `json:"serverName,omitempty"`
-	TunnelName        string              `json:"tunnelName"`
-	EndpointName      string              `json:"endpointName"`
-	SessionCredential string              `json:"sessionCredential,omitempty"`
-	SessionExpiresAt  int64               `json:"sessionExpiresAt,omitempty"`
-	KDFVersion        string              `json:"kdfVersion,omitempty"`
-	KDFSalt           string              `json:"kdfSalt,omitempty"`
-	PortMappings      []PortMappingConfig `json:"portMappings,omitempty"`
-	SSH               *EndpointSSHConfig  `json:"ssh,omitempty"`
+	ID                  string              `json:"id"`
+	ServerName          string              `json:"serverName,omitempty"`
+	TunnelName          string              `json:"tunnelName"`
+	EndpointName        string              `json:"endpointName"`
+	SessionCredential   string              `json:"sessionCredential,omitempty"`
+	SessionExpiresAt    int64               `json:"sessionExpiresAt,omitempty"`
+	KDFVersion          string              `json:"kdfVersion,omitempty"`
+	KDFSalt             string              `json:"kdfSalt,omitempty"`
+	PortMappings        []PortMappingConfig `json:"portMappings,omitempty"`
+	GatewayListen       string              `json:"gatewayListen,omitempty"`
+	GatewayAddress      string              `json:"gatewayAddress,omitempty"`
+	GatewayToken        string              `json:"gatewayToken,omitempty"`
+	GatewayDiscovery    bool                `json:"gatewayDiscovery,omitempty"`
+	GatewayDiscoverPort int                 `json:"gatewayDiscoverPort,omitempty"`
+	SSH                 *EndpointSSHConfig  `json:"ssh,omitempty"`
+}
+
+func (c *EndpointRuntimeConfig) UnmarshalJSON(data []byte) error {
+	type alias EndpointRuntimeConfig
+	defaulted := alias{
+		GatewayDiscovery:    true,
+		GatewayDiscoverPort: defaultGatewayDiscoverPort,
+	}
+	if err := json.Unmarshal(data, &defaulted); err != nil {
+		return err
+	}
+	defaulted.GatewayListen = strings.TrimSpace(defaulted.GatewayListen)
+	defaulted.GatewayAddress = strings.TrimSpace(defaulted.GatewayAddress)
+	defaulted.GatewayToken = strings.TrimSpace(defaulted.GatewayToken)
+	if defaulted.GatewayDiscoverPort <= 0 {
+		defaulted.GatewayDiscoverPort = defaultGatewayDiscoverPort
+	}
+	*c = EndpointRuntimeConfig(defaulted)
+	return nil
 }
 
 // PortMappingConfig defines a port mapping from local to remote endpoint
@@ -217,6 +241,9 @@ func (c *EndpointRuntimeConfig) ValidateConfig() error {
 	}
 	c.KDFVersion = normalizedVersion
 	c.KDFSalt = strings.TrimSpace(c.KDFSalt)
+	if c.GatewayDiscoverPort <= 0 {
+		c.GatewayDiscoverPort = defaultGatewayDiscoverPort
+	}
 	return nil
 }
 

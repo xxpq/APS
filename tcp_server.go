@@ -561,7 +561,7 @@ func (s *RawTCPServer) forwardViaTunnel(clientConn net.Conn, mapping *Mapping, t
 
 	// Pass client IP for security audit logging on endpoint
 	log.Printf("%s[RAW TCP] Calling SendProxyConnect for %s:%d", clientLocation, targetHost, targetPort)
-	done, err := s.tunnelManager.SendProxyConnect(ctx, tunnelName, endpointName, targetHost, targetPort, useTLS, countedConn, clientAddr)
+	done, err := s.sendProxyConnectViaDataPlane(ctx, tunnelName, endpointName, targetHost, targetPort, useTLS, countedConn, clientAddr)
 	if err != nil {
 		log.Printf("%s[RAW TCP] Tunnel proxy connect failed: %v", clientLocation, err)
 		clientConn.Close()
@@ -577,6 +577,15 @@ func (s *RawTCPServer) forwardViaTunnel(clientConn net.Conn, mapping *Mapping, t
 	// 3. An error occurs
 	<-done
 	log.Printf("%s[RAW TCP] Tunnel connection closed (client: %s)", clientLocation, clientAddr)
+}
+
+func (s *RawTCPServer) sendProxyConnectViaDataPlane(ctx context.Context, tunnelName, endpointName string, host string, port int, useTLS bool, clientConn net.Conn, clientIP string) (<-chan struct{}, error) {
+	if runtime := GetGlobalGridRuntime(); runtime != nil {
+		if engine := NewGridExecutionEngine(runtime, s.tunnelManager, s.name); engine != nil {
+			return engine.SendProxyConnect(ctx, tunnelName, endpointName, host, port, useTLS, clientConn, clientIP)
+		}
+	}
+	return s.tunnelManager.SendProxyConnect(ctx, tunnelName, endpointName, host, port, useTLS, clientConn, clientIP, nil)
 }
 
 // getTunnelAndEndpoint gets the tunnel and endpoint names from mapping configuration

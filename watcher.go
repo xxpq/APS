@@ -80,6 +80,9 @@ func (w *ConfigWatcher) watch() {
 						DebugLog("Notifying TunnelManager of configuration changes...")
 						w.serverManager.tunnelManager.UpdateTunnels(w.config)
 					}
+					if err := ReconcileGlobalGridRuntime(w.config); err != nil {
+						log.Printf("[GRID] Failed to reconcile runtime after config reload: %v", err)
+					}
 
 					// Re-initialize ACME with the new config
 					InitACME(w.config)
