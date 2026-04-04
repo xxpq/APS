@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"math/rand"
@@ -567,21 +568,6 @@ func (tm *TCPTunnelManager) SendRequestStream(ctx context.Context, tunnelName, e
 				requestID,
 			)
 			switch msg.Type {
-			case MsgTypeResponseChunk:
-				var chunk ResponseChunkPayloadTCP
-				if err := msg.ParseJSON(&chunk); err != nil {
-					streamErr = err
-					return
-				}
-				decryptedChunk, err := ep.KeyManager.Decrypt(chunk.Data)
-				if err != nil {
-					streamErr = err
-					return
-				}
-				if err := writeAllToPipe(pipeWriter, decryptedChunk); err != nil {
-					streamErr = err
-					return
-				}
 			case MsgTypeResponseChunkBin:
 				scopeID, encryptedChunk, err := ParseScopedBinaryPayload(msg.Payload)
 				if err != nil {
@@ -609,6 +595,9 @@ func (tm *TCPTunnelManager) SendRequestStream(ctx context.Context, tunnelName, e
 				if end.Error != "" {
 					streamErr = errors.New(end.Error)
 				}
+				return
+			default:
+				streamErr = fmt.Errorf("unsupported response stream message type=%d", msg.Type)
 				return
 			}
 		}
@@ -792,7 +781,9 @@ func (tm *TCPTunnelManager) sendRequestStreamViaRelay(ctx context.Context, ep *T
 				continue
 			}
 			headerBytes = append([]byte(nil), header.Header...)
-		case MsgTypeResponseChunk, MsgTypeResponseChunkBin:
+		case MsgTypeResponseChunk:
+			return fail(errors.New("legacy response chunk format is no longer supported"))
+		case MsgTypeResponseChunkBin:
 			return fail(errors.New("response header not received before response body"))
 		case MsgTypeResponseEnd:
 			var end ResponseEndPayloadTCP
@@ -832,19 +823,6 @@ func (tm *TCPTunnelManager) sendRequestStreamViaRelay(ctx context.Context, ep *T
 				return
 			}
 			switch msg.Type {
-			case MsgTypeResponseChunk:
-				var chunk ResponseChunkPayloadTCP
-				if err := msg.ParseJSON(&chunk); err != nil {
-					streamErr = err
-					return
-				}
-				if strings.TrimSpace(chunk.ID) != requestID {
-					continue
-				}
-				if err := writeAllToPipe(pipeWriter, chunk.Data); err != nil {
-					streamErr = err
-					return
-				}
 			case MsgTypeResponseChunkBin:
 				scopeID, chunkData, err := ParseScopedBinaryPayload(msg.Payload)
 				if err != nil {
@@ -870,6 +848,9 @@ func (tm *TCPTunnelManager) sendRequestStreamViaRelay(ctx context.Context, ep *T
 				if end.Error != "" {
 					streamErr = errors.New(end.Error)
 				}
+				return
+			default:
+				streamErr = fmt.Errorf("unsupported relay response message type=%d", msg.Type)
 				return
 			}
 		}

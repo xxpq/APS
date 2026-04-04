@@ -136,20 +136,20 @@ func NewGridControlPlaneFromConfig(config *Config) (*GridControlPlane, error) {
 	}
 
 	cp := &GridControlPlane{
-		mode:         gridCfg.Deployment.Mode,
-		stateStore:   stateStore,
-		leaseStore:   leaseStore,
-		routeStore:   routeStore,
-		tokenStore:   tokenStore,
-		iceStore:     iceStore,
-		eventBus:     eventBus,
-		storeCloser:  storeCloser,
-		busCloser:    busCloser,
-		routingCfg:   gridCfg.Routing,
-		securityCfg:  gridCfg.Security,
-		relayCfg:     gridCfg.Relay,
-		transportCfg: gridCfg.Transport,
-		iceCfg:       gridCfg.ICE,
+		mode:          gridCfg.Deployment.Mode,
+		stateStore:    stateStore,
+		leaseStore:    leaseStore,
+		routeStore:    routeStore,
+		tokenStore:    tokenStore,
+		iceStore:      iceStore,
+		eventBus:      eventBus,
+		storeCloser:   storeCloser,
+		busCloser:     busCloser,
+		routingCfg:    gridCfg.Routing,
+		securityCfg:   gridCfg.Security,
+		relayCfg:      gridCfg.Relay,
+		transportCfg:  gridCfg.Transport,
+		iceCfg:        gridCfg.ICE,
 		lifecycleDone: make(chan struct{}),
 		offlineSeen:   make(map[string]struct{}),
 	}
@@ -1388,8 +1388,7 @@ func gridTokenScopeAllows(scopeRaw string, requiredScopes []string) bool {
 	}
 	granted := normalizeGridScopeList([]string{scopeRaw})
 	if len(granted) == 0 {
-		// Empty scope means full access for backward compatibility.
-		return true
+		return false
 	}
 	for _, req := range required {
 		for _, allow := range granted {

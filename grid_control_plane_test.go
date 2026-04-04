@@ -358,6 +358,20 @@ func TestGridControlPlaneValidateSessionToken(t *testing.T) {
 				t.Fatalf("expected scope denied error, got %v", err)
 			}
 
+			emptyScopeResp, err := cp.IssueSessionToken(ctx, &GridIssueTokenRequest{
+				NodeID: "node-token-a",
+				Scope:  "",
+			})
+			if err != nil {
+				t.Fatalf("IssueSessionToken(empty scope) failed: %v", err)
+			}
+			if emptyScopeResp == nil || !emptyScopeResp.Success || emptyScopeResp.Token == nil {
+				t.Fatalf("unexpected empty-scope issue response: %+v", emptyScopeResp)
+			}
+			if _, err := cp.ValidateSessionToken(ctx, emptyScopeResp.Token.Token, "node-token-a", GridScopeRouteQuery); !errors.Is(err, ErrGridScopeDenied) {
+				t.Fatalf("expected scope denied for empty scope token, got %v", err)
+			}
+
 			if _, err := cp.RevokeSessionToken(ctx, &GridRevokeTokenRequest{Token: tokenValue}); err != nil {
 				t.Fatalf("RevokeSessionToken failed: %v", err)
 			}

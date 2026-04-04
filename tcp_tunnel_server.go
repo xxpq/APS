@@ -1151,7 +1151,7 @@ func (ep *TCPEndpoint) readLoop(server *TCPTunnelServer) {
 			ep.handleProbePing(msg)
 		case MsgTypeProbePong:
 			ep.handleProbePong(msg)
-		case MsgTypeResponseHeader, MsgTypeResponseChunk, MsgTypeResponseChunkBin, MsgTypeResponseEnd:
+		case MsgTypeResponseHeader, MsgTypeResponseChunkBin, MsgTypeResponseEnd:
 			ep.handleResponseMessage(msg)
 		case MsgTypeProxyConnectAck:
 			ep.handleProxyConnectAck(msg)
@@ -1188,13 +1188,6 @@ func (ep *TCPEndpoint) handleResponseMessage(msg *TunnelMessage) {
 		var payload ResponseHeaderPayloadTCP
 		if err := msg.ParseJSON(&payload); err != nil {
 			DebugLog("%s [TCP TUNNEL] Invalid response header: %v", basePrefix, err)
-			return
-		}
-		requestID = payload.ID
-	case MsgTypeResponseChunk:
-		var payload ResponseChunkPayloadTCP
-		if err := msg.ParseJSON(&payload); err != nil {
-			DebugLog("%s [TCP TUNNEL] Invalid response chunk: %v", basePrefix, err)
 			return
 		}
 		requestID = payload.ID
