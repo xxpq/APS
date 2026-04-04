@@ -111,7 +111,7 @@
       "ssh": {
         "enabled": true,
         "port": 22222,
-        "point_key": "/etc/vlan/ssh_point_rsa_key",
+        "point_key": "~/.ssh/id_rsa",
         "users": [
           {
             "name": "user1",
