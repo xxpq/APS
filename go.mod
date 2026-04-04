@@ -7,6 +7,7 @@ require (
 	github.com/chromedp/cdproto v0.0.0-20250803210736-d308e07a266d
 	github.com/gorilla/websocket v1.5.3
 	github.com/kardianos/service v1.2.4
+	github.com/pkg/sftp v1.13.10
 	github.com/xtaci/smux v1.5.48
 	golang.org/x/crypto v0.44.0
 	golang.org/x/net v0.47.0
@@ -17,6 +18,7 @@ require (
 require (
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/google/uuid v1.6.0 // indirect
+	github.com/kr/fs v0.1.0 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/ncruces/go-strftime v0.1.9 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect

@@ -107,7 +107,21 @@
   "endpoints": {
     "cjy_server": {
       "tunnelName": "sucdri",
-      "endpointName": "cjy_server"
+      "endpointName": "cjy_server",
+      "ssh": {
+        "enabled": true,
+        "port": 22222,
+        "point_key": "/etc/vlan/ssh_point_rsa_key",
+        "users": [
+          {
+            "name": "user1",
+            "password": "change-me",
+            "keys": [
+              "ssh-ed25519 AAAA..."
+            ]
+          }
+        ]
+      }
     },
     "lrq_pc": {
       "tunnelName": "sucdri",

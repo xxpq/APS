@@ -64,6 +64,7 @@ type EndpointConfig_APS struct {
 	AllowMultiNode    bool                  `json:"allowMultiNode,omitempty"`
 	Mirror            string                `json:"mirror,omitempty"` // Reference to mirrors group
 	PortMappings      []EndpointPortMapping `json:"portMappings,omitempty"`
+	SSH               *EndpointSSHConfig    `json:"ssh,omitempty"`
 	LogLevel          *int                  `json:"logLevel,omitempty"`
 	LogRetentionHours *int                  `json:"logRetentionHours,omitempty"`
 }
@@ -73,6 +74,85 @@ type EndpointPortMapping struct {
 	LocalPort      int    `json:"localPort"`      // Port this endpoint listens on
 	RemoteTarget   string `json:"remoteTarget"`   // IP:Port on the remote endpoint's network
 	TargetEndpoint string `json:"targetEndpoint"` // Which endpoint to forward traffic to
+}
+
+// EndpointSSHConfig holds SSH plugin settings for an endpoint.
+// It accepts both pointKey and point_key for compatibility.
+type EndpointSSHConfig struct {
+	Enabled  *bool             `json:"enabled,omitempty"`
+	Port     int               `json:"port,omitempty"`
+	PointKey string            `json:"pointKey,omitempty"`
+	Password string            `json:"password,omitempty"`
+	Users    []EndpointSSHUser `json:"users,omitempty"`
+}
+
+func (c *EndpointSSHConfig) UnmarshalJSON(data []byte) error {
+	type endpointSSHConfigAlias struct {
+		Enabled       *bool             `json:"enabled,omitempty"`
+		Port          int               `json:"port,omitempty"`
+		PointKey      string            `json:"pointKey,omitempty"`
+		Password      string            `json:"password,omitempty"`
+		PointKeySnake string            `json:"point_key,omitempty"`
+		Users         []EndpointSSHUser `json:"users,omitempty"`
+	}
+	var aux endpointSSHConfigAlias
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	c.Enabled = aux.Enabled
+	c.Port = aux.Port
+	c.Password = strings.TrimSpace(aux.Password)
+	c.PointKey = strings.TrimSpace(aux.PointKey)
+	if c.PointKey == "" {
+		c.PointKey = strings.TrimSpace(aux.PointKeySnake)
+	}
+	c.Users = aux.Users
+	return nil
+}
+
+// EndpointSSHUser describes one SSH account and authorized keys.
+type EndpointSSHUser struct {
+	Name     string               `json:"name"`
+	Password string               `json:"password,omitempty"`
+	Keys     EndpointSSHKeyValues `json:"keys,omitempty"`
+}
+
+// EndpointSSHKeyValues accepts either a JSON string or []string.
+type EndpointSSHKeyValues []string
+
+func (k *EndpointSSHKeyValues) UnmarshalJSON(data []byte) error {
+	trimmed := strings.TrimSpace(string(data))
+	if trimmed == "" || trimmed == "null" {
+		*k = nil
+		return nil
+	}
+
+	var single string
+	if err := json.Unmarshal(data, &single); err == nil {
+		single = strings.TrimSpace(single)
+		if single == "" {
+			*k = nil
+			return nil
+		}
+		*k = EndpointSSHKeyValues{single}
+		return nil
+	}
+
+	var many []string
+	if err := json.Unmarshal(data, &many); err != nil {
+		return fmt.Errorf("keys must be string or []string: %w", err)
+	}
+
+	out := make([]string, 0, len(many))
+	for _, item := range many {
+		key := strings.TrimSpace(item)
+		if key == "" {
+			continue
+		}
+		out = append(out, key)
+	}
+	*k = EndpointSSHKeyValues(out)
+	return nil
 }
 
 // TokenLocation 指定 token 的位置（header、cookie 或 querystring）

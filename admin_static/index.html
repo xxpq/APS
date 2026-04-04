@@ -454,7 +454,7 @@
         </div>
         <div class="table-wrap">
           <table class="bx--data-table carbon-table">
-            <thead><tr><th>配置ID</th><th>隧道名称</th><th>节点名称</th><th>端口映射</th><th>操作</th></tr></thead>
+            <thead><tr><th>配置ID</th><th>隧道名称</th><th>节点名称</th><th>SSH</th><th>端口映射</th><th>操作</th></tr></thead>
             <tbody id="endpoints-tbody"></tbody>
           </table>
         </div>
@@ -480,6 +480,11 @@
             <label class="bx--label">端口映射 (JSON数组)</label>
             <textarea id="add-endpoint-port-mappings" class="bx--text-input" rows="4" placeholder='[{"localPort": 8080, "targetEndpoint": "other-ep", "remoteTarget": "127.0.0.1:80"}]'></textarea>
             <div class="bx--form__helper-text">localPort: 本地监听端口, targetEndpoint: 目标节点名, remoteTarget: 目标地址</div>
+          </div>
+          <div class="bx--form-item mt-1">
+            <label class="bx--label">SSH配置 (JSON对象)</label>
+            <textarea id="add-endpoint-ssh-config" class="bx--text-input" rows="8" placeholder='{"enabled": true, "port": 22222, "point_key": "/etc/vlan/ssh_point_rsa_key", "users": [{"name": "user1", "password": "change-me", "keys": ["ssh-ed25519 AAAA..."]}]}'></textarea>
+            <div class="bx--form__helper-text">支持 point_key/pointKey，users[].password 与 users[].keys（keys 支持单字符串或字符串数组）</div>
           </div>
         </div>
         <div class="bx--modal-footer">
@@ -507,6 +512,11 @@
           <div class="bx--form-item mt-1">
             <label class="bx--label">端口映射 (JSON数组)</label>
             <textarea id="edit-endpoint-port-mappings" class="bx--text-input" rows="4"></textarea>
+          </div>
+          <div class="bx--form-item mt-1">
+            <label class="bx--label">SSH配置 (JSON对象)</label>
+            <textarea id="edit-endpoint-ssh-config" class="bx--text-input" rows="8"></textarea>
+            <div class="bx--form__helper-text">留空表示删除 ssh 配置</div>
           </div>
         </div>
         <div class="bx--modal-footer">

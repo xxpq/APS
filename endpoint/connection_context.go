@@ -18,6 +18,7 @@ type ImmutableConnectionContext struct {
 	KDFVersion        string
 	KDFSalt           string
 	PortMappings      []PortMappingConfig
+	SSH               *EndpointSSHConfig
 	MTLSCertFile      string
 	MTLSKeyFile       string
 	MTLSCAFile        string
@@ -45,6 +46,45 @@ func clonePortMappingsForContext(src []PortMappingConfig) []PortMappingConfig {
 	}
 	dst := make([]PortMappingConfig, len(src))
 	copy(dst, src)
+	return dst
+}
+
+func cloneEndpointSSHConfigForContext(src *EndpointSSHConfig) *EndpointSSHConfig {
+	if src == nil {
+		return nil
+	}
+
+	dst := &EndpointSSHConfig{
+		Port:     src.Port,
+		PointKey: strings.TrimSpace(src.PointKey),
+	}
+
+	if src.Enabled != nil {
+		enabled := *src.Enabled
+		dst.Enabled = &enabled
+	}
+
+	if len(src.Users) > 0 {
+		dst.Users = make([]EndpointSSHUser, 0, len(src.Users))
+		for _, user := range src.Users {
+			copied := EndpointSSHUser{
+				Name:     strings.TrimSpace(user.Name),
+				Password: user.Password,
+			}
+			if len(user.Keys) > 0 {
+				copied.Keys = make(EndpointSSHKeyValues, 0, len(user.Keys))
+				for _, key := range user.Keys {
+					k := strings.TrimSpace(key)
+					if k == "" {
+						continue
+					}
+					copied.Keys = append(copied.Keys, k)
+				}
+			}
+			dst.Users = append(dst.Users, copied)
+		}
+	}
+
 	return dst
 }
 
@@ -77,9 +117,9 @@ func BuildImmutableConnectionContext(serverAddress, configID string) (*Immutable
 		KDFVersion:        strings.TrimSpace(cfg.KDFVersion),
 		KDFSalt:           strings.TrimSpace(cfg.KDFSalt),
 		PortMappings:      clonePortMappingsForContext(cfg.PortMappings),
+		SSH:               cloneEndpointSSHConfigForContext(cfg.SSH),
 		MTLSCertFile:      strings.TrimSpace(*mtlsCertFile),
 		MTLSKeyFile:       strings.TrimSpace(*mtlsKeyFile),
 		MTLSCAFile:        strings.TrimSpace(*mtlsCAFile),
 	}, nil
 }
-

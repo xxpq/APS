@@ -39,6 +39,7 @@ var (
 
 	install   = flag.Bool("install", false, "install system service")
 	uninstall = flag.Bool("uninstall", false, "uninstall system service")
+	reinstall = flag.Bool("reinstall", false, "reinstall system service")
 	start     = flag.Bool("start", false, "start system service")
 	stop      = flag.Bool("stop", false, "stop system service")
 	restart   = flag.Bool("restart", false, "restart system service")
@@ -77,6 +78,7 @@ func (p *program) Start(s service.Service) error {
 func (p *program) run() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	defer endpointSSHManager.Stop()
 
 	// When running as a service, flags are passed as arguments.
 	// We need to re-parse them for the service process.
@@ -156,6 +158,22 @@ func main() {
 			log.Fatalf("Failed to uninstall service: %v", err)
 		}
 		log.Println("Service uninstalled successfully.")
+		return
+	}
+
+	if *reinstall {
+		err := uninstallService(s)
+		if err != nil {
+			log.Printf("Failed to uninstall service: %v", err)
+			log.Println("Continuing with reinstallation...")
+		} else {
+			log.Println("Service uninstalled successfully.")
+		}
+		err = installService()
+		if err != nil {
+			log.Fatalf("Failed to reinstall service: %v", err)
+		}
+		log.Println("Service reinstalled and started successfully.")
 		return
 	}
 
@@ -258,6 +276,7 @@ func main() {
 	if connectionManager != nil {
 		connectionManager.CloseAll()
 	}
+	endpointSSHManager.Stop()
 
 	// Wait for all connections to close
 	wg.Wait()
@@ -332,7 +351,7 @@ func createServiceConfig() (*service.Config, error) {
 
 	var args []string
 	for _, arg := range os.Args[1:] {
-		if arg != "-install" && arg != "-uninstall" && arg != "-start" && arg != "-stop" && arg != "-restart" {
+		if arg != "-install" && arg != "-uninstall" && arg != "-reinstall" && arg != "-start" && arg != "-stop" && arg != "-restart" {
 			args = append(args, arg)
 		}
 	}

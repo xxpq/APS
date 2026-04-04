@@ -571,6 +571,7 @@ type TunnelSessionState struct {
 	SessionCredential string
 	SessionExpiresAt  int64
 	PortMappings      []PortMappingConfig
+	SSH               *EndpointSSHConfig
 	KDFVersion        string
 	KDFSalt           string
 }
@@ -732,8 +733,12 @@ func runTCPTunnelSession(ctx context.Context, connCtx ImmutableConnectionContext
 		SessionCredential: connCtx.SessionCredential,
 		SessionExpiresAt:  connCtx.SessionExpiresAt,
 		PortMappings:      clonePortMappingsForContext(connCtx.PortMappings),
+		SSH:               cloneEndpointSSHConfigForContext(connCtx.SSH),
 		KDFVersion:        connCtx.KDFVersion,
 		KDFSalt:           connCtx.KDFSalt,
+	}
+	if err := endpointSSHManager.Apply(connCtx.SSH); err != nil {
+		log.Printf("[SSH] Failed to apply runtime SSH config: %v", err)
 	}
 	controlState := NewControlPlaneInboundState()
 
@@ -1332,6 +1337,7 @@ type ConfigUpdatePayload struct {
 	KDFVersion        string              `json:"kdfVersion,omitempty"`
 	KDFSalt           string              `json:"kdfSalt,omitempty"`
 	PortMappings      []PortMappingConfig `json:"portMappings,omitempty"`
+	SSH               *EndpointSSHConfig  `json:"ssh,omitempty"`
 }
 
 // MirrorUpdatePayload is sent by APS to inform endpoint of mirror addresses
@@ -1401,8 +1407,13 @@ func handleConfigUpdate(tc *TunnelConn, msg *TunnelMessage, sessionState *Tunnel
 	if payload.PortMappings != nil {
 		sessionState.PortMappings = clonePortMappingsForContext(payload.PortMappings)
 	}
+	sessionState.SSH = cloneEndpointSSHConfigForContext(payload.SSH)
 
 	sessionState.mu.Unlock()
+
+	if err := endpointSSHManager.Apply(payload.SSH); err != nil {
+		log.Printf("[SSH] Failed to apply SSH config update: %v", err)
+	}
 
 	if shouldReconnect {
 		log.Printf("[CONFIG] Critical configuration changed (tunnel/endpoint/sessionCredential/KDF), reconnecting...")
@@ -1410,8 +1421,12 @@ func handleConfigUpdate(tc *TunnelConn, msg *TunnelMessage, sessionState *Tunnel
 		return
 	}
 
-	DebugLog("[CONFIG] Updated runtime config: tunnel=%s, endpoint=%s, portMappings=%d",
-		payload.TunnelName, payload.EndpointName, len(payload.PortMappings))
+	sshState := "disabled"
+	if payload.SSH != nil {
+		sshState = "configured"
+	}
+	DebugLog("[CONFIG] Updated runtime config: tunnel=%s, endpoint=%s, portMappings=%d, ssh=%s",
+		payload.TunnelName, payload.EndpointName, len(payload.PortMappings), sshState)
 }
 
 // handleMirrorUpdate processes mirror address updates from APS

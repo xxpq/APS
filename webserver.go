@@ -1011,6 +1011,7 @@ func (h *AdminHandlers) handleEndpointConfigs(w http.ResponseWriter, r *http.Req
 				"kdfVersion":        kdfVersion,
 				"kdfSalt":           kdfSalt,
 				"portMappings":      endpoint.PortMappings,
+				"ssh":               endpoint.SSH,
 			},
 		})
 		return
@@ -1135,6 +1136,7 @@ func (h *AdminHandlers) pushConfigToEndpoint(configID, tunnelName, endpointName 
 		"kdfVersion":        kdfVersion,
 		"kdfSalt":           kdfSalt,
 		"portMappings":      config.PortMappings,
+		"ssh":               config.SSH,
 	}
 
 	payloadBytes, err := json.Marshal(payload)

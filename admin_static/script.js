@@ -3370,12 +3370,18 @@ async function loadEndpoints() {
     Object.keys(data || {}).forEach(function(id){
       var ep = data[id] || {};
       var portMappingsStr = (ep.portMappings && ep.portMappings.length > 0) ? ep.portMappings.length + "个映射" : "无";
+      var sshStr = "关闭";
+      if (ep.ssh) {
+        var sshEnabled = (ep.ssh.enabled === undefined || ep.ssh.enabled === null) ? true : !!ep.ssh.enabled;
+        sshStr = sshEnabled ? ("开启:" + (ep.ssh.port || 22222)) : "关闭";
+      }
       
       var tr = document.createElement("tr");
       tr.innerHTML =
         "<td>" + id + "</td>" +
         "<td>" + (ep.tunnelName || "") + "</td>" +
         "<td>" + (ep.endpointName || "") + "</td>" +
+        "<td>" + sshStr + "</td>" +
         "<td>" + portMappingsStr + "</td>" +
         "<td><button class='bx--btn bx--btn--sm bx--btn--ghost' onclick='openEditEndpointModal(\"" + id.replace(/"/g, '&quot;') + "\")'>编辑</button> " +
         "<button class='bx--btn bx--btn--sm bx--btn--danger--ghost' onclick='deleteEndpoint(\"" + id.replace(/"/g, '&quot;') + "\")'>删除</button></td>";
@@ -3417,6 +3423,7 @@ function openAddEndpointModal() {
   document.getElementById("add-endpoint-name").value = "";
   document.getElementById("add-endpoint-password").value = "";
   document.getElementById("add-endpoint-port-mappings").value = "";
+  document.getElementById("add-endpoint-ssh-config").value = "";
   populateTunnelSelectorsForEndpoints();
   var modal = document.querySelector('#endpoint-add-modal');
   if (modal) modal.classList.add('is-visible');
@@ -3437,6 +3444,7 @@ async function openEditEndpointModal(endpointId) {
     document.getElementById("edit-endpoint-name").value = ep.endpointName || "";
     document.getElementById("edit-endpoint-password").value = "";
     document.getElementById("edit-endpoint-port-mappings").value = ep.portMappings ? JSON.stringify(ep.portMappings, null, 2) : "";
+    document.getElementById("edit-endpoint-ssh-config").value = ep.ssh ? JSON.stringify(ep.ssh, null, 2) : "";
     
     var modal = document.querySelector('#endpoint-edit-modal');
     if (modal) modal.classList.add('is-visible');
@@ -3454,6 +3462,7 @@ async function confirmAddEndpoint() {
   var endpointName = document.getElementById("add-endpoint-name").value.trim();
   var password = document.getElementById("add-endpoint-password").value;
   var portMappingsStr = document.getElementById("add-endpoint-port-mappings").value.trim();
+  var sshConfigStr = document.getElementById("add-endpoint-ssh-config").value.trim();
   
   // Auto-generate UUID if config ID is empty
   if (!id) {
@@ -3475,6 +3484,14 @@ async function confirmAddEndpoint() {
   if (portMappingsStr) {
     try { portMappings = JSON.parse(portMappingsStr); } catch (e) { if (msg) msg.textContent = "端口映射JSON格式错误"; return; }
   }
+  var sshConfig;
+  if (sshConfigStr) {
+    try { sshConfig = JSON.parse(sshConfigStr); } catch (e) { if (msg) msg.textContent = "SSH配置JSON格式错误"; return; }
+    if (typeof sshConfig !== 'object' || Array.isArray(sshConfig) || sshConfig === null) {
+      if (msg) msg.textContent = "SSH配置必须是JSON对象";
+      return;
+    }
+  }
   
   var payload = {
     tunnelName: tunnelName,
@@ -3482,6 +3499,7 @@ async function confirmAddEndpoint() {
     password: password || undefined,
     portMappings: portMappings,
   };
+  if (sshConfig !== undefined) payload.ssh = sshConfig;
   
   try {
     var res = await authFetch(endpointsUrl, { 
@@ -3509,6 +3527,7 @@ async function confirmEditEndpoint() {
   var endpointName = document.getElementById("edit-endpoint-name").value.trim();
   var password = document.getElementById("edit-endpoint-password").value;
   var portMappingsStr = document.getElementById("edit-endpoint-port-mappings").value.trim();
+  var sshConfigStr = document.getElementById("edit-endpoint-ssh-config").value.trim();
   
   if (!id) { if (msg) msg.textContent = "配置ID必填"; return; }
   if (!tunnelName) { if (msg) msg.textContent = "隧道名称必填"; return; }
@@ -3518,12 +3537,21 @@ async function confirmEditEndpoint() {
   if (portMappingsStr) {
     try { portMappings = JSON.parse(portMappingsStr); } catch (e) { if (msg) msg.textContent = "端口映射JSON格式错误"; return; }
   }
+  var sshConfig;
+  if (sshConfigStr) {
+    try { sshConfig = JSON.parse(sshConfigStr); } catch (e) { if (msg) msg.textContent = "SSH配置JSON格式错误"; return; }
+    if (typeof sshConfig !== 'object' || Array.isArray(sshConfig) || sshConfig === null) {
+      if (msg) msg.textContent = "SSH配置必须是JSON对象";
+      return;
+    }
+  }
   
   var payload = {
     tunnelName: tunnelName,
     endpointName: endpointName,
     portMappings: portMappings,
   };
+  if (sshConfig !== undefined) payload.ssh = sshConfig;
   if (password) payload.password = password;
   
   try {
