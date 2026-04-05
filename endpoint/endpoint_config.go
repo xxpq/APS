@@ -2,11 +2,14 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -52,9 +55,89 @@ func (c *EndpointRuntimeConfig) UnmarshalJSON(data []byte) error {
 
 // PortMappingConfig defines a port mapping from local to remote endpoint
 type PortMappingConfig struct {
-	LocalPort      int    `json:"localPort"`      // Port this endpoint listens on
+	LocalListen    string `json:"localListen"`    // Listen address on this endpoint (e.g. 0.0.0.0:8080)
 	RemoteTarget   string `json:"remoteTarget"`   // IP:Port on the remote endpoint's network
 	TargetEndpoint string `json:"targetEndpoint"` // Which endpoint to forward traffic to
+}
+
+func (m *PortMappingConfig) UnmarshalJSON(data []byte) error {
+	type portMappingAlias struct {
+		LocalListen    json.RawMessage `json:"localListen"`
+		RemoteTarget   string          `json:"remoteTarget"`
+		TargetEndpoint string          `json:"targetEndpoint"`
+	}
+	var aux portMappingAlias
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+
+	localListen, err := parsePortMappingLocalListen(aux.LocalListen)
+	if err != nil {
+		return err
+	}
+
+	m.LocalListen = localListen
+	m.RemoteTarget = strings.TrimSpace(aux.RemoteTarget)
+	m.TargetEndpoint = strings.TrimSpace(aux.TargetEndpoint)
+	return nil
+}
+
+func parsePortMappingLocalListen(raw json.RawMessage) (string, error) {
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" || trimmed == "null" {
+		return "", errors.New("localListen is required")
+	}
+	if strings.HasPrefix(trimmed, "\"") {
+		var listen string
+		if err := json.Unmarshal(raw, &listen); err != nil {
+			return "", fmt.Errorf("invalid localListen string: %w", err)
+		}
+		return normalizePortMappingLocalListen(listen)
+	}
+	port, err := strconv.Atoi(trimmed)
+	if err != nil {
+		return "", fmt.Errorf("localListen must be port number or listen address, got %s", trimmed)
+	}
+	return normalizePortMappingLocalListen(strconv.Itoa(port))
+}
+
+func normalizePortMappingLocalListen(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", errors.New("localListen is required")
+	}
+
+	if port, err := strconv.Atoi(raw); err == nil {
+		if err := validatePortMappingLocalListenPort(port); err != nil {
+			return "", err
+		}
+		return net.JoinHostPort("0.0.0.0", strconv.Itoa(port)), nil
+	}
+
+	host, portText, err := net.SplitHostPort(raw)
+	if err != nil {
+		return "", fmt.Errorf("invalid localListen %q: %w", raw, err)
+	}
+	port, err := strconv.Atoi(strings.TrimSpace(portText))
+	if err != nil {
+		return "", fmt.Errorf("invalid localListen port %q", portText)
+	}
+	if err := validatePortMappingLocalListenPort(port); err != nil {
+		return "", err
+	}
+
+	host = strings.TrimSpace(strings.Trim(host, "[]"))
+	if host == "" {
+		host = "0.0.0.0"
+	}
+	return net.JoinHostPort(host, strconv.Itoa(port)), nil
+}
+
+func validatePortMappingLocalListenPort(port int) error {
+	if port < 1 || port > 65535 {
+		return fmt.Errorf("localListen port out of range: %d", port)
+	}
+	return nil
 }
 
 // EndpointSSHConfig holds SSH plugin settings for endpoint runtime.

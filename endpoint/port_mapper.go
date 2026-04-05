@@ -5,6 +5,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"strings"
 	"sync"
 	"time"
 )
@@ -12,7 +13,7 @@ import (
 // PortMapper manages local port listeners that forward traffic to remote endpoints
 type PortMapper struct {
 	mappings   []PortMappingConfig
-	listeners  map[int]net.Listener
+	listeners  map[string]net.Listener
 	tunnelConn *TunnelConn // Connection to APS for forwarding
 	mu         sync.RWMutex
 	stopCh     chan struct{}
@@ -31,7 +32,7 @@ type PortForwardConnection struct {
 func NewPortMapper(mappings []PortMappingConfig) *PortMapper {
 	return &PortMapper{
 		mappings:  mappings,
-		listeners: make(map[int]net.Listener),
+		listeners: make(map[string]net.Listener),
 		stopCh:    make(chan struct{}),
 	}
 }
@@ -47,7 +48,7 @@ func (pm *PortMapper) SetTunnelConn(tc *TunnelConn) {
 func (pm *PortMapper) Start() error {
 	for _, mapping := range pm.mappings {
 		if err := pm.startListener(mapping); err != nil {
-			log.Printf("[PORT-MAP] Failed to start listener on port %d: %v", mapping.LocalPort, err)
+			log.Printf("[PORT-MAP] Failed to start listener on %s: %v", mapping.LocalListen, err)
 			// Continue with other mappings even if one fails
 		}
 	}
@@ -56,18 +57,21 @@ func (pm *PortMapper) Start() error {
 
 // startListener starts a listener for a specific port mapping
 func (pm *PortMapper) startListener(mapping PortMappingConfig) error {
-	addr := fmt.Sprintf("0.0.0.0:%d", mapping.LocalPort)
+	addr := strings.TrimSpace(mapping.LocalListen)
+	if addr == "" {
+		return fmt.Errorf("localListen is required")
+	}
 	listener, err := net.Listen("tcp", addr)
 	if err != nil {
 		return fmt.Errorf("failed to listen on %s: %w", addr, err)
 	}
 
 	pm.mu.Lock()
-	pm.listeners[mapping.LocalPort] = listener
+	pm.listeners[addr] = listener
 	pm.mu.Unlock()
 
-	log.Printf("[PORT-MAP] Listening on port %d -> %s via endpoint %s",
-		mapping.LocalPort, mapping.RemoteTarget, mapping.TargetEndpoint)
+	log.Printf("[PORT-MAP] Listening on %s -> %s via endpoint %s",
+		addr, mapping.RemoteTarget, mapping.TargetEndpoint)
 
 	pm.wg.Add(1)
 	go pm.acceptLoop(listener, mapping)
@@ -101,7 +105,7 @@ func (pm *PortMapper) acceptLoop(listener net.Listener, mapping PortMappingConfi
 			case <-pm.stopCh:
 				return
 			default:
-				log.Printf("[PORT-MAP] Accept error on port %d: %v", mapping.LocalPort, err)
+				log.Printf("[PORT-MAP] Accept error on %s: %v", mapping.LocalListen, err)
 				continue
 			}
 		}
@@ -124,8 +128,8 @@ func (pm *PortMapper) handleConnection(conn net.Conn, mapping PortMappingConfig)
 	}
 
 	clientAddr := conn.RemoteAddr().String()
-	DebugLog("[PORT-MAP] New connection from %s on port %d -> %s via endpoint %s",
-		clientAddr, mapping.LocalPort, mapping.RemoteTarget, mapping.TargetEndpoint)
+	DebugLog("[PORT-MAP] New connection from %s on %s -> %s via endpoint %s",
+		clientAddr, mapping.LocalListen, mapping.RemoteTarget, mapping.TargetEndpoint)
 
 	DebugLog("[PORT-MAP] Using APS tunnel for %s", mapping.TargetEndpoint)
 	pm.handleTunnelStreamForward(conn, tc, mapping, clientAddr)
@@ -172,11 +176,11 @@ func (pm *PortMapper) Stop() {
 	close(pm.stopCh)
 
 	pm.mu.Lock()
-	for port, listener := range pm.listeners {
+	for listenAddr, listener := range pm.listeners {
 		listener.Close()
-		DebugLog("[PORT-MAP] Stopped listener on port %d", port)
+		DebugLog("[PORT-MAP] Stopped listener on %s", listenAddr)
 	}
-	pm.listeners = make(map[int]net.Listener)
+	pm.listeners = make(map[string]net.Listener)
 	pm.mu.Unlock()
 
 	pm.wg.Wait()
@@ -187,30 +191,31 @@ func (pm *PortMapper) UpdateMappings(newMappings []PortMappingConfig) {
 	pm.mu.Lock()
 
 	// Find ports to remove
-	newPorts := make(map[int]bool)
+	newPorts := make(map[string]bool)
 	for _, m := range newMappings {
-		newPorts[m.LocalPort] = true
+		newPorts[strings.TrimSpace(m.LocalListen)] = true
 	}
 
 	// Stop listeners for removed ports
-	for port, listener := range pm.listeners {
-		if !newPorts[port] {
+	for listenAddr, listener := range pm.listeners {
+		if !newPorts[listenAddr] {
 			listener.Close()
-			delete(pm.listeners, port)
-			DebugLog("[PORT-MAP] Removed listener on port %d", port)
+			delete(pm.listeners, listenAddr)
+			DebugLog("[PORT-MAP] Removed listener on %s", listenAddr)
 		}
 	}
 	pm.mu.Unlock()
 
 	// Start listeners for new ports
 	for _, mapping := range newMappings {
+		listenAddr := strings.TrimSpace(mapping.LocalListen)
 		pm.mu.RLock()
-		_, exists := pm.listeners[mapping.LocalPort]
+		_, exists := pm.listeners[listenAddr]
 		pm.mu.RUnlock()
 
 		if !exists {
 			if err := pm.startListener(mapping); err != nil {
-				log.Printf("[PORT-MAP] Failed to start new listener on port %d: %v", mapping.LocalPort, err)
+				log.Printf("[PORT-MAP] Failed to start new listener on %s: %v", listenAddr, err)
 			}
 		}
 	}
