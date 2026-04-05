@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/binary"
 	"net"
 	"strconv"
@@ -57,6 +58,45 @@ func TestDiscoverGridSTUNMappedAddress(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("stun server goroutine timeout")
+	}
+}
+
+func TestSTUNBindingAuthenticationRoundTrip(t *testing.T) {
+	txID := []byte{0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC}
+	username := "aps-grid"
+	password := "unit-test-secret"
+
+	req := buildSTUNBindingRequest(txID, username, password)
+	parsedTxID, ok := parseSTUNBindingRequest(req, username, password)
+	if !ok {
+		t.Fatal("expected authenticated STUN request to be accepted")
+	}
+	if !bytes.Equal(parsedTxID, txID) {
+		t.Fatalf("unexpected tx id: %x", parsedTxID)
+	}
+
+	tamperedReq := append([]byte(nil), req...)
+	tamperedReq[len(tamperedReq)-1] ^= 0xFF
+	if _, ok := parseSTUNBindingRequest(tamperedReq, username, password); ok {
+		t.Fatal("expected tampered STUN request to fail integrity check")
+	}
+
+	resp := buildSTUNBindingSuccessResponse(txID, &net.UDPAddr{
+		IP:   net.ParseIP("203.0.113.20"),
+		Port: 54321,
+	}, username, password)
+	host, port, err := parseSTUNBindingResponse(resp, txID, password)
+	if err != nil {
+		t.Fatalf("expected authenticated response parse success, got %v", err)
+	}
+	if host != "203.0.113.20" || port != 54321 {
+		t.Fatalf("unexpected mapped address host=%s port=%d", host, port)
+	}
+
+	tamperedResp := append([]byte(nil), resp...)
+	tamperedResp[len(tamperedResp)-1] ^= 0xAA
+	if _, _, err := parseSTUNBindingResponse(tamperedResp, txID, password); err == nil {
+		t.Fatal("expected tampered STUN response integrity failure")
 	}
 }
 

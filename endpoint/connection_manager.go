@@ -2,10 +2,19 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"log"
 	"net"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 )
 
 // ServerConfig represents a single server connection configuration
@@ -23,6 +32,72 @@ type ConnectionManager struct {
 	mu        sync.RWMutex
 	globalCID string // global config ID from -cid flag
 }
+
+const (
+	endpointInboundRateWindow           = time.Minute
+	endpointInboundMaxPerIPPerWindow    = 60
+	endpointInboundMaxConcurrentPerIP   = 16
+	endpointInboundMaxPendingTLSPerIP   = 8
+	endpointInboundAuthCooldown         = 500 * time.Millisecond
+	endpointInboundSessionCacheMaxItems = 4096
+	endpointInboundSessionCacheTTL      = 24 * time.Hour
+	endpointInboundSessionCacheEnv      = "APS_ENDPOINT_SESSION_CACHE_FILE"
+)
+
+var (
+	errInboundSessionRateLimited = errors.New("inbound connection rate limited")
+	errInboundSessionBlocked     = errors.New("inbound connection temporarily blocked")
+)
+
+type inboundConnectionSession struct {
+	SessionID      string
+	RemoteIP       string
+	RemoteAddr     string
+	OpenedAt       time.Time
+	LastSeenAt     time.Time
+	TLSEstablished bool
+}
+
+type inboundConnectionRecord struct {
+	SessionID      string `json:"session_id"`
+	RemoteIP       string `json:"remote_ip"`
+	RemoteAddr     string `json:"remote_addr"`
+	OpenedAt       int64  `json:"opened_at"`
+	ClosedAt       int64  `json:"closed_at"`
+	TLSEstablished bool   `json:"tls_established"`
+	Authenticated  bool   `json:"authenticated"`
+}
+
+type inboundConnectionCache struct {
+	Version int                       `json:"version"`
+	SavedAt int64                     `json:"saved_at"`
+	History []inboundConnectionRecord `json:"history,omitempty"`
+}
+
+type inboundIPState struct {
+	Attempts     []time.Time
+	Active       int
+	PendingTLS   int
+	BlockedUntil time.Time
+}
+
+type inboundConnectionGuard struct {
+	mu        sync.Mutex
+	loaded    bool
+	cachePath string
+	sessions  map[string]inboundConnectionSession
+	history   []inboundConnectionRecord
+	ipState   map[string]*inboundIPState
+}
+
+var endpointInboundGuard = &inboundConnectionGuard{
+	cachePath: resolveInboundSessionCachePath(),
+	sessions:  make(map[string]inboundConnectionSession),
+	history:   make([]inboundConnectionRecord, 0, 256),
+	ipState:   make(map[string]*inboundIPState),
+}
+
+var endpointInboundSessionSeq uint64
 
 // NewConnectionManager creates a new connection manager
 func NewConnectionManager(globalCID string) *ConnectionManager {
@@ -195,4 +270,280 @@ func (cm *ConnectionManager) CloseAll() {
 		DebugLog("[CONN-MGR] Closed connection to %s", addr)
 	}
 	cm.active = make(map[string]context.CancelFunc)
+}
+
+func acquireInboundConnectionSession(remoteAddr net.Addr) (inboundConnectionSession, error) {
+	return endpointInboundGuard.acquire(remoteAddr)
+}
+
+func markInboundConnectionTLSEstablished(sessionID string) {
+	endpointInboundGuard.markTLS(sessionID)
+}
+
+func releaseInboundConnectionSession(sessionID string, authenticated bool) {
+	endpointInboundGuard.release(sessionID, authenticated)
+}
+
+func inboundConnectionSessionCountByIP(ip string) int {
+	return endpointInboundGuard.activeSessionsByIP(ip)
+}
+
+func resolveInboundSessionCachePath() string {
+	if path := strings.TrimSpace(os.Getenv(endpointInboundSessionCacheEnv)); path != "" {
+		return path
+	}
+	return filepath.Join(".cache", "endpoint_inbound_session_cache.json")
+}
+
+func parseRemoteIP(remoteAddr net.Addr) string {
+	if remoteAddr == nil {
+		return ""
+	}
+	raw := strings.TrimSpace(remoteAddr.String())
+	if raw == "" {
+		return ""
+	}
+	host, _, err := net.SplitHostPort(raw)
+	if err != nil {
+		host = raw
+	}
+	host = strings.Trim(strings.TrimSpace(host), "[]")
+	if host == "" {
+		return ""
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.String()
+	}
+	return host
+}
+
+func generateInboundSessionID() string {
+	buf := make([]byte, 12)
+	if _, err := rand.Read(buf); err == nil {
+		return hex.EncodeToString(buf)
+	}
+	seq := atomic.AddUint64(&endpointInboundSessionSeq, 1)
+	return strconv.FormatInt(time.Now().UTC().UnixNano(), 16) + "-" + strconv.FormatUint(seq, 16)
+}
+
+func (g *inboundConnectionGuard) acquire(remoteAddr net.Addr) (inboundConnectionSession, error) {
+	ip := parseRemoteIP(remoteAddr)
+	if ip == "" {
+		return inboundConnectionSession{}, errors.New("missing remote ip")
+	}
+
+	now := time.Now().UTC()
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.loadCacheLocked()
+
+	state := g.ensureIPStateLocked(ip)
+	g.pruneIPStateLocked(state, now)
+
+	if !state.BlockedUntil.IsZero() && now.Before(state.BlockedUntil) {
+		return inboundConnectionSession{}, errInboundSessionBlocked
+	}
+	if len(state.Attempts) >= endpointInboundMaxPerIPPerWindow {
+		state.BlockedUntil = now.Add(endpointInboundAuthCooldown)
+		return inboundConnectionSession{}, errInboundSessionRateLimited
+	}
+	if state.Active >= endpointInboundMaxConcurrentPerIP {
+		return inboundConnectionSession{}, errInboundSessionRateLimited
+	}
+	if state.PendingTLS >= endpointInboundMaxPendingTLSPerIP {
+		return inboundConnectionSession{}, errInboundSessionRateLimited
+	}
+
+	sessionID := generateInboundSessionID()
+	session := inboundConnectionSession{
+		SessionID:  sessionID,
+		RemoteIP:   ip,
+		RemoteAddr: strings.TrimSpace(remoteAddr.String()),
+		OpenedAt:   now,
+		LastSeenAt: now,
+	}
+
+	state.Attempts = append(state.Attempts, now)
+	state.Active++
+	state.PendingTLS++
+	g.sessions[sessionID] = session
+	return session, nil
+}
+
+func (g *inboundConnectionGuard) markTLS(sessionID string) {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return
+	}
+	now := time.Now().UTC()
+
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	session, exists := g.sessions[sessionID]
+	if !exists {
+		return
+	}
+	session.LastSeenAt = now
+	if !session.TLSEstablished {
+		session.TLSEstablished = true
+		if state, ok := g.ipState[session.RemoteIP]; ok && state.PendingTLS > 0 {
+			state.PendingTLS--
+		}
+	}
+	g.sessions[sessionID] = session
+}
+
+func (g *inboundConnectionGuard) release(sessionID string, authenticated bool) {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return
+	}
+	now := time.Now().UTC()
+
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.loadCacheLocked()
+
+	session, exists := g.sessions[sessionID]
+	if !exists {
+		return
+	}
+	delete(g.sessions, sessionID)
+
+	state := g.ensureIPStateLocked(session.RemoteIP)
+	g.pruneIPStateLocked(state, now)
+	if state.Active > 0 {
+		state.Active--
+	}
+	if !session.TLSEstablished && state.PendingTLS > 0 {
+		state.PendingTLS--
+	}
+	if !authenticated {
+		state.BlockedUntil = now.Add(endpointInboundAuthCooldown)
+	}
+
+	g.history = append(g.history, inboundConnectionRecord{
+		SessionID:      session.SessionID,
+		RemoteIP:       session.RemoteIP,
+		RemoteAddr:     session.RemoteAddr,
+		OpenedAt:       session.OpenedAt.Unix(),
+		ClosedAt:       now.Unix(),
+		TLSEstablished: session.TLSEstablished,
+		Authenticated:  authenticated,
+	})
+	g.pruneHistoryLocked(now)
+	g.persistCacheLocked()
+}
+
+func (g *inboundConnectionGuard) activeSessionsByIP(ip string) int {
+	ip = strings.TrimSpace(ip)
+	if ip == "" {
+		return 0
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	state := g.ipState[ip]
+	if state == nil {
+		return 0
+	}
+	return state.Active
+}
+
+func (g *inboundConnectionGuard) ensureIPStateLocked(ip string) *inboundIPState {
+	state := g.ipState[ip]
+	if state != nil {
+		return state
+	}
+	state = &inboundIPState{}
+	g.ipState[ip] = state
+	return state
+}
+
+func (g *inboundConnectionGuard) pruneIPStateLocked(state *inboundIPState, now time.Time) {
+	if state == nil {
+		return
+	}
+	filtered := state.Attempts[:0]
+	for _, attempt := range state.Attempts {
+		if now.Sub(attempt) <= endpointInboundRateWindow {
+			filtered = append(filtered, attempt)
+		}
+	}
+	state.Attempts = filtered
+	if !state.BlockedUntil.IsZero() && now.After(state.BlockedUntil) {
+		state.BlockedUntil = time.Time{}
+	}
+}
+
+func (g *inboundConnectionGuard) pruneHistoryLocked(now time.Time) {
+	filtered := g.history[:0]
+	for _, item := range g.history {
+		closedAt := time.Unix(item.ClosedAt, 0)
+		if now.Sub(closedAt) <= endpointInboundSessionCacheTTL {
+			filtered = append(filtered, item)
+		}
+	}
+	g.history = filtered
+	if len(g.history) > endpointInboundSessionCacheMaxItems {
+		g.history = g.history[len(g.history)-endpointInboundSessionCacheMaxItems:]
+	}
+}
+
+func (g *inboundConnectionGuard) loadCacheLocked() {
+	if g.loaded {
+		return
+	}
+	g.loaded = true
+	cachePath := strings.TrimSpace(g.cachePath)
+	if cachePath == "" {
+		return
+	}
+	data, err := os.ReadFile(cachePath)
+	if err != nil || len(data) == 0 {
+		return
+	}
+	var cache inboundConnectionCache
+	if err := json.Unmarshal(data, &cache); err != nil {
+		return
+	}
+	now := time.Now().UTC()
+	for _, item := range cache.History {
+		closedAt := time.Unix(item.ClosedAt, 0)
+		if now.Sub(closedAt) > endpointInboundSessionCacheTTL {
+			continue
+		}
+		g.history = append(g.history, item)
+		if item.RemoteIP == "" {
+			continue
+		}
+		state := g.ensureIPStateLocked(item.RemoteIP)
+		state.Attempts = append(state.Attempts, closedAt)
+	}
+	g.pruneHistoryLocked(now)
+	for _, state := range g.ipState {
+		g.pruneIPStateLocked(state, now)
+	}
+}
+
+func (g *inboundConnectionGuard) persistCacheLocked() {
+	cachePath := strings.TrimSpace(g.cachePath)
+	if cachePath == "" {
+		return
+	}
+	dir := filepath.Dir(cachePath)
+	if dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return
+		}
+	}
+	cache := inboundConnectionCache{
+		Version: 1,
+		SavedAt: time.Now().UTC().Unix(),
+		History: append([]inboundConnectionRecord(nil), g.history...),
+	}
+	data, err := json.Marshal(cache)
+	if err != nil {
+		return
+	}
+	_ = os.WriteFile(cachePath, data, 0600)
 }

@@ -1,6 +1,9 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
+	"strings"
 	"testing"
 	"time"
 )
@@ -24,6 +27,36 @@ func resetGatewayRuntimeStateForTest() {
 	endpointGatewayRuntime.routeDenied = make(map[string]map[string]time.Time)
 	endpointGatewayRuntime.peerAuthSeen = make(map[string]int64)
 	endpointGatewayRuntime.mu.Unlock()
+}
+
+func TestValidateGatewayControlPayloadRejectsStructuredAndXML(t *testing.T) {
+	if err := validateGatewayControlPayload("APS-GW/1 CONNECT 203.0.113.10:443 hop=4\n"); err != nil {
+		t.Fatalf("expected valid control payload, got %v", err)
+	}
+	if err := validateGatewayControlPayload("{\"type\":\"connect\"}"); err == nil {
+		t.Fatal("expected json payload to be rejected")
+	}
+	if err := validateGatewayControlPayload("<?xml version=\"1.0\"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM \"file:///etc/passwd\">]>"); err == nil {
+		t.Fatal("expected xml entity payload to be rejected")
+	}
+}
+
+func TestReadGatewayControlLineHonorsMaxSize(t *testing.T) {
+	validReader := bufio.NewReader(strings.NewReader("APS-GW/1 GRID hop=4\n"))
+	line, err := readGatewayControlLine(validReader)
+	if err != nil {
+		t.Fatalf("readGatewayControlLine failed: %v", err)
+	}
+	if strings.TrimSpace(line) != "APS-GW/1 GRID hop=4" {
+		t.Fatalf("unexpected line: %q", line)
+	}
+
+	oversize := bytes.Repeat([]byte("A"), gatewayMaxControlPayloadSize+1)
+	oversize = append(oversize, '\n')
+	badReader := bufio.NewReader(bytes.NewReader(oversize))
+	if _, err := readGatewayControlLine(badReader); err == nil {
+		t.Fatal("expected oversized control payload to fail")
+	}
 }
 
 func TestNormalizeGatewayRuntimeListenAddress(t *testing.T) {

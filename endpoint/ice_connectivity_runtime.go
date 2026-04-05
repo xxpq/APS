@@ -4,6 +4,7 @@ import (
 	"net"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 )
 
@@ -58,11 +59,15 @@ func serveEndpointICEConnectivity(conn *net.UDPConn, port int) {
 		if err != nil {
 			return
 		}
-		txID, ok := parseSTUNBindingRequest(buf[:n])
+		username, password := currentEndpointGridSTUNAuthCredentials()
+		if strings.TrimSpace(password) == "" {
+			continue
+		}
+		txID, ok := parseSTUNBindingRequest(buf[:n], username, password)
 		if !ok {
 			continue
 		}
-		resp := buildSTUNBindingSuccessResponse(txID, remote)
+		resp := buildSTUNBindingSuccessResponse(txID, remote, username, password)
 		if len(resp) == 0 {
 			continue
 		}

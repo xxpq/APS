@@ -52,6 +52,8 @@ const (
 	gatewayKEXNonceBytes         = 16
 	gatewayDialTimeout           = 5 * time.Second
 	gatewayHandshakeTimeout      = 8 * time.Second
+	gatewayPreTLSGuardWindow     = 500 * time.Millisecond
+	gatewayMaxControlPayloadSize = 10 * 1024 * 1024
 )
 
 func defaultGatewayListenAddress(discoverPort int) string {
@@ -823,16 +825,24 @@ func acceptGatewayRelayLoop(listener net.Listener, listenAddr string) {
 func handleGatewayRelayConnection(clientConn net.Conn, listenAddr string) {
 	defer clientConn.Close()
 
-	_ = clientConn.SetDeadline(time.Now().Add(15 * time.Second))
+	session, sessionErr := acquireInboundConnectionSession(clientConn.RemoteAddr())
+	if sessionErr != nil {
+		_, _ = io.WriteString(clientConn, "ERR rate limited\n")
+		return
+	}
+	authenticated := false
+	defer releaseInboundConnectionSession(session.SessionID, authenticated)
+
+	_ = clientConn.SetDeadline(time.Now().Add(gatewayPreTLSGuardWindow))
 	reader := bufio.NewReader(clientConn)
-	line, err := reader.ReadString('\n')
+	line, err := readGatewayControlLine(reader)
 	if err != nil {
 		return
 	}
 
 	fields := strings.Fields(strings.TrimSpace(line))
 	if len(fields) >= 2 && fields[0] == gatewayProtocolVersion && strings.EqualFold(fields[1], gatewayCommandGrid) {
-		handleGatewayGridConnection(clientConn, reader, line)
+		authenticated = handleGatewayGridConnection(clientConn, reader, line, session.SessionID)
 		return
 	}
 
@@ -855,10 +865,13 @@ func handleGatewayRelayConnection(clientConn net.Conn, listenAddr string) {
 		_, _ = io.WriteString(clientConn, "ERR loop detected\n")
 		return
 	}
+	_ = clientConn.SetDeadline(time.Now().Add(gatewayHandshakeTimeout))
 	if _, err := completeGatewayKEXServer(clientConn, reader, gatewayCommandConnect, targetAddr, meta); err != nil {
 		_, _ = io.WriteString(clientConn, "ERR unauthorized\n")
 		return
 	}
+	markInboundConnectionTLSEstablished(session.SessionID)
+	authenticated = true
 
 	relayMeta := meta
 	if runtimeNodeID != "" {
@@ -926,23 +939,25 @@ func handleGatewayRelayConnection(clientConn net.Conn, listenAddr string) {
 	wg.Wait()
 }
 
-func handleGatewayGridConnection(clientConn net.Conn, reader *bufio.Reader, line string) {
+func handleGatewayGridConnection(clientConn net.Conn, reader *bufio.Reader, line string, sessionID string) bool {
 	meta, parseErr := parseGatewayGridLine(line)
 	if parseErr != nil {
 		_, _ = io.WriteString(clientConn, "ERR invalid request\n")
-		return
+		return false
 	}
 
 	runtimeNodeID := currentGatewayNodeID()
 	if err := validateGatewayGridRequest(runtimeNodeID, meta); err != nil {
 		_, _ = io.WriteString(clientConn, "ERR loop detected\n")
-		return
+		return false
 	}
+	_ = clientConn.SetDeadline(time.Now().Add(gatewayHandshakeTimeout))
 	integrityKey, err := completeGatewayKEXServer(clientConn, reader, gatewayCommandGrid, "", meta)
 	if err != nil {
 		_, _ = io.WriteString(clientConn, "ERR unauthorized\n")
-		return
+		return false
 	}
+	markInboundConnectionTLSEstablished(sessionID)
 
 	_, _ = io.WriteString(clientConn, "OK\n")
 	_ = clientConn.SetDeadline(time.Time{})
@@ -962,6 +977,7 @@ func handleGatewayGridConnection(clientConn net.Conn, reader *bufio.Reader, line
 	}
 
 	handleEndpointGridTransitConnection(gridConn)
+	return true
 }
 
 func parseGatewayConnectLine(line string) (targetAddr string, meta gatewayConnectMeta, err error) {
@@ -999,6 +1015,9 @@ func parseGatewayGridLine(line string) (gatewayConnectMeta, error) {
 }
 
 func parseGatewayCommandFields(line string, command string, minFields int) ([]string, error) {
+	if err := validateGatewayControlPayload(line); err != nil {
+		return nil, err
+	}
 	fields := strings.Fields(strings.TrimSpace(line))
 	if len(fields) < minFields {
 		return nil, errors.New("invalid gateway command")
@@ -1142,7 +1161,7 @@ func dialTunnelServerViaGatewayWithMeta(gatewayAddr, targetAddr string, meta gat
 	}
 
 	reader := bufio.NewReader(conn)
-	respLine, err := reader.ReadString('\n')
+	respLine, err := readGatewayControlLine(reader)
 	if err != nil {
 		_ = conn.Close()
 		return nil, err
@@ -1361,7 +1380,7 @@ func dialGatewayGridWithMeta(peerAddr string, meta gatewayConnectMeta) (net.Conn
 	}
 
 	reader := bufio.NewReader(conn)
-	respLine, err := reader.ReadString('\n')
+	respLine, err := readGatewayControlLine(reader)
 	if err != nil {
 		_ = conn.Close()
 		return nil, err
@@ -1587,7 +1606,7 @@ func completeGatewayKEXClient(conn net.Conn, reader *bufio.Reader, initialRespon
 	if _, err := io.WriteString(conn, buildGatewayAuthLine(clientProof)); err != nil {
 		return "", err
 	}
-	finalLine, err := reader.ReadString('\n')
+	finalLine, err := readGatewayControlLine(reader)
 	if err != nil {
 		return "", err
 	}
@@ -1617,7 +1636,7 @@ func completeGatewayKEXServer(conn net.Conn, reader *bufio.Reader, command, targ
 	if _, err := io.WriteString(conn, buildGatewayChallengeLine(offer.publicKey, offer.nonce, serverProof)); err != nil {
 		return "", err
 	}
-	authLine, err := reader.ReadString('\n')
+	authLine, err := readGatewayControlLine(reader)
 	if err != nil {
 		return "", err
 	}
@@ -1836,6 +1855,12 @@ func consumeGatewayPeerAuthReplayLocked(nodeID, nonce string, ts int64, now time
 }
 
 func applyGatewayPeerAnnounce(msg string, remoteAddr *net.UDPAddr) bool {
+	if len(msg) > gatewayMaxControlPayloadSize {
+		return false
+	}
+	if err := validateGatewayControlPayload(msg); err != nil {
+		return false
+	}
 	fields := strings.Fields(strings.TrimSpace(msg))
 	if len(fields) < 2 || fields[0] != gatewayPeerMagic {
 		return false
@@ -2668,4 +2693,49 @@ func decodeGatewayField(v string) string {
 		return strings.TrimSpace(v)
 	}
 	return strings.TrimSpace(decoded)
+}
+
+func readGatewayControlLine(reader *bufio.Reader) (string, error) {
+	if reader == nil {
+		return "", errors.New("gateway reader is required")
+	}
+
+	buf := make([]byte, 0, 256)
+	for {
+		part, err := reader.ReadSlice('\n')
+		if len(part) > 0 {
+			if len(buf)+len(part) > gatewayMaxControlPayloadSize {
+				return "", errors.New("gateway control payload too large")
+			}
+			buf = append(buf, part...)
+		}
+		if err == nil {
+			return string(buf), nil
+		}
+		if errors.Is(err, bufio.ErrBufferFull) {
+			continue
+		}
+		return "", err
+	}
+}
+
+func validateGatewayControlPayload(line string) error {
+	if len(line) > gatewayMaxControlPayloadSize {
+		return errors.New("gateway control payload too large")
+	}
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" {
+		return errors.New("empty gateway payload")
+	}
+	if strings.IndexByte(trimmed, 0) >= 0 {
+		return errors.New("gateway payload contains invalid null byte")
+	}
+	lower := strings.ToLower(trimmed)
+	if strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[") {
+		return errors.New("unexpected json payload")
+	}
+	if strings.Contains(lower, "<?xml") || strings.Contains(lower, "<!doctype") || strings.Contains(lower, "<!entity") {
+		return errors.New("xml entity payload rejected")
+	}
+	return nil
 }

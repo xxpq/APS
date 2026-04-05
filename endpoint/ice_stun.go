@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha1"
 	"encoding/binary"
 	"errors"
 	"net"
@@ -16,9 +18,17 @@ const (
 	stunBindingRequestType = 0x0001
 	stunBindingSuccessType = 0x0101
 	stunAttrMappedAddress  = 0x0001
+	stunAttrUsername       = 0x0006
+	stunAttrMessageInt     = 0x0008
 	stunAttrXorMappedAddr  = 0x0020
 	stunMagicCookie        = 0x2112A442
+	stunSharedAuthUsername = "aps-grid"
 )
+
+type stunAttribute struct {
+	Type  uint16
+	Value []byte
+}
 
 func parseGridSTUNServerCandidate(raw string) (string, int, bool) {
 	candidate := strings.TrimSpace(raw)
@@ -92,7 +102,8 @@ func discoverGridSTUNMappedAddress(serverAddr string, timeout time.Duration) (st
 	if _, err := rand.Read(txID); err != nil {
 		return "", 0, err
 	}
-	req := buildSTUNBindingRequest(txID)
+	username, password := currentEndpointGridSTUNAuthCredentials()
+	req := buildSTUNBindingRequest(txID, username, password)
 	if _, err := conn.Write(req); err != nil {
 		return "", 0, err
 	}
@@ -102,19 +113,30 @@ func discoverGridSTUNMappedAddress(serverAddr string, timeout time.Duration) (st
 	if err != nil {
 		return "", 0, err
 	}
-	return parseSTUNBindingResponse(buf[:n], txID)
+	// Do not force MESSAGE-INTEGRITY for third-party/public STUN services.
+	return parseSTUNBindingResponse(buf[:n], txID, "")
 }
 
-func buildSTUNBindingRequest(txID []byte) []byte {
-	req := make([]byte, 20)
-	binary.BigEndian.PutUint16(req[0:2], stunBindingRequestType)
-	binary.BigEndian.PutUint16(req[2:4], 0)
-	binary.BigEndian.PutUint32(req[4:8], stunMagicCookie)
-	copy(req[8:20], txID)
-	return req
+func buildSTUNBindingRequest(txID []byte, username, password string) []byte {
+	attrs := []stunAttribute(nil)
+	username = strings.TrimSpace(username)
+	password = strings.TrimSpace(password)
+	if username != "" {
+		attrs = append(attrs, stunAttribute{
+			Type:  stunAttrUsername,
+			Value: []byte(username),
+		})
+	}
+	if password == "" {
+		return buildSTUNMessage(stunBindingRequestType, txID, attrs, "")
+	}
+	if username == "" {
+		return buildSTUNMessage(stunBindingRequestType, txID, nil, "")
+	}
+	return buildSTUNMessage(stunBindingRequestType, txID, attrs, password)
 }
 
-func parseSTUNBindingRequest(packet []byte) ([]byte, bool) {
+func parseSTUNBindingRequest(packet []byte, expectedUsername, expectedPassword string) ([]byte, bool) {
 	if len(packet) < 20 {
 		return nil, false
 	}
@@ -129,12 +151,61 @@ func parseSTUNBindingRequest(packet []byte) ([]byte, bool) {
 	if binary.BigEndian.Uint32(packet[4:8]) != stunMagicCookie {
 		return nil, false
 	}
+
+	expectedUsername = strings.TrimSpace(expectedUsername)
+	expectedPassword = strings.TrimSpace(expectedPassword)
+	attrs := packet[20:]
+	attrOffset := 20
+	requestUsername := ""
+	messageIntegrity := []byte(nil)
+	messageIntegrityOffset := -1
+	for len(attrs) >= 4 {
+		attrType := binary.BigEndian.Uint16(attrs[0:2])
+		attrLen := int(binary.BigEndian.Uint16(attrs[2:4]))
+		if len(attrs) < 4+attrLen {
+			break
+		}
+		value := attrs[4 : 4+attrLen]
+		switch attrType {
+		case stunAttrUsername:
+			if requestUsername == "" {
+				requestUsername = strings.TrimSpace(string(value))
+			}
+		case stunAttrMessageInt:
+			if attrLen == 20 && messageIntegrityOffset < 0 {
+				messageIntegrityOffset = attrOffset
+				messageIntegrity = append([]byte(nil), value...)
+			}
+		}
+		padded := attrLen
+		if rem := attrLen % 4; rem != 0 {
+			padded += 4 - rem
+		}
+		if len(attrs) < 4+padded {
+			break
+		}
+		attrs = attrs[4+padded:]
+		attrOffset += 4 + padded
+	}
+
+	if expectedPassword != "" {
+		if expectedUsername != "" && !strings.EqualFold(requestUsername, expectedUsername) {
+			return nil, false
+		}
+		if len(messageIntegrity) != 20 || messageIntegrityOffset < 0 {
+			return nil, false
+		}
+		if !verifySTUNMessageIntegrity(packet, messageIntegrityOffset, messageIntegrity, expectedPassword) {
+			return nil, false
+		}
+	}
+
 	txID := make([]byte, 12)
 	copy(txID, packet[8:20])
 	return txID, true
 }
 
-func buildSTUNBindingSuccessResponse(txID []byte, remote *net.UDPAddr) []byte {
+func buildSTUNBindingSuccessResponse(txID []byte, remote *net.UDPAddr, _ string, password string) []byte {
 	if len(txID) != 12 || remote == nil || remote.IP == nil {
 		return nil
 	}
@@ -142,15 +213,9 @@ func buildSTUNBindingSuccessResponse(txID []byte, remote *net.UDPAddr) []byte {
 	if len(attr) == 0 {
 		return nil
 	}
-	resp := make([]byte, 20+4+len(attr))
-	binary.BigEndian.PutUint16(resp[0:2], stunBindingSuccessType)
-	binary.BigEndian.PutUint16(resp[2:4], uint16(4+len(attr)))
-	binary.BigEndian.PutUint32(resp[4:8], stunMagicCookie)
-	copy(resp[8:20], txID)
-	binary.BigEndian.PutUint16(resp[20:22], stunAttrXorMappedAddr)
-	binary.BigEndian.PutUint16(resp[22:24], uint16(len(attr)))
-	copy(resp[24:], attr)
-	return resp
+	return buildSTUNMessage(stunBindingSuccessType, txID, []stunAttribute{
+		{Type: stunAttrXorMappedAddr, Value: attr},
+	}, strings.TrimSpace(password))
 }
 
 func buildSTUNXORMappedAddress(ip net.IP, port int, txID []byte) []byte {
@@ -185,7 +250,7 @@ func buildSTUNXORMappedAddress(ip net.IP, port int, txID []byte) []byte {
 	return out
 }
 
-func parseSTUNBindingResponse(packet []byte, txID []byte) (string, int, error) {
+func parseSTUNBindingResponse(packet []byte, txID []byte, expectedPassword string) (string, int, error) {
 	if len(packet) < 20 {
 		return "", 0, errors.New("short stun packet")
 	}
@@ -205,6 +270,10 @@ func parseSTUNBindingResponse(packet []byte, txID []byte) (string, int, error) {
 	}
 
 	attrs := packet[20 : 20+msgLen]
+	attrOffset := 20
+	miOffset := -1
+	miValue := []byte(nil)
+	mappedHost, mappedPort := "", 0
 	for len(attrs) >= 4 {
 		attrType := binary.BigEndian.Uint16(attrs[0:2])
 		attrLen := int(binary.BigEndian.Uint16(attrs[2:4]))
@@ -216,12 +285,17 @@ func parseSTUNBindingResponse(packet []byte, txID []byte) (string, int, error) {
 		case stunAttrXorMappedAddr:
 			host, port, err := parseSTUNMappedAddress(value, true, txID)
 			if err == nil {
-				return host, port, nil
+				mappedHost, mappedPort = host, port
 			}
 		case stunAttrMappedAddress:
 			host, port, err := parseSTUNMappedAddress(value, false, txID)
 			if err == nil {
-				return host, port, nil
+				mappedHost, mappedPort = host, port
+			}
+		case stunAttrMessageInt:
+			if attrLen == 20 && miOffset < 0 {
+				miOffset = attrOffset
+				miValue = append([]byte(nil), value...)
 			}
 		}
 
@@ -233,8 +307,111 @@ func parseSTUNBindingResponse(packet []byte, txID []byte) (string, int, error) {
 			break
 		}
 		attrs = attrs[4+padded:]
+		attrOffset += 4 + padded
 	}
-	return "", 0, errors.New("no mapped address in stun response")
+	if mappedHost == "" {
+		return "", 0, errors.New("no mapped address in stun response")
+	}
+	expectedPassword = strings.TrimSpace(expectedPassword)
+	if expectedPassword != "" {
+		if len(miValue) != 20 || miOffset < 0 {
+			return "", 0, errors.New("missing stun message integrity")
+		}
+		if !verifySTUNMessageIntegrity(packet, miOffset, miValue, expectedPassword) {
+			return "", 0, errors.New("invalid stun message integrity")
+		}
+	}
+	return mappedHost, mappedPort, nil
+}
+
+func buildSTUNMessage(msgType uint16, txID []byte, attrs []stunAttribute, integrityKey string) []byte {
+	if len(txID) != 12 {
+		return nil
+	}
+	encodedAttrs := encodeSTUNAttributes(attrs)
+	integrityKey = strings.TrimSpace(integrityKey)
+	if integrityKey == "" {
+		msg := make([]byte, 20+len(encodedAttrs))
+		binary.BigEndian.PutUint16(msg[0:2], msgType)
+		binary.BigEndian.PutUint16(msg[2:4], uint16(len(encodedAttrs)))
+		binary.BigEndian.PutUint32(msg[4:8], stunMagicCookie)
+		copy(msg[8:20], txID)
+		copy(msg[20:], encodedAttrs)
+		return msg
+	}
+
+	totalLen := len(encodedAttrs) + 24
+	msg := make([]byte, 20+totalLen)
+	binary.BigEndian.PutUint16(msg[0:2], msgType)
+	binary.BigEndian.PutUint16(msg[2:4], uint16(totalLen))
+	binary.BigEndian.PutUint32(msg[4:8], stunMagicCookie)
+	copy(msg[8:20], txID)
+	copy(msg[20:], encodedAttrs)
+	offset := 20 + len(encodedAttrs)
+	binary.BigEndian.PutUint16(msg[offset:offset+2], stunAttrMessageInt)
+	binary.BigEndian.PutUint16(msg[offset+2:offset+4], 20)
+	mac := hmac.New(sha1.New, []byte(integrityKey))
+	mac.Write(msg[:offset+4])
+	sum := mac.Sum(nil)
+	copy(msg[offset+4:offset+24], sum[:20])
+	return msg
+}
+
+func encodeSTUNAttributes(attrs []stunAttribute) []byte {
+	if len(attrs) == 0 {
+		return nil
+	}
+	total := 0
+	for _, attr := range attrs {
+		attrLen := len(attr.Value)
+		total += 4 + attrLen
+		if rem := attrLen % 4; rem != 0 {
+			total += 4 - rem
+		}
+	}
+
+	out := make([]byte, total)
+	offset := 0
+	for _, attr := range attrs {
+		attrLen := len(attr.Value)
+		binary.BigEndian.PutUint16(out[offset:offset+2], attr.Type)
+		binary.BigEndian.PutUint16(out[offset+2:offset+4], uint16(attrLen))
+		copy(out[offset+4:offset+4+attrLen], attr.Value)
+		offset += 4 + attrLen
+		if rem := attrLen % 4; rem != 0 {
+			offset += 4 - rem
+		}
+	}
+	return out
+}
+
+func verifySTUNMessageIntegrity(packet []byte, attrOffset int, received []byte, key string) bool {
+	key = strings.TrimSpace(key)
+	if key == "" || len(received) != 20 || attrOffset < 20 || attrOffset+24 > len(packet) {
+		return false
+	}
+	payloadLen := attrOffset + 24 - 20
+	if payloadLen < 0 || payloadLen > 65535 {
+		return false
+	}
+	verifyPacket := make([]byte, attrOffset+4)
+	copy(verifyPacket, packet[:attrOffset+4])
+	binary.BigEndian.PutUint16(verifyPacket[2:4], uint16(payloadLen))
+	mac := hmac.New(sha1.New, []byte(key))
+	mac.Write(verifyPacket)
+	expected := mac.Sum(nil)
+	return hmac.Equal(expected[:20], received)
+}
+
+func currentEndpointGridSTUNAuthCredentials() (string, string) {
+	if connCtx, loaded := currentEndpointGridRuntimeContext(); loaded {
+		credential := strings.TrimSpace(connCtx.SessionCredential)
+		if credential != "" {
+			return stunSharedAuthUsername, credential
+		}
+	}
+	username, password := currentEndpointGridICESessionAuth()
+	return strings.TrimSpace(username), strings.TrimSpace(password)
 }
 
 func parseSTUNMappedAddress(value []byte, xor bool, txID []byte) (string, int, error) {

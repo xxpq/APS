@@ -959,7 +959,8 @@ func probeGridICEUDP(addr string, timeout time.Duration) bool {
 	if _, err := rand.Read(txID); err != nil {
 		return false
 	}
-	req := buildSTUNBindingRequest(txID)
+	username, password := currentEndpointGridSTUNAuthCredentials()
+	req := buildSTUNBindingRequest(txID, username, password)
 	if _, err := conn.Write(req); err != nil {
 		return false
 	}
@@ -968,7 +969,7 @@ func probeGridICEUDP(addr string, timeout time.Duration) bool {
 	if err != nil {
 		return false
 	}
-	_, _, parseErr := parseSTUNBindingResponse(buf[:n], txID)
+	_, _, parseErr := parseSTUNBindingResponse(buf[:n], txID, strings.TrimSpace(password))
 	return parseErr == nil
 }
 
