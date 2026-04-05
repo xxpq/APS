@@ -824,9 +824,15 @@ func acceptGatewayRelayLoop(listener net.Listener, listenAddr string) {
 
 func handleGatewayRelayConnection(clientConn net.Conn, listenAddr string) {
 	defer clientConn.Close()
+	remoteAddr := ""
+	if clientConn.RemoteAddr() != nil {
+		remoteAddr = clientConn.RemoteAddr().String()
+	}
+	DebugLog("[GATEWAY] Inbound relay accepted remote=%s", remoteAddr)
 
 	session, sessionErr := acquireInboundConnectionSession(clientConn.RemoteAddr())
 	if sessionErr != nil {
+		DebugLog("[GATEWAY] Inbound relay rate limited remote=%s", remoteAddr)
 		_, _ = io.WriteString(clientConn, "ERR rate limited\n")
 		return
 	}
@@ -848,16 +854,20 @@ func handleGatewayRelayConnection(clientConn net.Conn, listenAddr string) {
 
 	targetAddr, meta, parseErr := parseGatewayConnectLine(line)
 	if parseErr != nil {
+		DebugLog("[GATEWAY] Inbound relay invalid request remote=%s err=%v", remoteAddr, parseErr)
 		_, _ = io.WriteString(clientConn, "ERR invalid request\n")
 		return
 	}
+	DebugLog("[GATEWAY] Inbound relay request remote=%s target=%s origin=%s hop=%d", remoteAddr, targetAddr, meta.OriginNodeID, meta.HopLimit)
 
 	runtimeNodeID := currentGatewayNodeID()
 	if !isGatewayRelayAuthorized(targetAddr, meta) {
+		DebugLog("[GATEWAY] Inbound relay unauthorized remote=%s target=%s", remoteAddr, targetAddr)
 		_, _ = io.WriteString(clientConn, "ERR unauthorized\n")
 		return
 	}
 	if err := validateGatewayRelayRequest(targetAddr, listenAddr, runtimeNodeID, meta); err != nil {
+		DebugLog("[GATEWAY] Inbound relay rejected remote=%s target=%s err=%v", remoteAddr, targetAddr, err)
 		if strings.Contains(strings.ToLower(err.Error()), "target not allowed") {
 			_, _ = io.WriteString(clientConn, "ERR target not allowed\n")
 			return
@@ -867,6 +877,7 @@ func handleGatewayRelayConnection(clientConn net.Conn, listenAddr string) {
 	}
 	_ = clientConn.SetDeadline(time.Now().Add(gatewayHandshakeTimeout))
 	if _, err := completeGatewayKEXServer(clientConn, reader, gatewayCommandConnect, targetAddr, meta); err != nil {
+		DebugLog("[GATEWAY] Inbound relay KEX failed remote=%s target=%s err=%v", remoteAddr, targetAddr, err)
 		_, _ = io.WriteString(clientConn, "ERR unauthorized\n")
 		return
 	}
@@ -880,6 +891,7 @@ func handleGatewayRelayConnection(clientConn net.Conn, listenAddr string) {
 
 	upstreamConn, err := net.DialTimeout("tcp", targetAddr, 15*time.Second)
 	if err != nil {
+		DebugLog("[GATEWAY] Inbound relay direct dial failed remote=%s target=%s err=%v", remoteAddr, targetAddr, err)
 		if relayMeta.HopLimit <= 1 {
 			_, _ = io.WriteString(clientConn, "ERR hop limit exceeded\n")
 			return
@@ -908,6 +920,7 @@ func handleGatewayRelayConnection(clientConn net.Conn, listenAddr string) {
 			return
 		}
 	}
+	DebugLog("[GATEWAY] Inbound relay established remote=%s target=%s", remoteAddr, targetAddr)
 	defer upstreamConn.Close()
 
 	_, _ = io.WriteString(clientConn, "OK\n")

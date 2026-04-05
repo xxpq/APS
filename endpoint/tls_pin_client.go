@@ -16,6 +16,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -24,10 +25,11 @@ import (
 )
 
 const (
-	TLSPinAlgorithm           = "spki-sha256-aesgcm-v1"
-	TLSEncryptedConfigIDParam = "eid"
-	TLSEncryptedSaltParam     = "salt"
-	endpointTLSPinSaltLayout  = "200601021504"
+	TLSPinAlgorithm                  = "spki-sha256-aesgcm-v1"
+	TLSEncryptedConfigIDParam        = "eid"
+	TLSEncryptedSaltParam            = "salt"
+	endpointTLSPinSaltLayout         = "200601021504"
+	endpointPinnedHTTPProxyEnableEnv = "APS_PINNED_HTTP_PROXY_ENABLE"
 
 	endpointBootstrapGatewayAddressEnv      = "APS_GATEWAY_ADDRESS"
 	endpointBootstrapGatewayDiscoverPortEnv = "APS_GATEWAY_DISCOVER_PORT"
@@ -120,67 +122,122 @@ func endpointBootstrapGatewayDiscoverPort() int {
 	return defaultGatewayDiscoverPort
 }
 
-func endpointBootstrapGatewayAddress() string {
-	if addr := normalizeGatewayAddress(os.Getenv(endpointBootstrapGatewayAddressEnv)); addr != "" {
+func splitEndpointBootstrapGatewayAddresses(raw string) []string {
+	raw = strings.NewReplacer(";", ",", "\n", ",", "\r", ",", "\t", ",").Replace(raw)
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		addr := strings.TrimSpace(part)
+		if addr == "" {
+			continue
+		}
+		out = append(out, addr)
+	}
+	return out
+}
+
+func endpointBootstrapGatewayAddresses() []string {
+	maxCandidates := gatewayRouteBundleMaxAddrs
+	if maxCandidates <= 0 {
+		maxCandidates = 1
+	}
+	out := make([]string, 0, maxCandidates)
+	seen := make(map[string]struct{}, maxCandidates)
+	add := func(raw string) {
+		if len(out) >= maxCandidates {
+			return
+		}
+		addr := normalizeGatewayAddress(raw)
+		if addr == "" {
+			return
+		}
 		if isLocalGatewayAddress(addr) {
 			DebugLog("[CONN-INIT] Ignoring local bootstrap gateway address=%s", addr)
-			return ""
+			return
 		}
-		return addr
+		if _, exists := seen[addr]; exists {
+			return
+		}
+		seen[addr] = struct{}{}
+		out = append(out, addr)
+	}
+
+	if raw := strings.TrimSpace(os.Getenv(endpointBootstrapGatewayAddressEnv)); raw != "" {
+		for _, addr := range splitEndpointBootstrapGatewayAddresses(raw) {
+			add(addr)
+		}
+		return out
 	}
 	discoverPort := endpointBootstrapGatewayDiscoverPort()
 	if discoverPort <= 0 {
 		DebugLog("[CONN-INIT] Bootstrap gateway discovery disabled: invalid port %d", discoverPort)
-		return ""
+		return nil
 	}
-	discovered, err := discoverGatewayAddress(discoverPort)
+	discovered, err := discoverGatewayAddresses(discoverPort, maxCandidates)
 	if err != nil {
 		DebugLog("[CONN-INIT] Bootstrap gateway discovery failed on UDP/%d: %v", discoverPort, err)
-		return ""
+		return nil
 	}
-	discovered = normalizeGatewayAddress(discovered)
-	if discovered == "" {
-		return ""
+	for _, addr := range discovered {
+		add(addr)
 	}
-	if isLocalGatewayAddress(discovered) {
-		DebugLog("[CONN-INIT] Ignoring discovered local gateway address=%s", discovered)
-		return ""
-	}
-	return discovered
+	return out
 }
 
-func buildEndpointBootstrapGatewayDialContext(targetAddress string) (func(context.Context, string, string) (net.Conn, error), string) {
+func endpointPinnedHTTPProxyEnabled() bool {
+	raw := strings.ToLower(strings.TrimSpace(os.Getenv(endpointPinnedHTTPProxyEnableEnv)))
+	if raw == "" {
+		// Backward compatible behavior: use system proxy by default.
+		return true
+	}
+	switch raw {
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return true
+	}
+}
+
+func endpointPinnedHTTPProxySelector(req *http.Request) (*url.URL, error) {
+	if endpointPinnedHTTPProxyEnabled() {
+		return http.ProxyFromEnvironment(req)
+	}
+	return nil, nil
+}
+
+func buildEndpointBootstrapGatewayDialContexts(targetAddress string) ([]func(context.Context, string, string) (net.Conn, error), []string) {
 	targetAddress = normalizeServerAddressForSession(targetAddress)
 	if targetAddress == "" {
-		return nil, ""
+		return nil, nil
 	}
-	gatewayAddress := endpointBootstrapGatewayAddress()
-	if gatewayAddress == "" {
+	gatewayAddresses := endpointBootstrapGatewayAddresses()
+	if len(gatewayAddresses) == 0 {
 		DebugLog("[CONN-INIT] No bootstrap gateway available for target=%s", targetAddress)
-		return nil, ""
+		return nil, nil
 	}
-	if sameGatewayAddress(gatewayAddress, targetAddress) {
-		return nil, ""
-	}
+	dialers := make([]func(context.Context, string, string) (net.Conn, error), 0, len(gatewayAddresses))
+	filteredAddrs := make([]string, 0, len(gatewayAddresses))
 	originNode := strings.TrimSpace(*configID)
-	dialViaGateway := func(ctx context.Context, network, addr string) (net.Conn, error) {
-		type dialResult struct {
-			conn net.Conn
-			err  error
+	for _, gatewayAddress := range gatewayAddresses {
+		gwAddr := normalizeGatewayAddress(gatewayAddress)
+		if gwAddr == "" || sameGatewayAddress(gwAddr, targetAddress) {
+			continue
 		}
-		done := make(chan dialResult, 1)
-		go func() {
-			conn, err := dialTunnelServerViaGateway(gatewayAddress, targetAddress, originNode)
-			done <- dialResult{conn: conn, err: err}
-		}()
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case result := <-done:
-			return result.conn, result.err
+		dialViaGateway := func(ctx context.Context, network, addr string) (net.Conn, error) {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			return dialTunnelServerViaGateway(gwAddr, targetAddress, originNode)
 		}
+		filteredAddrs = append(filteredAddrs, gwAddr)
+		dialers = append(dialers, dialViaGateway)
 	}
-	return dialViaGateway, gatewayAddress
+	if len(dialers) == 0 {
+		return nil, nil
+	}
+	return dialers, filteredAddrs
 }
 
 func (p *endpointTLSPin) allowedSummaryLocked() string {
@@ -257,7 +314,7 @@ func fetchServerSPKIHashOverHTTPS(authority, serverName string) ([]byte, string,
 			dialContext = (&net.Dialer{Timeout: 15 * time.Second, KeepAlive: 30 * time.Second}).DialContext
 		}
 		transport := &http.Transport{
-			Proxy:               http.ProxyFromEnvironment,
+			Proxy:               endpointPinnedHTTPProxySelector,
 			DialContext:         dialContext,
 			ForceAttemptHTTP2:   true,
 			TLSHandshakeTimeout: 10 * time.Second,
@@ -276,10 +333,14 @@ func fetchServerSPKIHashOverHTTPS(authority, serverName string) ([]byte, string,
 	resp, err := send(nil)
 	var gatewayAddress string
 	if err != nil {
-		dialViaGateway, gwAddr := buildEndpointBootstrapGatewayDialContext(authority)
-		if dialViaGateway != nil {
-			gatewayAddress = gwAddr
+		dialViaGateways, gwAddrs := buildEndpointBootstrapGatewayDialContexts(authority)
+		for i, dialViaGateway := range dialViaGateways {
 			resp, err = send(dialViaGateway)
+			if err == nil {
+				gatewayAddress = gwAddrs[i]
+				break
+			}
+			DebugLog("[CONN-INIT] Connectivity test via bootstrap gateway=%s failed target=%s: %v", gwAddrs[i], authority, err)
 		}
 	}
 	if err != nil {
@@ -349,7 +410,7 @@ func newPinnedHTTPClientWithDialContext(pin *endpointTLSPin, dialContext func(co
 		dialContext = dialer.DialContext
 	}
 	transport := &http.Transport{
-		Proxy:               http.ProxyFromEnvironment,
+		Proxy:               endpointPinnedHTTPProxySelector,
 		DialContext:         dialContext,
 		ForceAttemptHTTP2:   true,
 		MaxIdleConns:        64,
@@ -624,15 +685,19 @@ func doPinnedAPSGet(serverAddress, requestPath string) (*http.Response, *endpoin
 		if directErr == nil {
 			return resp, nil
 		}
-		dialViaGateway, gatewayAddress := buildEndpointBootstrapGatewayDialContext(p.serverAddress)
-		if dialViaGateway == nil {
+		dialViaGateways, gatewayAddresses := buildEndpointBootstrapGatewayDialContexts(p.serverAddress)
+		if len(dialViaGateways) == 0 {
 			return nil, directErr
 		}
-		gatewayClient := newPinnedHTTPClientWithDialContext(p, dialViaGateway)
-		gatewayResp, gatewayErr := send(gatewayClient, p)
-		if gatewayErr == nil {
-			DebugLog("[CONN-INIT] pinned GET %s via bootstrap gateway=%s target=%s", strings.TrimSpace(requestPath), gatewayAddress, p.serverAddress)
-			return gatewayResp, nil
+		for i, dialViaGateway := range dialViaGateways {
+			gatewayAddress := gatewayAddresses[i]
+			gatewayClient := newPinnedHTTPClientWithDialContext(p, dialViaGateway)
+			gatewayResp, gatewayErr := send(gatewayClient, p)
+			if gatewayErr == nil {
+				DebugLog("[CONN-INIT] pinned GET %s via bootstrap gateway=%s target=%s", strings.TrimSpace(requestPath), gatewayAddress, p.serverAddress)
+				return gatewayResp, nil
+			}
+			DebugLog("[CONN-INIT] pinned GET %s via bootstrap gateway=%s failed target=%s: %v", strings.TrimSpace(requestPath), gatewayAddress, p.serverAddress, gatewayErr)
 		}
 		return nil, directErr
 	}

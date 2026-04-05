@@ -362,42 +362,15 @@ func createServiceConfig() (*service.Config, error) {
 		}
 	})
 
-	// If using CID, try to fetch config to get the real endpoint name
-	if *configID != "" {
-		var fetchedName string
-		if *serverAddr != "" {
-			fmt.Println("Fetching configuration from APS...")
-
-			var config *EndpointRuntimeConfig
-			var err error
-			for {
-				config, err = FetchConfigFromAPS(*serverAddr, *configID)
-				if err == nil && config != nil {
-					fetchedName = config.EndpointName
-					fmt.Printf("Successfully fetched configuration for endpoint: %s\n", fetchedName)
-					break
-				}
-				fmt.Printf("Warning: Failed to fetch configuration: %v. Retrying in 10 seconds...\n", err)
-				time.Sleep(10 * time.Second)
-			}
-		}
-
-		if isNameSet {
-			// User provided -name, use it for service name suffix (as requested)
-			serviceNameSuffix = *name
-		} else {
-			// User didn't provide -name
-			if fetchedName != "" {
-				// Use fetched name
-				serviceNameSuffix = fetchedName
-			} else {
-				// Fetch failed and no name provided
-				return nil, fmt.Errorf("failed to fetch configuration and no -name specified. Please use -name to specify a service name suffix")
-			}
-		}
-	} else {
-		// Legacy mode (no CID), use -name (default or provided)
-		serviceNameSuffix = *name
+	// Service metadata must be deterministic and never block on network during lifecycle commands.
+	switch {
+	case isNameSet:
+		serviceNameSuffix = strings.TrimSpace(*name)
+	case strings.TrimSpace(*configID) != "":
+		// CID is globally unique and stable enough for service identity.
+		serviceNameSuffix = strings.TrimSpace(*configID)
+	default:
+		serviceNameSuffix = strings.TrimSpace(*name)
 	}
 
 	// Sanitize service name suffix to be safe for service name
