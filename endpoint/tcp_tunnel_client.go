@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
@@ -39,6 +40,18 @@ var (
 		mu      sync.RWMutex
 		session *smux.Session
 	}{}
+	relayTransitDedup = struct {
+		mu    sync.Mutex
+		locks map[string]time.Time
+	}{
+		locks: make(map[string]time.Time),
+	}
+	gridFrameIntegritySeen = struct {
+		mu   sync.Mutex
+		seen map[string]int64
+	}{
+		seen: make(map[string]int64),
+	}
 )
 
 func GetMediumBuffer() []byte { return mediumBufPool.Get().([]byte) }
@@ -121,6 +134,10 @@ const (
 	minMessageSizeLowerBound = 1 * 1024 * 1024
 	maxFrameSizeEnv          = "APS_TUNNEL_MAX_FRAME_MB"
 	endpointHopGuardMax      = 128
+	relayTransitDedupTTL     = 20 * time.Second
+	gridFrameIntegrityWindow = 60 * time.Second
+	gridFrameIntegrityMaxSet = 32768
+	gridFrameIntegrityNonceN = 12
 )
 
 var maxMessageSize = loadTunnelMaxMessageSize()
@@ -180,6 +197,9 @@ type RequestPayloadTCP struct {
 	GridEnableICE     bool     `json:"grid_enable_ice,omitempty"`
 	GridICECandidates []string `json:"grid_ice_candidates,omitempty"`
 	GridPayloadPlain  bool     `json:"grid_payload_plain,omitempty"`
+	GridIntegrityTS   int64    `json:"grid_integrity_ts,omitempty"`
+	GridIntegrityN    string   `json:"grid_integrity_nonce,omitempty"`
+	GridIntegritySig  string   `json:"grid_integrity_sig,omitempty"`
 }
 
 type RequestStartPayloadTCP struct {
@@ -202,6 +222,9 @@ type RequestStartPayloadTCP struct {
 	GridEnableICE     bool     `json:"grid_enable_ice,omitempty"`
 	GridICECandidates []string `json:"grid_ice_candidates,omitempty"`
 	GridPayloadPlain  bool     `json:"grid_payload_plain,omitempty"`
+	GridIntegrityTS   int64    `json:"grid_integrity_ts,omitempty"`
+	GridIntegrityN    string   `json:"grid_integrity_nonce,omitempty"`
+	GridIntegritySig  string   `json:"grid_integrity_sig,omitempty"`
 }
 
 // ResponseHeaderPayloadTCP for HTTP response header
@@ -279,6 +302,9 @@ type ProxyConnectPayload struct {
 	GridParallel      bool     `json:"grid_parallel,omitempty"`
 	GridEnableICE     bool     `json:"grid_enable_ice,omitempty"`
 	GridICECandidates []string `json:"grid_ice_candidates,omitempty"`
+	GridIntegrityTS   int64    `json:"grid_integrity_ts,omitempty"`
+	GridIntegrityN    string   `json:"grid_integrity_nonce,omitempty"`
+	GridIntegritySig  string   `json:"grid_integrity_sig,omitempty"`
 }
 
 // ProxyConnectAckPayload for proxy connect response
@@ -637,18 +663,33 @@ func dialTunnelServer(serverAddress, serverHost string, expectedPinHash []byte, 
 	}
 
 	var baseConn net.Conn
-	gatewayAddress := resolveGatewayAddress(connCtx)
-	if gatewayAddress != "" {
-		baseConn, err = dialTunnelServerViaGateway(gatewayAddress, serverAddress, connCtx.GatewayToken, connCtx.ConfigID)
-		if err != nil {
-			return nil, fmt.Errorf("dial via gateway %s failed: %w", gatewayAddress, err)
+	var gatewayDialErr error
+	var gatewayAddress string
+	gatewayCandidates := resolveGatewayAddressCandidates(connCtx)
+	if len(gatewayCandidates) > 0 {
+		for idx, candidate := range gatewayCandidates {
+			baseConn, err = dialTunnelServerViaGateway(candidate, serverAddress, connCtx.ConfigID)
+			if err == nil {
+				gatewayAddress = candidate
+				promoteGatewayRouteCacheCandidate(connCtx.ServerAddress, candidate)
+				DebugLog("[GATEWAY] Using gateway %s for APS %s (candidate %d/%d)", candidate, serverAddress, idx+1, len(gatewayCandidates))
+				break
+			}
+			gatewayDialErr = err
+			DebugLog("[GATEWAY] Dial via %s failed for APS %s: %v", candidate, serverAddress, err)
 		}
-		DebugLog("[GATEWAY] Using gateway %s for APS %s", gatewayAddress, serverAddress)
-	} else {
+	}
+	if baseConn == nil {
 		dialer := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}
 		baseConn, err = dialer.Dial("tcp", serverAddress)
 		if err != nil {
+			if gatewayDialErr != nil {
+				return nil, fmt.Errorf("dial via gateway candidates failed (last=%s err=%v); direct dial failed: %w", gatewayAddress, gatewayDialErr, err)
+			}
 			return nil, err
+		}
+		if gatewayDialErr != nil {
+			DebugLog("[GATEWAY] Direct dial succeeded after gateway bundle failure (last=%s, aps=%s)", gatewayAddress, serverAddress)
 		}
 	}
 	defer func() {
@@ -689,7 +730,6 @@ type TunnelSessionState struct {
 	PortMappings        []PortMappingConfig
 	GatewayListen       string
 	GatewayAddress      string
-	GatewayToken        string
 	GatewayDiscovery    bool
 	GatewayDiscoverPort int
 	SSH                 *EndpointSSHConfig
@@ -886,7 +926,6 @@ func runTCPTunnelSession(ctx context.Context, connCtx ImmutableConnectionContext
 		PortMappings:        clonePortMappingsForContext(connCtx.PortMappings),
 		GatewayListen:       strings.TrimSpace(connCtx.GatewayListen),
 		GatewayAddress:      strings.TrimSpace(connCtx.GatewayAddress),
-		GatewayToken:        strings.TrimSpace(connCtx.GatewayToken),
 		GatewayDiscovery:    connCtx.GatewayDiscovery,
 		GatewayDiscoverPort: connCtx.GatewayDiscoverPort,
 		SSH:                 cloneEndpointSSHConfigForContext(connCtx.SSH),
@@ -1274,6 +1313,288 @@ func normalizeGridHops(hops []string) []string {
 	return out
 }
 
+func buildTransitRelayDedupSeed(traceID, routeID string, routeEpoch int64) string {
+	traceID = strings.TrimSpace(traceID)
+	if traceID != "" {
+		return "trace:" + traceID
+	}
+	routeID = strings.TrimSpace(routeID)
+	if routeID != "" && routeEpoch > 0 {
+		return "route:" + routeID + ":" + strconv.FormatInt(routeEpoch, 10)
+	}
+	return ""
+}
+
+func buildProxyTransitRelayDedupKey(payload ProxyConnectPayload, finalHost string, finalPort int, nextHop string, remainingHops []string) string {
+	seed := buildTransitRelayDedupSeed(payload.TraceID, payload.RouteID, payload.RouteEpoch)
+	if seed == "" {
+		return ""
+	}
+	parts := []string{
+		seed,
+		strings.TrimSpace(finalHost),
+		strconv.Itoa(finalPort),
+		strings.TrimSpace(nextHop),
+	}
+	if len(remainingHops) > 0 {
+		parts = append(parts, strings.Join(normalizeGridHops(remainingHops), ","))
+	}
+	return strings.Join(parts, "|")
+}
+
+func buildRequestTransitRelayDedupKey(payload RequestStartPayloadTCP, finalHost string, nextHop string, remainingHops []string) string {
+	seed := buildTransitRelayDedupSeed(payload.TraceID, payload.RouteID, payload.RouteEpoch)
+	if seed == "" {
+		return ""
+	}
+	parts := []string{
+		seed,
+		strings.TrimSpace(finalHost),
+		strings.TrimSpace(payload.URL),
+		strings.TrimSpace(nextHop),
+	}
+	if len(remainingHops) > 0 {
+		parts = append(parts, strings.Join(normalizeGridHops(remainingHops), ","))
+	}
+	return strings.Join(parts, "|")
+}
+
+func acquireTransitRelayDedup(key string) bool {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return true
+	}
+	now := time.Now()
+	relayTransitDedup.mu.Lock()
+	defer relayTransitDedup.mu.Unlock()
+	for k, ts := range relayTransitDedup.locks {
+		if now.Sub(ts) > relayTransitDedupTTL {
+			delete(relayTransitDedup.locks, k)
+		}
+	}
+	if _, exists := relayTransitDedup.locks[key]; exists {
+		return false
+	}
+	relayTransitDedup.locks[key] = now
+	return true
+}
+
+func releaseTransitRelayDedup(key string) {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return
+	}
+	relayTransitDedup.mu.Lock()
+	delete(relayTransitDedup.locks, key)
+	relayTransitDedup.mu.Unlock()
+}
+
+func currentGridFrameIntegritySecret() string {
+	return ""
+}
+
+func gridFrameIntegritySecretForConn(conn net.Conn) string {
+	if conn != nil {
+		if provider, ok := conn.(interface{ GridIntegrityKey() string }); ok {
+			if secret := strings.TrimSpace(provider.GridIntegrityKey()); secret != "" {
+				return secret
+			}
+		}
+	}
+	return currentGridFrameIntegritySecret()
+}
+
+func generateGridFrameIntegrityNonce() string {
+	buf := make([]byte, gridFrameIntegrityNonceN)
+	if _, err := rand.Read(buf); err != nil {
+		return fmt.Sprintf("%d", time.Now().UTC().UnixNano())
+	}
+	return hex.EncodeToString(buf)
+}
+
+func isGridFrameIntegrityTimestampFresh(ts int64) bool {
+	if ts <= 0 {
+		return false
+	}
+	now := time.Now().UTC().Unix()
+	delta := now - ts
+	if delta < 0 {
+		delta = -delta
+	}
+	return time.Duration(delta)*time.Second <= gridFrameIntegrityWindow
+}
+
+func computeGridFrameIntegritySignature(secret string, fields ...string) string {
+	secret = strings.TrimSpace(secret)
+	if secret == "" {
+		return ""
+	}
+	mac := hmac.New(sha256.New, []byte(secret))
+	for _, field := range fields {
+		mac.Write([]byte(strings.TrimSpace(field)))
+		mac.Write([]byte{'\n'})
+	}
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+func consumeGridFrameIntegrityReplay(kind, nonce, sig string, ts int64) bool {
+	key := strings.TrimSpace(kind) + "|" + strings.TrimSpace(nonce) + "|" + strings.TrimSpace(sig)
+	if key == "||" {
+		return false
+	}
+	now := time.Now().UTC()
+	nowUnix := now.Unix()
+	gridFrameIntegritySeen.mu.Lock()
+	defer gridFrameIntegritySeen.mu.Unlock()
+	for k, exp := range gridFrameIntegritySeen.seen {
+		if exp < nowUnix {
+			delete(gridFrameIntegritySeen.seen, k)
+		}
+	}
+	if exp, exists := gridFrameIntegritySeen.seen[key]; exists && exp >= nowUnix {
+		return false
+	}
+	gridFrameIntegritySeen.seen[key] = ts + int64((gridFrameIntegrityWindow + time.Minute).Seconds())
+	if len(gridFrameIntegritySeen.seen) > gridFrameIntegrityMaxSet {
+		toDelete := len(gridFrameIntegritySeen.seen) - gridFrameIntegrityMaxSet
+		for k := range gridFrameIntegritySeen.seen {
+			delete(gridFrameIntegritySeen.seen, k)
+			toDelete--
+			if toDelete <= 0 {
+				break
+			}
+		}
+	}
+	return true
+}
+
+func proxyGridFrameIntegrityFields(payload ProxyConnectPayload) []string {
+	return []string{
+		"proxy-v1",
+		strings.TrimSpace(payload.ConnectionID),
+		strings.TrimSpace(payload.GridFinalHost),
+		strconv.Itoa(payload.GridFinalPort),
+		strconv.FormatBool(payload.GridFinalTLS),
+		strings.TrimSpace(payload.RouteID),
+		strconv.FormatInt(payload.RouteEpoch, 10),
+		strconv.Itoa(payload.HopCount),
+		strings.TrimSpace(payload.TraceID),
+		strings.TrimSpace(payload.GridNextHop),
+		strings.Join(normalizeGridHops(payload.GridHops), ","),
+		strconv.FormatInt(payload.GridIntegrityTS, 10),
+		strings.TrimSpace(payload.GridIntegrityN),
+	}
+}
+
+func signProxyGridFrameIntegrityWithSecret(payload *ProxyConnectPayload, secret string) {
+	if payload == nil {
+		return
+	}
+	secret = strings.TrimSpace(secret)
+	if secret == "" {
+		payload.GridIntegrityTS = 0
+		payload.GridIntegrityN = ""
+		payload.GridIntegritySig = ""
+		return
+	}
+	payload.GridIntegrityTS = time.Now().UTC().Unix()
+	payload.GridIntegrityN = generateGridFrameIntegrityNonce()
+	payload.GridIntegritySig = computeGridFrameIntegritySignature(secret, proxyGridFrameIntegrityFields(*payload)...)
+}
+
+func signProxyGridFrameIntegrity(payload *ProxyConnectPayload) {
+	signProxyGridFrameIntegrityWithSecret(payload, currentGridFrameIntegritySecret())
+}
+
+func verifyProxyGridFrameIntegrityWithSecret(payload ProxyConnectPayload, secret string) error {
+	secret = strings.TrimSpace(secret)
+	if secret == "" {
+		return nil
+	}
+	if !isGridFrameIntegrityTimestampFresh(payload.GridIntegrityTS) {
+		return errors.New("grid frame integrity timestamp invalid")
+	}
+	if strings.TrimSpace(payload.GridIntegrityN) == "" || strings.TrimSpace(payload.GridIntegritySig) == "" {
+		return errors.New("grid frame integrity missing")
+	}
+	expected := computeGridFrameIntegritySignature(secret, proxyGridFrameIntegrityFields(payload)...)
+	if expected == "" || !hmac.Equal([]byte(strings.ToLower(strings.TrimSpace(payload.GridIntegritySig))), []byte(expected)) {
+		return errors.New("grid frame integrity mismatch")
+	}
+	if !consumeGridFrameIntegrityReplay("proxy", payload.GridIntegrityN, payload.GridIntegritySig, payload.GridIntegrityTS) {
+		return errors.New("grid frame integrity replay detected")
+	}
+	return nil
+}
+
+func verifyProxyGridFrameIntegrity(payload ProxyConnectPayload) error {
+	return verifyProxyGridFrameIntegrityWithSecret(payload, currentGridFrameIntegritySecret())
+}
+
+func requestGridFrameIntegrityFields(payload RequestStartPayloadTCP) []string {
+	return []string{
+		"request-v1",
+		strings.TrimSpace(payload.ID),
+		strings.TrimSpace(payload.URL),
+		strings.TrimSpace(payload.GridFinalHost),
+		strconv.Itoa(payload.GridFinalPort),
+		strconv.FormatBool(payload.GridFinalTLS),
+		strings.TrimSpace(payload.RouteID),
+		strconv.FormatInt(payload.RouteEpoch, 10),
+		strconv.Itoa(payload.HopCount),
+		strings.TrimSpace(payload.TraceID),
+		strings.TrimSpace(payload.GridNextHop),
+		strings.Join(normalizeGridHops(payload.GridHops), ","),
+		strconv.FormatInt(payload.GridIntegrityTS, 10),
+		strings.TrimSpace(payload.GridIntegrityN),
+	}
+}
+
+func signRequestGridFrameIntegrityWithSecret(payload *RequestStartPayloadTCP, secret string) {
+	if payload == nil {
+		return
+	}
+	secret = strings.TrimSpace(secret)
+	if secret == "" {
+		payload.GridIntegrityTS = 0
+		payload.GridIntegrityN = ""
+		payload.GridIntegritySig = ""
+		return
+	}
+	payload.GridIntegrityTS = time.Now().UTC().Unix()
+	payload.GridIntegrityN = generateGridFrameIntegrityNonce()
+	payload.GridIntegritySig = computeGridFrameIntegritySignature(secret, requestGridFrameIntegrityFields(*payload)...)
+}
+
+func signRequestGridFrameIntegrity(payload *RequestStartPayloadTCP) {
+	signRequestGridFrameIntegrityWithSecret(payload, currentGridFrameIntegritySecret())
+}
+
+func verifyRequestGridFrameIntegrityWithSecret(payload RequestStartPayloadTCP, secret string) error {
+	secret = strings.TrimSpace(secret)
+	if secret == "" {
+		return nil
+	}
+	if !isGridFrameIntegrityTimestampFresh(payload.GridIntegrityTS) {
+		return errors.New("grid frame integrity timestamp invalid")
+	}
+	if strings.TrimSpace(payload.GridIntegrityN) == "" || strings.TrimSpace(payload.GridIntegritySig) == "" {
+		return errors.New("grid frame integrity missing")
+	}
+	expected := computeGridFrameIntegritySignature(secret, requestGridFrameIntegrityFields(payload)...)
+	if expected == "" || !hmac.Equal([]byte(strings.ToLower(strings.TrimSpace(payload.GridIntegritySig))), []byte(expected)) {
+		return errors.New("grid frame integrity mismatch")
+	}
+	if !consumeGridFrameIntegrityReplay("request", payload.GridIntegrityN, payload.GridIntegritySig, payload.GridIntegrityTS) {
+		return errors.New("grid frame integrity replay detected")
+	}
+	return nil
+}
+
+func verifyRequestGridFrameIntegrity(payload RequestStartPayloadTCP) error {
+	return verifyRequestGridFrameIntegrityWithSecret(payload, currentGridFrameIntegritySecret())
+}
+
 func generateRelayConnectionID() string {
 	return fmt.Sprintf("relay-%d", time.Now().UTC().UnixNano())
 }
@@ -1583,7 +1904,6 @@ type ConfigUpdatePayload struct {
 	PortMappings        []PortMappingConfig `json:"portMappings,omitempty"`
 	GatewayListen       string              `json:"gatewayListen,omitempty"`
 	GatewayAddress      string              `json:"gatewayAddress,omitempty"`
-	GatewayToken        string              `json:"gatewayToken,omitempty"`
 	GatewayDiscovery    bool                `json:"gatewayDiscovery,omitempty"`
 	GatewayDiscoverPort int                 `json:"gatewayDiscoverPort,omitempty"`
 	SSH                 *EndpointSSHConfig  `json:"ssh,omitempty"`
@@ -1606,9 +1926,11 @@ func handleConfigUpdate(tc *TunnelConn, msg *TunnelMessage, sessionState *Tunnel
 	}
 	payload.GatewayListen = strings.TrimSpace(payload.GatewayListen)
 	payload.GatewayAddress = strings.TrimSpace(payload.GatewayAddress)
-	payload.GatewayToken = strings.TrimSpace(payload.GatewayToken)
 	if payload.GatewayDiscoverPort <= 0 {
 		payload.GatewayDiscoverPort = defaultGatewayDiscoverPort
+	}
+	if payload.GatewayListen == "" {
+		payload.GatewayListen = defaultGatewayListenAddress(payload.GatewayDiscoverPort)
 	}
 
 	DebugLog("[CONFIG] Received config update from APS")
@@ -1626,7 +1948,6 @@ func handleConfigUpdate(tc *TunnelConn, msg *TunnelMessage, sessionState *Tunnel
 	oldKDFSalt := sessionState.KDFSalt
 	oldGatewayListen := sessionState.GatewayListen
 	oldGatewayAddress := sessionState.GatewayAddress
-	oldGatewayToken := sessionState.GatewayToken
 	oldGatewayDiscovery := sessionState.GatewayDiscovery
 	oldGatewayDiscoverPort := sessionState.GatewayDiscoverPort
 
@@ -1648,7 +1969,6 @@ func handleConfigUpdate(tc *TunnelConn, msg *TunnelMessage, sessionState *Tunnel
 		shouldReconnect = true
 	}
 	if payload.GatewayAddress != oldGatewayAddress ||
-		payload.GatewayToken != oldGatewayToken ||
 		payload.GatewayDiscovery != oldGatewayDiscovery ||
 		payload.GatewayDiscoverPort != oldGatewayDiscoverPort {
 		shouldReconnect = true
@@ -1678,12 +1998,10 @@ func handleConfigUpdate(tc *TunnelConn, msg *TunnelMessage, sessionState *Tunnel
 	}
 	sessionState.GatewayListen = payload.GatewayListen
 	sessionState.GatewayAddress = payload.GatewayAddress
-	sessionState.GatewayToken = payload.GatewayToken
 	sessionState.GatewayDiscovery = payload.GatewayDiscovery
 	sessionState.GatewayDiscoverPort = payload.GatewayDiscoverPort
 	sessionState.SSH = cloneEndpointSSHConfigForContext(payload.SSH)
 	updatedGatewayListen := sessionState.GatewayListen
-	updatedGatewayToken := sessionState.GatewayToken
 	updatedGatewayDiscoverPort := sessionState.GatewayDiscoverPort
 
 	sessionState.mu.Unlock()
@@ -1691,7 +2009,6 @@ func handleConfigUpdate(tc *TunnelConn, msg *TunnelMessage, sessionState *Tunnel
 	if updatedGatewayListen != "" {
 		ensureGatewayRuntime(ImmutableConnectionContext{
 			GatewayListen:       updatedGatewayListen,
-			GatewayToken:        updatedGatewayToken,
 			GatewayDiscoverPort: updatedGatewayDiscoverPort,
 		})
 	}
@@ -1729,7 +2046,7 @@ func handleConfigUpdate(tc *TunnelConn, msg *TunnelMessage, sessionState *Tunnel
 }
 
 // handleMirrorUpdate processes mirror address updates from APS
-func handleMirrorUpdate(tc *TunnelConn, msg *TunnelMessage) {
+func handleMirrorUpdate(_ *TunnelConn, msg *TunnelMessage) {
 	var payload MirrorUpdatePayload
 	if err := msg.ParseJSON(&payload); err != nil {
 		log.Printf("[MIRROR] Failed to parse mirror update: %v", err)
@@ -1851,7 +2168,7 @@ func handleKeyResponse(tc *TunnelConn, msg *TunnelMessage, km *SessionKeyManager
 }
 
 // handleKeyConfirm handles key confirmation and activates the new key
-func handleKeyConfirm(tc *TunnelConn, msg *TunnelMessage, km *SessionKeyManager) {
+func handleKeyConfirm(_ *TunnelConn, msg *TunnelMessage, km *SessionKeyManager) {
 	confirm, err := UnmarshalKeyConfirm(msg.Payload)
 	if err != nil {
 		log.Printf("[KEY] Failed to parse key confirm: %v", err)
@@ -1900,7 +2217,7 @@ func handleIncomingStream(stream net.Conn, controlTc *TunnelConn) {
 
 	if msg.Type != MsgTypeProxyConnect {
 		if msg.Type == MsgTypeRequestStart {
-			handleIncomingRequestStream(tc, stream, msg)
+			handleIncomingRequestStream(tc, stream, msg, controlTc == nil)
 			return
 		}
 		log.Printf("Unexpected message type on new stream: %d", msg.Type)
@@ -1911,6 +2228,13 @@ func handleIncomingStream(stream net.Conn, controlTc *TunnelConn) {
 	if err := msg.ParseJSON(&payload); err != nil {
 		log.Printf("Failed to parse proxy connect payload: %v", err)
 		return
+	}
+	integritySecret := gridFrameIntegritySecretForConn(stream)
+	if controlTc == nil {
+		if err := verifyProxyGridFrameIntegrityWithSecret(payload, integritySecret); err != nil {
+			log.Printf("[GRID] Reject transit proxy frame: %v", err)
+			return
+		}
 	}
 
 	connID := payload.ConnectionID
@@ -1950,10 +2274,22 @@ func handleIncomingStream(stream net.Conn, controlTc *TunnelConn) {
 		relayMode         string
 	)
 	if nextHop != "" {
+		dedupSuppressed := false
+		transitDedupKey := buildProxyTransitRelayDedupKey(payload, finalHost, finalPort, nextHop, remainingHops)
+		if !acquireTransitRelayDedup(transitDedupKey) {
+			dedupSuppressed = true
+			connErr = errors.New("duplicate transit probe suppressed")
+			DebugLog("[PROXY %s] duplicate transit suppressed key=%s next=%s", connID, transitDedupKey, nextHop)
+		} else if strings.TrimSpace(transitDedupKey) != "" {
+			defer releaseTransitRelayDedup(transitDedupKey)
+		}
+
 		selectedTransport = "relay"
 		relayMode = "p2p"
-		relayConn, connErr = dialGatewayPeerGrid(nextHop)
-		if connErr != nil {
+		if connErr == nil {
+			relayConn, nextHop, connErr = dialGatewayPeerGridBundle(nextHop, remainingHops, gatewayRouteBundleMaxAddrs)
+		}
+		if connErr != nil && !dedupSuppressed {
 			relayMode = "aps-relay"
 			relaySession := getActiveTunnelSession()
 			if relaySession == nil {
@@ -1997,6 +2333,7 @@ func handleIncomingStream(stream net.Conn, controlTc *TunnelConn) {
 			if relayMode == "aps-relay" {
 				relayPayload.GridRouteTo = nextHop
 			}
+			signProxyGridFrameIntegrityWithSecret(&relayPayload, gridFrameIntegritySecretForConn(relayConn))
 			connErr = relayTC.SendJSON(MsgTypeProxyConnect, relayPayload)
 			if connErr != nil && relayConn != nil {
 				_ = relayConn.Close()
@@ -2076,11 +2413,18 @@ func handleIncomingStream(stream net.Conn, controlTc *TunnelConn) {
 	DebugLog("[PROXY %s] Stream copy finished", connID)
 }
 
-func handleIncomingRequestStream(tc *TunnelConn, stream net.Conn, bootstrap *TunnelMessage) {
+func handleIncomingRequestStream(tc *TunnelConn, stream net.Conn, bootstrap *TunnelMessage, fromGatewayPeer bool) {
 	var payload RequestStartPayloadTCP
 	if err := bootstrap.ParseJSON(&payload); err != nil {
 		log.Printf("[GRID] Failed to parse request start payload: %v", err)
 		return
+	}
+	integritySecret := gridFrameIntegritySecretForConn(stream)
+	if fromGatewayPeer {
+		if err := verifyRequestGridFrameIntegrityWithSecret(payload, integritySecret); err != nil {
+			log.Printf("[GRID] Reject transit request frame: %v", err)
+			return
+		}
 	}
 
 	requestID := strings.TrimSpace(payload.ID)
@@ -2101,8 +2445,21 @@ func handleIncomingRequestStream(tc *TunnelConn, stream net.Conn, bootstrap *Tun
 	nextHop := strings.TrimSpace(payload.GridNextHop)
 	remainingHops := normalizeGridHops(payload.GridHops)
 	if nextHop != "" {
+		transitDedupKey := buildRequestTransitRelayDedupKey(payload, finalHost, nextHop, remainingHops)
+		if !acquireTransitRelayDedup(transitDedupKey) {
+			DebugLog("[GRID-REQ %s] duplicate transit suppressed key=%s next=%s", requestID, transitDedupKey, nextHop)
+			sendTCPErrorResponse(tc, requestID, "duplicate transit probe suppressed")
+			return
+		}
+		if strings.TrimSpace(transitDedupKey) != "" {
+			defer releaseTransitRelayDedup(transitDedupKey)
+		}
+
 		relayMode := "p2p"
-		relayConn, err := dialGatewayPeerGrid(nextHop)
+		relayConn, selectedNextHop, err := dialGatewayPeerGridBundle(nextHop, remainingHops, gatewayRouteBundleMaxAddrs)
+		if err == nil {
+			nextHop = selectedNextHop
+		}
 		if err != nil {
 			relayMode = "aps-relay"
 			relaySession := getActiveTunnelSession()
@@ -2135,6 +2492,7 @@ func handleIncomingRequestStream(tc *TunnelConn, stream net.Conn, bootstrap *Tun
 		if relayMode == "aps-relay" {
 			relayPayload.GridRouteTo = nextHop
 		}
+		signRequestGridFrameIntegrityWithSecret(&relayPayload, gridFrameIntegritySecretForConn(relayConn))
 
 		relayTC := NewTunnelConn(relayConn)
 		if err := relayTC.SendJSON(MsgTypeRequestStart, relayPayload); err != nil {

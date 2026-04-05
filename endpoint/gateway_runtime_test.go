@@ -10,7 +10,6 @@ func resetGatewayRuntimeStateForTest() {
 	endpointGatewayRuntime.started = false
 	endpointGatewayRuntime.listenAddr = ""
 	endpointGatewayRuntime.nodeID = ""
-	endpointGatewayRuntime.token = ""
 	endpointGatewayRuntime.discoverPort = 0
 	endpointGatewayRuntime.listener = nil
 	endpointGatewayRuntime.discoveryConn = nil
@@ -18,20 +17,19 @@ func resetGatewayRuntimeStateForTest() {
 	endpointGatewayRuntime.peerMetrics = make(map[string]gatewayPeerMetric)
 	endpointGatewayRuntime.targetRoutes = make(map[string]gatewayTargetRoute)
 	endpointGatewayRuntime.directTargets = make(map[string]struct{})
+	endpointGatewayRuntime.routeCache = make(map[string]gatewayRouteProbeCandidate)
+	endpointGatewayRuntime.peerAuthSeen = make(map[string]int64)
 	endpointGatewayRuntime.mu.Unlock()
 }
 
 func TestParseGatewayConnectLineExtended(t *testing.T) {
-	line := "APS-GW/1 CONNECT 203.0.113.10:443 token=abc origin=node-a path=node-a,node-b hop=6\n"
+	line := "APS-GW/1 CONNECT 203.0.113.10:443 origin=node-a path=node-a,node-b hop=6\n"
 	target, meta, err := parseGatewayConnectLine(line)
 	if err != nil {
 		t.Fatalf("parse failed: %v", err)
 	}
 	if target != "203.0.113.10:443" {
 		t.Fatalf("unexpected target: %s", target)
-	}
-	if meta.Token != "abc" {
-		t.Fatalf("unexpected token: %s", meta.Token)
 	}
 	if meta.OriginNodeID != "node-a" {
 		t.Fatalf("unexpected origin: %s", meta.OriginNodeID)
@@ -45,7 +43,7 @@ func TestParseGatewayConnectLineExtended(t *testing.T) {
 }
 
 func TestParseGatewayConnectLineLegacyToken(t *testing.T) {
-	line := "APS-GW/1 CONNECT 198.51.100.20:8443 legacyToken\n"
+	line := "APS-GW/1 CONNECT 198.51.100.20:8443 legacyField\n"
 	target, meta, err := parseGatewayConnectLine(line)
 	if err != nil {
 		t.Fatalf("parse failed: %v", err)
@@ -53,22 +51,16 @@ func TestParseGatewayConnectLineLegacyToken(t *testing.T) {
 	if target != "198.51.100.20:8443" {
 		t.Fatalf("unexpected target: %s", target)
 	}
-	if meta.Token != "legacyToken" {
-		t.Fatalf("unexpected token: %s", meta.Token)
-	}
 	if meta.HopLimit != defaultGatewayHopLimit {
 		t.Fatalf("unexpected default hop limit: %d", meta.HopLimit)
 	}
 }
 
 func TestParseGatewayGridLine(t *testing.T) {
-	line := "APS-GW/1 GRID token=abc origin=node-a path=node-a,node-b hop=5\n"
+	line := "APS-GW/1 GRID origin=node-a path=node-a,node-b hop=5\n"
 	meta, err := parseGatewayGridLine(line)
 	if err != nil {
 		t.Fatalf("parse grid line failed: %v", err)
-	}
-	if meta.Token != "abc" {
-		t.Fatalf("unexpected token: %s", meta.Token)
 	}
 	if meta.OriginNodeID != "node-a" {
 		t.Fatalf("unexpected origin: %s", meta.OriginNodeID)
@@ -158,16 +150,15 @@ func TestGatewayRoutePrefersShortestPathForAtoBtoC(t *testing.T) {
 	endpointGatewayRuntime.mu.Lock()
 	endpointGatewayRuntime.nodeID = "node-a"
 	endpointGatewayRuntime.listenAddr = "10.0.0.1:3900"
-	endpointGatewayRuntime.token = "gw-token"
 	endpointGatewayRuntime.mu.Unlock()
 
 	// First learn a longer path via APS (A->APS->...->C).
-	msgAPS := "APS-GW-PEER/1 node=node-aps addr=10.0.0.10:3900 token=gw-token targets=203.0.113.50:443@1"
+	msgAPS := "APS-GW-PEER/1 node=node-aps addr=10.0.0.10:3900 targets=203.0.113.50:443@1"
 	if !applyGatewayPeerAnnounce(msgAPS, nil) {
 		t.Fatal("expected aps peer announce to be accepted")
 	}
 	// Then learn a shorter direct gateway path via B (A->B->C).
-	msgB := "APS-GW-PEER/1 node=node-b addr=10.0.0.2:3900 token=gw-token targets=203.0.113.50:443@0"
+	msgB := "APS-GW-PEER/1 node=node-b addr=10.0.0.2:3900 targets=203.0.113.50:443@0"
 	if !applyGatewayPeerAnnounce(msgB, nil) {
 		t.Fatal("expected peer B announce to be accepted")
 	}
@@ -252,5 +243,202 @@ func TestInvalidateGatewayNodeAndRoutes(t *testing.T) {
 	nextHopAddr, nextHopNode := selectGatewayRoute("203.0.113.80:443", nil, "node-a")
 	if nextHopAddr != "" || nextHopNode != "" {
 		t.Fatalf("expected route to be cleared after offline invalidation, got addr=%s node=%s", nextHopAddr, nextHopNode)
+	}
+}
+
+func TestResolveGatewayAddressRefreshesCacheWithoutBreakingCurrentSelection(t *testing.T) {
+	resetGatewayRuntimeStateForTest()
+	defer resetGatewayRuntimeStateForTest()
+
+	target := "203.0.113.77:443"
+	now := time.Now()
+
+	endpointGatewayRuntime.mu.Lock()
+	endpointGatewayRuntime.nodeID = "node-a"
+	endpointGatewayRuntime.listenAddr = "10.0.0.1:37990"
+	endpointGatewayRuntime.peers["node-b"] = gatewayPeerInfo{
+		NodeID:   "node-b",
+		Addr:     "10.0.0.2:37990",
+		LastSeen: now,
+	}
+	endpointGatewayRuntime.targetRoutes[target] = gatewayTargetRoute{
+		Target:        target,
+		NextHopNodeID: "node-b",
+		NextHopAddr:   "10.0.0.2:37990",
+		Hop:           1,
+		LastSeen:      now,
+	}
+	endpointGatewayRuntime.routeCache[target] = gatewayRouteProbeCandidate{
+		Addr:      "10.0.0.9:37990",
+		NodeID:    "node-old",
+		Source:    "route",
+		Score:     99,
+		ProbedAt:  now.Add(-2 * gatewayRouteProbeTTL),
+		NextProbe: now.Add(-time.Second),
+		ExpiresAt: now.Add(gatewayRouteProbeTTL),
+	}
+	endpointGatewayRuntime.mu.Unlock()
+
+	connCtx := ImmutableConnectionContext{
+		ServerAddress:       target,
+		ConfigID:            "node-a",
+		GatewayDiscovery:    false,
+		GatewayDiscoverPort: defaultGatewayDiscoverPort,
+	}
+
+	first := resolveGatewayAddress(connCtx)
+	if first != "10.0.0.9:37990" {
+		t.Fatalf("expected first resolution to keep cached route for in-flight stability, got %s", first)
+	}
+
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		endpointGatewayRuntime.mu.Lock()
+		updated := endpointGatewayRuntime.routeCache[target]
+		endpointGatewayRuntime.mu.Unlock()
+		if updated.Addr == "10.0.0.2:37990" {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	endpointGatewayRuntime.mu.Lock()
+	final := endpointGatewayRuntime.routeCache[target]
+	endpointGatewayRuntime.mu.Unlock()
+	t.Fatalf("expected async refresh to replace route cache with better path, got addr=%s source=%s score=%.2f", final.Addr, final.Source, final.Score)
+}
+
+func TestResolveGatewayAddressCandidatesReturnsPrimaryAndBackups(t *testing.T) {
+	resetGatewayRuntimeStateForTest()
+	defer resetGatewayRuntimeStateForTest()
+
+	target := "203.0.113.90:443"
+	now := time.Now()
+	endpointGatewayRuntime.mu.Lock()
+	endpointGatewayRuntime.nodeID = "node-a"
+	endpointGatewayRuntime.listenAddr = "10.0.0.1:37990"
+	endpointGatewayRuntime.routeCache[target] = gatewayRouteProbeCandidate{
+		Addr:      "10.0.0.2:37990",
+		Backups:   []string{"10.0.0.3:37990", "10.0.0.4:37990"},
+		Score:     1.0,
+		ProbedAt:  now,
+		NextProbe: now.Add(gatewayRouteProbeTTL),
+		ExpiresAt: now.Add(gatewayRouteProbeTTL),
+	}
+	endpointGatewayRuntime.mu.Unlock()
+
+	got := resolveGatewayAddressCandidates(ImmutableConnectionContext{
+		ServerAddress:    target,
+		GatewayDiscovery: false,
+		ConfigID:         "node-a",
+	})
+	if len(got) != 3 {
+		t.Fatalf("expected 3 route bundle candidates, got %v", got)
+	}
+	if got[0] != "10.0.0.2:37990" || got[1] != "10.0.0.3:37990" || got[2] != "10.0.0.4:37990" {
+		t.Fatalf("unexpected route bundle order: %v", got)
+	}
+}
+
+func TestPromoteGatewayRouteCacheCandidatePromotesBackup(t *testing.T) {
+	resetGatewayRuntimeStateForTest()
+	defer resetGatewayRuntimeStateForTest()
+
+	target := "203.0.113.100:443"
+	now := time.Now()
+	endpointGatewayRuntime.mu.Lock()
+	endpointGatewayRuntime.nodeID = "node-a"
+	endpointGatewayRuntime.listenAddr = "10.0.0.1:37990"
+	endpointGatewayRuntime.routeCache[target] = gatewayRouteProbeCandidate{
+		Addr:      "10.0.0.2:37990",
+		Backups:   []string{"10.0.0.3:37990", "10.0.0.4:37990"},
+		Score:     1.0,
+		ProbedAt:  now,
+		NextProbe: now.Add(gatewayRouteProbeTTL),
+		ExpiresAt: now.Add(gatewayRouteProbeTTL),
+	}
+	endpointGatewayRuntime.mu.Unlock()
+
+	done := make(chan struct{})
+	go func() {
+		promoteGatewayRouteCacheCandidate(target, "10.0.0.3:37990")
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("promoteGatewayRouteCacheCandidate blocked (possible lock regression)")
+	}
+
+	endpointGatewayRuntime.mu.Lock()
+	updated := endpointGatewayRuntime.routeCache[target]
+	endpointGatewayRuntime.mu.Unlock()
+	if updated.Addr != "10.0.0.3:37990" {
+		t.Fatalf("expected promoted primary 10.0.0.3:37990, got %s", updated.Addr)
+	}
+	if len(updated.Backups) == 0 || updated.Backups[0] != "10.0.0.2:37990" {
+		t.Fatalf("expected previous primary to become backup head, got %v", updated.Backups)
+	}
+}
+
+func TestSelectGatewayPeerDialCandidatesPrimaryAndLimitFive(t *testing.T) {
+	resetGatewayRuntimeStateForTest()
+	defer resetGatewayRuntimeStateForTest()
+
+	now := time.Now()
+	endpointGatewayRuntime.mu.Lock()
+	endpointGatewayRuntime.nodeID = "node-a"
+	endpointGatewayRuntime.listenAddr = "10.0.0.1:37990"
+	endpointGatewayRuntime.peers["node-b"] = gatewayPeerInfo{NodeID: "node-b", Addr: "10.0.0.2:37990", LastSeen: now}
+	endpointGatewayRuntime.peers["node-c"] = gatewayPeerInfo{NodeID: "node-c", Addr: "10.0.0.3:37990", LastSeen: now}
+	endpointGatewayRuntime.peers["node-d"] = gatewayPeerInfo{NodeID: "node-d", Addr: "10.0.0.4:37990", LastSeen: now}
+	endpointGatewayRuntime.peers["node-e"] = gatewayPeerInfo{NodeID: "node-e", Addr: "10.0.0.5:37990", LastSeen: now}
+	endpointGatewayRuntime.peers["node-f"] = gatewayPeerInfo{NodeID: "node-f", Addr: "10.0.0.6:37990", LastSeen: now}
+	endpointGatewayRuntime.peers["node-g"] = gatewayPeerInfo{NodeID: "node-g", Addr: "10.0.0.7:37990", LastSeen: now}
+	endpointGatewayRuntime.mu.Unlock()
+
+	got := selectGatewayPeerDialCandidates("node-b", []string{"node-e"}, gatewayRouteBundleMaxAddrs)
+	if len(got) != gatewayRouteBundleMaxAddrs {
+		t.Fatalf("expected %d candidates, got %v", gatewayRouteBundleMaxAddrs, got)
+	}
+	if got[0] != "node-b" {
+		t.Fatalf("expected primary node-b first, got %v", got)
+	}
+	for _, node := range got {
+		if node == "node-e" {
+			t.Fatalf("expected excluded node-e to be absent, got %v", got)
+		}
+	}
+}
+
+func TestApplyGatewayPeerAnnounceAcceptsUnsigned(t *testing.T) {
+	resetGatewayRuntimeStateForTest()
+	defer resetGatewayRuntimeStateForTest()
+
+	endpointGatewayRuntime.mu.Lock()
+	endpointGatewayRuntime.nodeID = "node-a"
+	endpointGatewayRuntime.listenAddr = "10.0.0.1:3900"
+	endpointGatewayRuntime.mu.Unlock()
+
+	unsigned := "APS-GW-PEER/1 node=node-b addr=10.0.0.2:3900 targets=203.0.113.10:443@0"
+	if !applyGatewayPeerAnnounce(unsigned, nil) {
+		t.Fatal("expected unsigned peer announce to be accepted")
+	}
+}
+
+func TestValidateGatewayRelayRequestOnlyAllowsDirectAPSTarget(t *testing.T) {
+	resetGatewayRuntimeStateForTest()
+	defer resetGatewayRuntimeStateForTest()
+
+	endpointGatewayRuntime.mu.Lock()
+	endpointGatewayRuntime.directTargets["203.0.113.10:443"] = struct{}{}
+	endpointGatewayRuntime.mu.Unlock()
+
+	meta := gatewayConnectMeta{HopLimit: 4}
+	if err := validateGatewayRelayRequest("203.0.113.10:443", "10.0.0.1:3900", "node-a", meta); err != nil {
+		t.Fatalf("expected direct APS target to be allowed, got %v", err)
+	}
+	if err := validateGatewayRelayRequest("198.51.100.20:443", "10.0.0.1:3900", "node-a", meta); err == nil {
+		t.Fatal("expected non-APS target to be rejected")
 	}
 }

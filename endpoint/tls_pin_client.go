@@ -16,6 +16,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -27,6 +28,9 @@ const (
 	TLSEncryptedConfigIDParam = "eid"
 	TLSEncryptedSaltParam     = "salt"
 	endpointTLSPinSaltLayout  = "200601021504"
+
+	endpointBootstrapGatewayAddressEnv      = "APS_GATEWAY_ADDRESS"
+	endpointBootstrapGatewayDiscoverPortEnv = "APS_GATEWAY_DISCOVER_PORT"
 )
 
 var (
@@ -107,6 +111,78 @@ func normalizeEndpointServerAddress(serverAddress string) (string, string, error
 	return urlAuthority, host, nil
 }
 
+func endpointBootstrapGatewayDiscoverPort() int {
+	if raw := strings.TrimSpace(os.Getenv(endpointBootstrapGatewayDiscoverPortEnv)); raw != "" {
+		if port, err := strconv.Atoi(raw); err == nil && port > 0 && port <= 65535 {
+			return port
+		}
+	}
+	return defaultGatewayDiscoverPort
+}
+
+func endpointBootstrapGatewayAddress() string {
+	if addr := normalizeGatewayAddress(os.Getenv(endpointBootstrapGatewayAddressEnv)); addr != "" {
+		if isLocalGatewayAddress(addr) {
+			DebugLog("[CONN-INIT] Ignoring local bootstrap gateway address=%s", addr)
+			return ""
+		}
+		return addr
+	}
+	discoverPort := endpointBootstrapGatewayDiscoverPort()
+	if discoverPort <= 0 {
+		DebugLog("[CONN-INIT] Bootstrap gateway discovery disabled: invalid port %d", discoverPort)
+		return ""
+	}
+	discovered, err := discoverGatewayAddress(discoverPort)
+	if err != nil {
+		DebugLog("[CONN-INIT] Bootstrap gateway discovery failed on UDP/%d: %v", discoverPort, err)
+		return ""
+	}
+	discovered = normalizeGatewayAddress(discovered)
+	if discovered == "" {
+		return ""
+	}
+	if isLocalGatewayAddress(discovered) {
+		DebugLog("[CONN-INIT] Ignoring discovered local gateway address=%s", discovered)
+		return ""
+	}
+	return discovered
+}
+
+func buildEndpointBootstrapGatewayDialContext(targetAddress string) (func(context.Context, string, string) (net.Conn, error), string) {
+	targetAddress = normalizeServerAddressForSession(targetAddress)
+	if targetAddress == "" {
+		return nil, ""
+	}
+	gatewayAddress := endpointBootstrapGatewayAddress()
+	if gatewayAddress == "" {
+		DebugLog("[CONN-INIT] No bootstrap gateway available for target=%s", targetAddress)
+		return nil, ""
+	}
+	if sameGatewayAddress(gatewayAddress, targetAddress) {
+		return nil, ""
+	}
+	originNode := strings.TrimSpace(*configID)
+	dialViaGateway := func(ctx context.Context, network, addr string) (net.Conn, error) {
+		type dialResult struct {
+			conn net.Conn
+			err  error
+		}
+		done := make(chan dialResult, 1)
+		go func() {
+			conn, err := dialTunnelServerViaGateway(gatewayAddress, targetAddress, originNode)
+			done <- dialResult{conn: conn, err: err}
+		}()
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case result := <-done:
+			return result.conn, result.err
+		}
+	}
+	return dialViaGateway, gatewayAddress
+}
+
 func (p *endpointTLSPin) allowedSummaryLocked() string {
 	if len(p.allowedOrder) == 0 {
 		return "<none>"
@@ -174,29 +250,46 @@ func (p *endpointTLSPin) candidateKeys() [][]byte {
 }
 
 func fetchServerSPKIHashOverHTTPS(authority, serverName string) ([]byte, string, error) {
-	transport := &http.Transport{
-		Proxy:               http.ProxyFromEnvironment,
-		DialContext:         (&net.Dialer{Timeout: 15 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
-		ForceAttemptHTTP2:   true,
-		TLSHandshakeTimeout: 10 * time.Second,
-		TLSClientConfig: &tls.Config{
-			MinVersion: tls.VersionTLS13,
-			ServerName: serverName,
-		},
-	}
-
-	client := &http.Client{
-		Transport: transport,
-		Timeout:   20 * time.Second,
-	}
-
 	reqURL := "https://" + authority + "/.api/tls-pin"
-	resp, err := client.Get(reqURL)
+
+	send := func(dialContext func(context.Context, string, string) (net.Conn, error)) (*http.Response, error) {
+		if dialContext == nil {
+			dialContext = (&net.Dialer{Timeout: 15 * time.Second, KeepAlive: 30 * time.Second}).DialContext
+		}
+		transport := &http.Transport{
+			Proxy:               http.ProxyFromEnvironment,
+			DialContext:         dialContext,
+			ForceAttemptHTTP2:   true,
+			TLSHandshakeTimeout: 10 * time.Second,
+			TLSClientConfig: &tls.Config{
+				MinVersion: tls.VersionTLS13,
+				ServerName: serverName,
+			},
+		}
+		client := &http.Client{
+			Transport: transport,
+			Timeout:   20 * time.Second,
+		}
+		return client.Get(reqURL)
+	}
+
+	resp, err := send(nil)
+	var gatewayAddress string
+	if err != nil {
+		dialViaGateway, gwAddr := buildEndpointBootstrapGatewayDialContext(authority)
+		if dialViaGateway != nil {
+			gatewayAddress = gwAddr
+			resp, err = send(dialViaGateway)
+		}
+	}
 	if err != nil {
 		DebugLog("[CONN-INIT] Connectivity test request failed for %s: %v", authority, err)
 		return nil, "", errors.New("connectivity test failed")
 	}
 	defer resp.Body.Close()
+	if gatewayAddress != "" {
+		DebugLog("[CONN-INIT] Connectivity test via bootstrap gateway=%s target=%s", gatewayAddress, authority)
+	}
 
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 8*1024))
 	if resp.StatusCode != http.StatusOK {
@@ -264,8 +357,8 @@ func newPinnedHTTPClientWithDialContext(pin *endpointTLSPin, dialContext func(co
 		IdleConnTimeout:     90 * time.Second,
 		TLSHandshakeTimeout: 10 * time.Second,
 		TLSClientConfig: &tls.Config{
-			MinVersion: tls.VersionTLS13,
-			ServerName: pin.serverName,
+			MinVersion:       tls.VersionTLS13,
+			ServerName:       pin.serverName,
 			VerifyConnection: pin.verifyPinnedTLSConnection,
 		},
 	}
@@ -518,15 +611,33 @@ func doPinnedAPSGet(serverAddress, requestPath string) (*http.Response, *endpoin
 		return nil, nil, err
 	}
 
-	send := func(p *endpointTLSPin) (*http.Response, error) {
+	send := func(client *http.Client, p *endpointTLSPin) (*http.Response, error) {
 		req, reqErr := http.NewRequest(http.MethodGet, "https://"+p.serverAddress+requestPath, nil)
 		if reqErr != nil {
 			return nil, reqErr
 		}
-		return p.client.Do(req)
+		return client.Do(req)
 	}
 
-	resp, err := send(pin)
+	trySendWithGatewayFallback := func(p *endpointTLSPin) (*http.Response, error) {
+		resp, directErr := send(p.client, p)
+		if directErr == nil {
+			return resp, nil
+		}
+		dialViaGateway, gatewayAddress := buildEndpointBootstrapGatewayDialContext(p.serverAddress)
+		if dialViaGateway == nil {
+			return nil, directErr
+		}
+		gatewayClient := newPinnedHTTPClientWithDialContext(p, dialViaGateway)
+		gatewayResp, gatewayErr := send(gatewayClient, p)
+		if gatewayErr == nil {
+			DebugLog("[CONN-INIT] pinned GET %s via bootstrap gateway=%s target=%s", strings.TrimSpace(requestPath), gatewayAddress, p.serverAddress)
+			return gatewayResp, nil
+		}
+		return nil, directErr
+	}
+
+	resp, err := trySendWithGatewayFallback(pin)
 	if err == nil {
 		return resp, pin, nil
 	}
@@ -540,7 +651,7 @@ func doPinnedAPSGet(serverAddress, requestPath string) (*http.Response, *endpoin
 		return nil, pin, fmt.Errorf("tls pin request failed: %w (refresh failed: %v)", err, refreshErr)
 	}
 
-	resp, err = send(refreshedPin)
+	resp, err = trySendWithGatewayFallback(refreshedPin)
 	if err != nil {
 		return nil, refreshedPin, err
 	}

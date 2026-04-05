@@ -61,6 +61,34 @@ type gridICEProbeTarget struct {
 	localPriority  uint64
 }
 
+type gridICEProbeCacheEntry struct {
+	ordered    []string
+	scores     map[string]float64
+	refreshed  time.Time
+	nextProbe  time.Time
+	refreshing bool
+}
+
+var endpointGridICEProbeCache = struct {
+	mu      sync.Mutex
+	entries map[string]gridICEProbeCacheEntry
+}{
+	entries: make(map[string]gridICEProbeCacheEntry),
+}
+
+const (
+	gridRouteProbeTTL         = 100 * time.Second
+	gridRouteProbeBackoff     = 15 * time.Second
+	gridRouteSwitchHysteresis = 5.0
+	gridRouteCacheMaxEntries  = 256
+)
+
+func resetGridICEProbeCacheForTest() {
+	endpointGridICEProbeCache.mu.Lock()
+	endpointGridICEProbeCache.entries = make(map[string]gridICEProbeCacheEntry)
+	endpointGridICEProbeCache.mu.Unlock()
+}
+
 func dialGridBackendWithPolicy(finalHost string, finalPort int, finalTLS bool, payload ProxyConnectPayload) (net.Conn, string, error) {
 	finalHost = strings.TrimSpace(finalHost)
 	if finalHost == "" || finalPort <= 0 {
@@ -641,12 +669,186 @@ func orderGridICEAddressesByConnectivity(addresses []string, probeTimeout time.D
 }
 
 func orderGridICEProbeTargetsByConnectivity(candidates []gridICEProbeTarget, probeTimeout time.Duration) []string {
+	candidates = normalizeGridICEProbeTargets(candidates)
 	if len(candidates) <= 1 {
 		if len(candidates) == 1 {
 			return []string{candidates[0].addr}
 		}
 		return nil
 	}
+	cacheKey := gridICEProbeCacheKey(candidates)
+	if cacheKey == "" {
+		ordered, _ := probeAndRankGridICEProbeTargets(candidates, probeTimeout)
+		return ordered
+	}
+	now := time.Now()
+
+	endpointGridICEProbeCache.mu.Lock()
+	cached, exists := endpointGridICEProbeCache.entries[cacheKey]
+	if exists && len(cached.ordered) > 0 {
+		ordered := append([]string(nil), cached.ordered...)
+		if !cached.refreshing && (cached.nextProbe.IsZero() || !now.Before(cached.nextProbe)) {
+			cached.refreshing = true
+			endpointGridICEProbeCache.entries[cacheKey] = cached
+			targetSnapshot := append([]gridICEProbeTarget(nil), candidates...)
+			go refreshGridICEProbeCache(cacheKey, targetSnapshot, probeTimeout)
+		}
+		endpointGridICEProbeCache.mu.Unlock()
+		return ordered
+	}
+	endpointGridICEProbeCache.mu.Unlock()
+
+	ordered, scores := probeAndRankGridICEProbeTargets(candidates, probeTimeout)
+	cacheGridICEProbeResult(cacheKey, ordered, scores, now, false)
+	return ordered
+}
+
+func normalizeGridICEProbeTargets(candidates []gridICEProbeTarget) []gridICEProbeTarget {
+	if len(candidates) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(candidates))
+	out := make([]gridICEProbeTarget, 0, len(candidates))
+	for _, target := range candidates {
+		target.addr = strings.TrimSpace(target.addr)
+		if target.addr == "" {
+			continue
+		}
+		target.network = normalizeGridICETransport(target.network)
+		target.candidateType = normalizeGridICECandidateType(target.candidateType)
+		target.role = normalizeGridICERole(target.role)
+		if target.remotePriority == 0 {
+			target.remotePriority = gridICEDefaultPriority(target.candidateType)
+		}
+		if target.localPriority == 0 {
+			target.localPriority = gridICEDefaultPriority(target.candidateType)
+		}
+		key := target.addr + "|" + target.network + "|" + target.candidateType + "|" + target.role + "|" + strconv.FormatUint(target.remotePriority, 10) + "|" + strconv.FormatUint(target.localPriority, 10)
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, target)
+	}
+	return out
+}
+
+func gridICEProbeCacheKey(candidates []gridICEProbeTarget) string {
+	if len(candidates) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(candidates))
+	for _, target := range candidates {
+		parts = append(parts, target.addr+"|"+target.network+"|"+target.candidateType+"|"+target.role+"|"+strconv.FormatUint(target.remotePriority, 10)+"|"+strconv.FormatUint(target.localPriority, 10))
+	}
+	sort.Strings(parts)
+	return strings.Join(parts, ";")
+}
+
+func cacheGridICEProbeResult(key string, ordered []string, scores map[string]float64, now time.Time, refreshing bool) {
+	if strings.TrimSpace(key) == "" {
+		return
+	}
+	entry := gridICEProbeCacheEntry{
+		ordered:    append([]string(nil), ordered...),
+		scores:     copyGridICEScoreMap(scores),
+		refreshed:  now,
+		nextProbe:  now.Add(gridRouteProbeTTL),
+		refreshing: refreshing,
+	}
+	endpointGridICEProbeCache.mu.Lock()
+	endpointGridICEProbeCache.entries[key] = entry
+	trimGridICEProbeCacheLocked(now)
+	endpointGridICEProbeCache.mu.Unlock()
+}
+
+func refreshGridICEProbeCache(key string, candidates []gridICEProbeTarget, probeTimeout time.Duration) {
+	now := time.Now()
+	ordered, scores := probeAndRankGridICEProbeTargets(candidates, probeTimeout)
+
+	endpointGridICEProbeCache.mu.Lock()
+	defer endpointGridICEProbeCache.mu.Unlock()
+
+	current, exists := endpointGridICEProbeCache.entries[key]
+	if !exists {
+		current = gridICEProbeCacheEntry{}
+	}
+	current.refreshing = false
+
+	if len(ordered) == 0 {
+		if len(current.ordered) == 0 {
+			current.nextProbe = now.Add(gridRouteProbeBackoff)
+		} else {
+			current.nextProbe = now.Add(gridRouteProbeTTL)
+		}
+		current.refreshed = now
+		endpointGridICEProbeCache.entries[key] = current
+		return
+	}
+
+	replace := false
+	if len(current.ordered) == 0 {
+		replace = true
+	} else if current.ordered[0] == ordered[0] {
+		replace = true
+	} else {
+		oldTop := current.scores[current.ordered[0]]
+		newTop := scores[ordered[0]]
+		replace = newTop >= oldTop+gridRouteSwitchHysteresis
+	}
+
+	if replace {
+		current.ordered = append([]string(nil), ordered...)
+		current.scores = copyGridICEScoreMap(scores)
+	}
+	current.refreshed = now
+	current.nextProbe = now.Add(gridRouteProbeTTL)
+	endpointGridICEProbeCache.entries[key] = current
+	trimGridICEProbeCacheLocked(now)
+}
+
+func trimGridICEProbeCacheLocked(now time.Time) {
+	if len(endpointGridICEProbeCache.entries) <= gridRouteCacheMaxEntries {
+		for key, entry := range endpointGridICEProbeCache.entries {
+			if !entry.refreshed.IsZero() && now.Sub(entry.refreshed) > gridRouteProbeTTL*3 {
+				delete(endpointGridICEProbeCache.entries, key)
+			}
+		}
+		return
+	}
+
+	type kv struct {
+		key string
+		at  time.Time
+	}
+	oldest := make([]kv, 0, len(endpointGridICEProbeCache.entries))
+	for key, entry := range endpointGridICEProbeCache.entries {
+		oldest = append(oldest, kv{key: key, at: entry.refreshed})
+	}
+	sort.Slice(oldest, func(i, j int) bool {
+		return oldest[i].at.Before(oldest[j].at)
+	})
+	toDrop := len(endpointGridICEProbeCache.entries) - gridRouteCacheMaxEntries
+	if toDrop < 0 {
+		toDrop = 0
+	}
+	for i := 0; i < toDrop && i < len(oldest); i++ {
+		delete(endpointGridICEProbeCache.entries, oldest[i].key)
+	}
+}
+
+func copyGridICEScoreMap(src map[string]float64) map[string]float64 {
+	if len(src) == 0 {
+		return nil
+	}
+	dst := make(map[string]float64, len(src))
+	for k, v := range src {
+		dst[k] = v
+	}
+	return dst
+}
+
+func probeAndRankGridICEProbeTargets(candidates []gridICEProbeTarget, probeTimeout time.Duration) ([]string, map[string]float64) {
 	type probeResult struct {
 		target       gridICEProbeTarget
 		rtt          time.Duration
@@ -704,14 +906,16 @@ func orderGridICEProbeTargetsByConnectivity(candidates []gridICEProbeTarget, pro
 
 	out := make([]string, 0, len(results))
 	seenOut := make(map[string]struct{}, len(results))
+	scoreMap := make(map[string]float64, len(results))
 	for _, res := range results {
 		if _, exists := seenOut[res.target.addr]; exists {
 			continue
 		}
 		seenOut[res.target.addr] = struct{}{}
 		out = append(out, res.target.addr)
+		scoreMap[res.target.addr] = res.score
 	}
-	return out
+	return out, scoreMap
 }
 
 func probeGridICEConnectivity(target gridICEProbeTarget, timeout time.Duration) (bool, time.Duration) {

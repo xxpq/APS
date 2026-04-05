@@ -109,7 +109,6 @@ func setEndpointGridRuntimeContext(connCtx ImmutableConnectionContext) {
 		PortMappings:        clonePortMappingsForContext(connCtx.PortMappings),
 		GatewayListen:       strings.TrimSpace(connCtx.GatewayListen),
 		GatewayAddress:      strings.TrimSpace(connCtx.GatewayAddress),
-		GatewayToken:        strings.TrimSpace(connCtx.GatewayToken),
 		GatewayDiscovery:    connCtx.GatewayDiscovery,
 		GatewayDiscoverPort: connCtx.GatewayDiscoverPort,
 		SSH:                 cloneEndpointSSHConfigForContext(connCtx.SSH),
@@ -867,7 +866,6 @@ func buildEndpointGridGatewayPinnedClient(pin *endpointTLSPin, serverAddress str
 	if targetAddress == "" {
 		return nil, ""
 	}
-	token := strings.TrimSpace(connCtx.GatewayToken)
 	originNode := strings.TrimSpace(connCtx.ConfigID)
 	dialViaGateway := func(ctx context.Context, network, addr string) (net.Conn, error) {
 		type dialResult struct {
@@ -876,7 +874,7 @@ func buildEndpointGridGatewayPinnedClient(pin *endpointTLSPin, serverAddress str
 		}
 		done := make(chan dialResult, 1)
 		go func() {
-			conn, err := dialTunnelServerViaGateway(gatewayAddress, targetAddress, token, originNode)
+			conn, err := dialTunnelServerViaGateway(gatewayAddress, targetAddress, originNode)
 			done <- dialResult{conn: conn, err: err}
 		}()
 		select {

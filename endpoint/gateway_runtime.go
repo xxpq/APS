@@ -2,12 +2,19 @@ package main
 
 import (
 	"bufio"
+	"crypto/ecdh"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net"
 	"net/url"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -16,12 +23,14 @@ import (
 )
 
 const (
-	gatewayProtocolVersion = "APS-GW/1"
-	gatewayCommandConnect  = "CONNECT"
-	gatewayCommandGrid     = "GRID"
-	gatewayDiscoverMagic   = "APS-GW-DISCOVER/1"
-	gatewayAnnounceMagic   = "APS-GW-ANNOUNCE/1"
-	gatewayPeerMagic       = "APS-GW-PEER/1"
+	gatewayProtocolVersion  = "APS-GW/1"
+	gatewayCommandConnect   = "CONNECT"
+	gatewayCommandGrid      = "GRID"
+	gatewayCommandAuth      = "AUTH"
+	gatewayCommandChallenge = "CHALLENGE"
+	gatewayDiscoverMagic    = "APS-GW-DISCOVER/1"
+	gatewayAnnounceMagic    = "APS-GW-ANNOUNCE/1"
+	gatewayPeerMagic        = "APS-GW-PEER/1"
 
 	defaultGatewayDiscoverPort = 37990
 	defaultGatewayHopLimit     = 8
@@ -29,10 +38,25 @@ const (
 
 	gatewayPeerBroadcastInterval = 5 * time.Second
 	gatewayPeerRouteTTL          = 45 * time.Second
+	gatewayRouteProbeTTL         = 100 * time.Second
+	gatewayRouteProbeBackoff     = 15 * time.Second
+	gatewayRouteSwitchEpsilon    = 0.25
+	gatewayRouteBundleMaxAddrs   = 5
 	maxGatewayPeerEntries        = 128
 	maxGatewayRouteEntries       = 256
 	maxGatewayAnnounceEntries    = 32
+	gatewayPeerAuthWindow        = 60 * time.Second
+	gatewayPeerAuthNonceBytes    = 12
+	gatewayPeerAuthReplayEntries = 4096
+	gatewayKEXNonceBytes         = 16
 )
+
+func defaultGatewayListenAddress(discoverPort int) string {
+	if discoverPort <= 0 {
+		discoverPort = defaultGatewayDiscoverPort
+	}
+	return net.JoinHostPort("0.0.0.0", strconv.Itoa(discoverPort))
+}
 
 type gatewayPeerInfo struct {
 	NodeID   string
@@ -65,11 +89,42 @@ type gatewayRouteCandidate struct {
 	Cost          float64
 }
 
+type gatewayRouteProbeCandidate struct {
+	Addr       string
+	Backups    []string
+	NodeID     string
+	Source     string
+	Score      float64
+	ProbedAt   time.Time
+	ExpiresAt  time.Time
+	NextProbe  time.Time
+	Refreshing bool
+}
+
 type gatewayConnectMeta struct {
-	Token        string
 	OriginNodeID string
 	Path         []string
 	HopLimit     int
+	KEXPublicKey string
+	KEXNonce     string
+}
+
+type gatewayKEXOffer struct {
+	privateKey *ecdh.PrivateKey
+	publicKey  string
+	nonce      string
+}
+
+type gatewayIntegrityKeyConn struct {
+	net.Conn
+	integrityKey string
+}
+
+func (c *gatewayIntegrityKeyConn) GridIntegrityKey() string {
+	if c == nil {
+		return ""
+	}
+	return strings.TrimSpace(c.integrityKey)
 }
 
 type gatewayRuntimeState struct {
@@ -77,7 +132,6 @@ type gatewayRuntimeState struct {
 	started       bool
 	listenAddr    string
 	nodeID        string
-	token         string
 	discoverPort  int
 	listener      net.Listener
 	discoveryConn *net.UDPConn
@@ -85,6 +139,8 @@ type gatewayRuntimeState struct {
 	peerMetrics   map[string]gatewayPeerMetric
 	targetRoutes  map[string]gatewayTargetRoute
 	directTargets map[string]struct{}
+	routeCache    map[string]gatewayRouteProbeCandidate
+	peerAuthSeen  map[string]int64
 }
 
 var endpointGatewayRuntime = gatewayRuntimeState{
@@ -92,6 +148,32 @@ var endpointGatewayRuntime = gatewayRuntimeState{
 	peerMetrics:   make(map[string]gatewayPeerMetric),
 	targetRoutes:  make(map[string]gatewayTargetRoute),
 	directTargets: make(map[string]struct{}),
+	routeCache:    make(map[string]gatewayRouteProbeCandidate),
+	peerAuthSeen:  make(map[string]int64),
+}
+
+func ensureBootstrapGatewayRuntimeForConfigFetch(serverAddress, configID string) {
+	configID = strings.TrimSpace(configID)
+	if configID == "" {
+		return
+	}
+	serverAddress = normalizeServerAddressForSession(serverAddress)
+	if serverAddress == "" {
+		return
+	}
+
+	discoverPort := endpointBootstrapGatewayDiscoverPort()
+	if discoverPort <= 0 {
+		discoverPort = defaultGatewayDiscoverPort
+	}
+	ensureGatewayRuntime(ImmutableConnectionContext{
+		ServerAddress:       serverAddress,
+		ConfigID:            configID,
+		EndpointName:        configID,
+		GatewayListen:       defaultGatewayListenAddress(discoverPort),
+		GatewayDiscovery:    true,
+		GatewayDiscoverPort: discoverPort,
+	})
 }
 
 func ensureGatewayRuntime(connCtx ImmutableConnectionContext) {
@@ -107,7 +189,6 @@ func ensureGatewayRuntime(connCtx ImmutableConnectionContext) {
 	if nodeID == "" {
 		nodeID = normalizeGatewayNodeID(connCtx.EndpointName)
 	}
-	token := strings.TrimSpace(connCtx.GatewayToken)
 	directTarget := normalizeGatewayAddress(connCtx.ServerAddress)
 
 	endpointGatewayRuntime.mu.Lock()
@@ -118,7 +199,6 @@ func ensureGatewayRuntime(connCtx ImmutableConnectionContext) {
 		if nodeID != "" {
 			endpointGatewayRuntime.nodeID = nodeID
 		}
-		endpointGatewayRuntime.token = token
 		if connCtx.GatewayDiscoverPort > 0 {
 			endpointGatewayRuntime.discoverPort = connCtx.GatewayDiscoverPort
 		}
@@ -136,7 +216,6 @@ func ensureGatewayRuntime(connCtx ImmutableConnectionContext) {
 	endpointGatewayRuntime.started = true
 	endpointGatewayRuntime.listenAddr = ln.Addr().String()
 	endpointGatewayRuntime.nodeID = nodeID
-	endpointGatewayRuntime.token = token
 	endpointGatewayRuntime.discoverPort = connCtx.GatewayDiscoverPort
 	endpointGatewayRuntime.listener = ln
 	discoverPort := endpointGatewayRuntime.discoverPort
@@ -158,23 +237,285 @@ func ensureGatewayRuntime(connCtx ImmutableConnectionContext) {
 		endpointGatewayRuntime.mu.Unlock()
 
 		log.Printf("[GATEWAY] Discovery responder started on UDP/%d", discoverPort)
-		go serveGatewayDiscovery(discoveryConn, listenAddr, discoverPort)
+		go serveGatewayDiscovery(discoveryConn, listenAddr)
 		go broadcastGatewayPresence(discoveryConn, discoverPort, listenAddr)
 	}
 }
 
 func resolveGatewayAddress(connCtx ImmutableConnectionContext) string {
-	if addr := normalizeGatewayAddress(connCtx.GatewayAddress); addr != "" {
-		if !isLocalGatewayAddress(addr) {
-			return addr
+	candidates := resolveGatewayAddressCandidates(connCtx)
+	if len(candidates) == 0 {
+		return ""
+	}
+	return candidates[0]
+}
+
+func resolveGatewayAddressCandidates(connCtx ImmutableConnectionContext) []string {
+	target := normalizeGatewayAddress(connCtx.ServerAddress)
+	if target == "" {
+		return nil
+	}
+
+	now := time.Now()
+	cached, shouldRefresh := loadGatewayRouteCacheCandidate(target, now)
+	if cached.Addr != "" {
+		if isLocalGatewayAddress(cached.Addr) {
+			clearGatewayRouteCacheCandidate(target)
+		} else {
+			if shouldRefresh {
+				go refreshGatewayRouteCacheCandidate(target, connCtx)
+			}
+			return gatewayRouteCandidateBundle(cached)
 		}
 	}
 
+	selected, err := probeGatewayRouteCandidate(connCtx, now)
+	if err != nil {
+		return nil
+	}
+	storeGatewayRouteCacheCandidate(target, selected)
+	return gatewayRouteCandidateBundle(selected)
+}
+
+func gatewayRouteCandidateBundle(candidate gatewayRouteProbeCandidate) []string {
+	if candidate.Addr == "" {
+		return nil
+	}
+	out := make([]string, 0, gatewayRouteBundleMaxAddrs)
+	seen := make(map[string]struct{}, gatewayRouteBundleMaxAddrs)
+	add := func(addr string) {
+		addr = normalizeGatewayAddress(addr)
+		if addr == "" || isLocalGatewayAddress(addr) {
+			return
+		}
+		if _, exists := seen[addr]; exists {
+			return
+		}
+		seen[addr] = struct{}{}
+		out = append(out, addr)
+	}
+	add(candidate.Addr)
+	for _, backup := range candidate.Backups {
+		if len(out) >= gatewayRouteBundleMaxAddrs {
+			break
+		}
+		add(backup)
+	}
+	return out
+}
+
+func clearGatewayRouteCacheCandidate(target string) {
+	target = normalizeGatewayAddress(target)
+	if target == "" {
+		return
+	}
+	endpointGatewayRuntime.mu.Lock()
+	delete(endpointGatewayRuntime.routeCache, target)
+	endpointGatewayRuntime.mu.Unlock()
+}
+
+func promoteGatewayRouteCacheCandidate(target, successAddr string) {
+	target = normalizeGatewayAddress(target)
+	successAddr = normalizeGatewayAddress(successAddr)
+	if target == "" || successAddr == "" || isLocalGatewayAddress(successAddr) {
+		return
+	}
+
+	now := time.Now()
+	endpointGatewayRuntime.mu.Lock()
+	defer endpointGatewayRuntime.mu.Unlock()
+	current, exists := endpointGatewayRuntime.routeCache[target]
+	if !exists {
+		endpointGatewayRuntime.routeCache[target] = gatewayRouteProbeCandidate{
+			Addr:      successAddr,
+			Backups:   nil,
+			Source:    "runtime-success",
+			Score:     current.Score,
+			ProbedAt:  now,
+			NextProbe: now.Add(gatewayRouteProbeTTL),
+			ExpiresAt: now.Add(gatewayRouteProbeTTL),
+		}
+		return
+	}
+	if sameGatewayAddress(current.Addr, successAddr) {
+		current.ExpiresAt = now.Add(gatewayRouteProbeTTL)
+		current.NextProbe = now.Add(gatewayRouteProbeTTL)
+		current.Refreshing = false
+		endpointGatewayRuntime.routeCache[target] = current
+		return
+	}
+	newBackups := make([]string, 0, gatewayRouteBundleMaxAddrs-1)
+	newBackups = append(newBackups, current.Addr)
+	newBackups = append(newBackups, current.Backups...)
+	current.Addr = successAddr
+	current.Backups = normalizeGatewayAddressList(newBackups, current.Addr, gatewayRouteBundleMaxAddrs-1)
+	current.Source = "runtime-success"
+	current.ExpiresAt = now.Add(gatewayRouteProbeTTL)
+	current.NextProbe = now.Add(gatewayRouteProbeTTL)
+	current.Refreshing = false
+	endpointGatewayRuntime.routeCache[target] = current
+}
+
+func loadGatewayRouteCacheCandidate(target string, now time.Time) (gatewayRouteProbeCandidate, bool) {
+	target = normalizeGatewayAddress(target)
+	if target == "" {
+		return gatewayRouteProbeCandidate{}, false
+	}
+
+	endpointGatewayRuntime.mu.Lock()
+	defer endpointGatewayRuntime.mu.Unlock()
+
+	cached, exists := endpointGatewayRuntime.routeCache[target]
+	if !exists || cached.Addr == "" {
+		return gatewayRouteProbeCandidate{}, false
+	}
+	if cached.ExpiresAt.IsZero() || now.After(cached.ExpiresAt) {
+		cached.ExpiresAt = now.Add(gatewayRouteProbeTTL)
+	}
+	shouldRefresh := !cached.Refreshing && (cached.NextProbe.IsZero() || !now.Before(cached.NextProbe))
+	if shouldRefresh {
+		cached.Refreshing = true
+		endpointGatewayRuntime.routeCache[target] = cached
+	}
+	return cached, shouldRefresh
+}
+
+func storeGatewayRouteCacheCandidate(target string, candidate gatewayRouteProbeCandidate) {
+	target = normalizeGatewayAddress(target)
+	candidate.Addr = normalizeGatewayAddress(candidate.Addr)
+	if target == "" || candidate.Addr == "" {
+		return
+	}
+	if isLocalGatewayAddress(candidate.Addr) {
+		return
+	}
+
+	now := time.Now()
+	candidate.ProbedAt = now
+	candidate.Backups = normalizeGatewayAddressList(candidate.Backups, candidate.Addr, gatewayRouteBundleMaxAddrs-1)
+	candidate.NextProbe = now.Add(gatewayRouteProbeTTL)
+	candidate.ExpiresAt = now.Add(gatewayRouteProbeTTL)
+	candidate.Refreshing = false
+
+	endpointGatewayRuntime.mu.Lock()
+	endpointGatewayRuntime.routeCache[target] = candidate
+	endpointGatewayRuntime.mu.Unlock()
+}
+
+func refreshGatewayRouteCacheCandidate(target string, connCtx ImmutableConnectionContext) {
+	target = normalizeGatewayAddress(target)
+	if target == "" {
+		return
+	}
+	now := time.Now()
+	candidate, err := probeGatewayRouteCandidate(connCtx, now)
+	candidate.Addr = normalizeGatewayAddress(candidate.Addr)
+	candidateIsLocal := candidate.Addr != "" && isLocalGatewayAddress(candidate.Addr)
+
+	endpointGatewayRuntime.mu.Lock()
+	current := endpointGatewayRuntime.routeCache[target]
+	current.Refreshing = false
+	current.ExpiresAt = now.Add(gatewayRouteProbeTTL)
+	if err != nil || candidate.Addr == "" {
+		current.NextProbe = now.Add(gatewayRouteProbeBackoff)
+		endpointGatewayRuntime.routeCache[target] = current
+		endpointGatewayRuntime.mu.Unlock()
+		return
+	}
+
+	if candidate.Addr == "" || candidateIsLocal {
+		current.NextProbe = now.Add(gatewayRouteProbeBackoff)
+		endpointGatewayRuntime.routeCache[target] = current
+		endpointGatewayRuntime.mu.Unlock()
+		return
+	}
+	candidate.ProbedAt = now
+	candidate.Backups = normalizeGatewayAddressList(candidate.Backups, candidate.Addr, gatewayRouteBundleMaxAddrs-1)
+	candidate.NextProbe = now.Add(gatewayRouteProbeTTL)
+	candidate.ExpiresAt = now.Add(gatewayRouteProbeTTL)
+	candidate.Refreshing = false
+
+	replace := false
+	if current.Addr == "" {
+		replace = true
+	} else if sameGatewayAddress(current.Addr, candidate.Addr) {
+		replace = true
+	} else {
+		replace = candidate.Score+gatewayRouteSwitchEpsilon < current.Score
+	}
+	if replace {
+		endpointGatewayRuntime.routeCache[target] = candidate
+	} else {
+		current.Backups = mergeGatewayBackupCandidates(current.Backups, candidate.Backups, current.Addr, gatewayRouteBundleMaxAddrs-1)
+		current.NextProbe = now.Add(gatewayRouteProbeTTL)
+		endpointGatewayRuntime.routeCache[target] = current
+	}
+	endpointGatewayRuntime.mu.Unlock()
+}
+
+func mergeGatewayBackupCandidates(existing, incoming []string, primary string, limit int) []string {
+	merged := make([]string, 0, len(existing)+len(incoming))
+	merged = append(merged, existing...)
+	merged = append(merged, incoming...)
+	return normalizeGatewayAddressList(merged, primary, limit)
+}
+
+func normalizeGatewayAddressList(addrs []string, primary string, limit int) []string {
+	if len(addrs) == 0 || limit <= 0 {
+		return nil
+	}
+	primary = normalizeGatewayAddress(primary)
+	seen := make(map[string]struct{}, len(addrs))
+	out := make([]string, 0, limit)
+	for _, raw := range addrs {
+		addr := normalizeGatewayAddress(raw)
+		if addr == "" || sameGatewayAddress(addr, primary) {
+			continue
+		}
+		if _, exists := seen[addr]; exists {
+			continue
+		}
+		seen[addr] = struct{}{}
+		out = append(out, addr)
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out
+}
+
+func probeGatewayRouteCandidate(connCtx ImmutableConnectionContext, now time.Time) (gatewayRouteProbeCandidate, error) {
+	type candidate struct {
+		addr   string
+		nodeID string
+		source string
+		score  float64
+	}
+	candidates := make([]candidate, 0, 8)
+	addCandidate := func(addr, nodeID, source string, score float64) {
+		addr = normalizeGatewayAddress(addr)
+		nodeID = normalizeGatewayNodeID(nodeID)
+		if addr == "" || isLocalGatewayAddress(addr) {
+			return
+		}
+		if score < 0 {
+			score = 0
+		}
+		candidates = append(candidates, candidate{
+			addr:   addr,
+			nodeID: nodeID,
+			source: strings.TrimSpace(source),
+			score:  score,
+		})
+	}
+
+	if addr := normalizeGatewayAddress(connCtx.GatewayAddress); addr != "" {
+		addCandidate(addr, "", "config", 0.10)
+	}
+
 	if connCtx.GatewayDiscovery && connCtx.GatewayDiscoverPort > 0 {
-		if discovered, err := discoverGatewayAddress(connCtx.GatewayDiscoverPort, strings.TrimSpace(connCtx.GatewayToken)); err == nil {
-			if discovered != "" && !isLocalGatewayAddress(discovered) {
-				return discovered
-			}
+		if discovered, err := discoverGatewayAddress(connCtx.GatewayDiscoverPort); err == nil {
+			addCandidate(discovered, "", "discovery", 1.00)
 		}
 	}
 
@@ -182,11 +523,54 @@ func resolveGatewayAddress(connCtx ImmutableConnectionContext) string {
 	if selfNode == "" {
 		selfNode = normalizeGatewayNodeID(connCtx.EndpointName)
 	}
-	if routeAddr, _ := selectGatewayRoute(connCtx.ServerAddress, nil, selfNode); routeAddr != "" {
-		return routeAddr
+	for _, route := range selectGatewayRouteCandidates(connCtx.ServerAddress, nil, selfNode, gatewayRouteBundleMaxAddrs) {
+		addCandidate(route.NextHopAddr, route.NextHopNodeID, "route", route.Cost)
 	}
 
-	return ""
+	if len(candidates) == 0 {
+		return gatewayRouteProbeCandidate{}, errors.New("no gateway candidate available")
+	}
+
+	sort.SliceStable(candidates, func(i, j int) bool {
+		if candidates[i].score == candidates[j].score {
+			if candidates[i].source == candidates[j].source {
+				return candidates[i].addr < candidates[j].addr
+			}
+			return candidates[i].source < candidates[j].source
+		}
+		return candidates[i].score < candidates[j].score
+	})
+
+	best := candidates[0]
+	backups := make([]string, 0, gatewayRouteBundleMaxAddrs-1)
+	seenNodes := map[string]struct{}{}
+	if best.nodeID != "" {
+		seenNodes[best.nodeID] = struct{}{}
+	}
+	for i := 1; i < len(candidates) && len(backups) < gatewayRouteBundleMaxAddrs-1; i++ {
+		c := candidates[i]
+		if c.addr == "" || sameGatewayAddress(c.addr, best.addr) {
+			continue
+		}
+		if c.nodeID != "" {
+			if _, exists := seenNodes[c.nodeID]; exists {
+				continue
+			}
+			seenNodes[c.nodeID] = struct{}{}
+		}
+		backups = append(backups, c.addr)
+	}
+
+	return gatewayRouteProbeCandidate{
+		Addr:      best.addr,
+		Backups:   backups,
+		NodeID:    best.nodeID,
+		Source:    best.source,
+		Score:     best.score,
+		ProbedAt:  now,
+		NextProbe: now.Add(gatewayRouteProbeTTL),
+		ExpiresAt: now.Add(gatewayRouteProbeTTL),
+	}, nil
 }
 
 func acceptGatewayRelayLoop(listener net.Listener, listenAddr string) {
@@ -225,22 +609,27 @@ func handleGatewayRelayConnection(clientConn net.Conn, listenAddr string) {
 		return
 	}
 
-	runtimeToken, runtimeNodeID := currentGatewayIdentity()
-	if runtimeToken != "" && strings.TrimSpace(meta.Token) != runtimeToken {
+	runtimeNodeID := currentGatewayNodeID()
+	if !isGatewayRelayAuthorized(targetAddr, meta) {
 		_, _ = io.WriteString(clientConn, "ERR unauthorized\n")
 		return
 	}
 	if err := validateGatewayRelayRequest(targetAddr, listenAddr, runtimeNodeID, meta); err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "target not allowed") {
+			_, _ = io.WriteString(clientConn, "ERR target not allowed\n")
+			return
+		}
 		_, _ = io.WriteString(clientConn, "ERR loop detected\n")
+		return
+	}
+	if _, err := completeGatewayKEXServer(clientConn, reader, gatewayCommandConnect, targetAddr, meta); err != nil {
+		_, _ = io.WriteString(clientConn, "ERR unauthorized\n")
 		return
 	}
 
 	relayMeta := meta
 	if runtimeNodeID != "" {
 		relayMeta.Path = appendGatewayPath(relayMeta.Path, runtimeNodeID)
-	}
-	if relayMeta.Token == "" {
-		relayMeta.Token = runtimeToken
 	}
 
 	upstreamConn, err := net.DialTimeout("tcp", targetAddr, 15*time.Second)
@@ -311,13 +700,14 @@ func handleGatewayGridConnection(clientConn net.Conn, reader *bufio.Reader, line
 		return
 	}
 
-	runtimeToken, runtimeNodeID := currentGatewayIdentity()
-	if runtimeToken != "" && strings.TrimSpace(meta.Token) != runtimeToken {
-		_, _ = io.WriteString(clientConn, "ERR unauthorized\n")
-		return
-	}
+	runtimeNodeID := currentGatewayNodeID()
 	if err := validateGatewayGridRequest(runtimeNodeID, meta); err != nil {
 		_, _ = io.WriteString(clientConn, "ERR loop detected\n")
+		return
+	}
+	integrityKey, err := completeGatewayKEXServer(clientConn, reader, gatewayCommandGrid, "", meta)
+	if err != nil {
+		_, _ = io.WriteString(clientConn, "ERR unauthorized\n")
 		return
 	}
 
@@ -333,6 +723,9 @@ func handleGatewayGridConnection(clientConn net.Conn, reader *bufio.Reader, line
 				prefix: append([]byte(nil), prefix...),
 			}
 		}
+	}
+	if strings.TrimSpace(integrityKey) != "" {
+		gridConn = &gatewayIntegrityKeyConn{Conn: gridConn, integrityKey: integrityKey}
 	}
 
 	handleEndpointGridTransitConnection(gridConn)
@@ -393,17 +786,12 @@ func parseGatewayMetaFields(fields []string) gatewayConnectMeta {
 
 		eq := strings.IndexByte(part, '=')
 		if eq <= 0 {
-			if meta.Token == "" {
-				meta.Token = part
-			}
 			continue
 		}
 
 		key := strings.ToLower(strings.TrimSpace(part[:eq]))
 		value := decodeGatewayField(strings.TrimSpace(part[eq+1:]))
 		switch key {
-		case "token":
-			meta.Token = value
 		case "origin":
 			meta.OriginNodeID = normalizeGatewayNodeID(value)
 		case "path":
@@ -412,6 +800,10 @@ func parseGatewayMetaFields(fields []string) gatewayConnectMeta {
 			if hop, convErr := strconv.Atoi(strings.TrimSpace(value)); convErr == nil {
 				meta.HopLimit = hop
 			}
+		case "kex":
+			meta.KEXPublicKey = strings.TrimSpace(value)
+		case "nonce":
+			meta.KEXNonce = strings.TrimSpace(value)
 		}
 	}
 
@@ -431,6 +823,9 @@ func validateGatewayRelayRequest(targetAddr, listenAddr, nodeID string, meta gat
 	}
 	if sameGatewayAddress(targetAddr, listenAddr) {
 		return errors.New("self-loop target")
+	}
+	if !isGatewayBootstrapDirectTarget(targetAddr) {
+		return errors.New("target not allowed")
 	}
 
 	selfNode := normalizeGatewayNodeID(nodeID)
@@ -462,9 +857,8 @@ func validateGatewayGridRequest(nodeID string, meta gatewayConnectMeta) error {
 	return nil
 }
 
-func dialTunnelServerViaGateway(gatewayAddr, targetAddr, token, originNodeID string) (net.Conn, error) {
+func dialTunnelServerViaGateway(gatewayAddr, targetAddr, originNodeID string) (net.Conn, error) {
 	meta := gatewayConnectMeta{
-		Token:        strings.TrimSpace(token),
 		OriginNodeID: normalizeGatewayNodeID(originNodeID),
 		HopLimit:     defaultGatewayHopLimit,
 	}
@@ -494,6 +888,12 @@ func dialTunnelServerViaGatewayWithMeta(gatewayAddr, targetAddr string, meta gat
 		meta.HopLimit = maxGatewayHopLimit
 	}
 	meta.Path = normalizeGatewayPath(meta.Path)
+	kexOffer, err := newGatewayKEXOffer()
+	if err != nil {
+		return nil, err
+	}
+	meta.KEXPublicKey = kexOffer.publicKey
+	meta.KEXNonce = kexOffer.nonce
 
 	dialer := &net.Dialer{Timeout: 15 * time.Second, KeepAlive: 30 * time.Second}
 	conn, err := dialer.Dial("tcp", gatewayAddr)
@@ -514,15 +914,18 @@ func dialTunnelServerViaGatewayWithMeta(gatewayAddr, targetAddr string, meta gat
 		_ = conn.Close()
 		return nil, err
 	}
-	respLine = strings.TrimSpace(respLine)
-	if !strings.HasPrefix(respLine, "OK") {
+	integrityKey, err := completeGatewayKEXClient(conn, reader, respLine, gatewayCommandConnect, targetAddr, meta, kexOffer)
+	if err != nil {
 		_ = conn.Close()
-		return nil, fmt.Errorf("gateway rejected connect: %s", respLine)
+		return nil, err
 	}
 
 	_ = conn.SetDeadline(time.Time{})
 	buffered := reader.Buffered()
 	if buffered == 0 {
+		if strings.TrimSpace(integrityKey) != "" {
+			return &gatewayIntegrityKeyConn{Conn: conn, integrityKey: integrityKey}, nil
+		}
 		return conn, nil
 	}
 	prefixBytes, err := reader.Peek(buffered)
@@ -532,7 +935,11 @@ func dialTunnelServerViaGatewayWithMeta(gatewayAddr, targetAddr string, meta gat
 	}
 	prefix := make([]byte, len(prefixBytes))
 	copy(prefix, prefixBytes)
-	return &prefixedConn{Conn: conn, prefix: prefix}, nil
+	out := net.Conn(&prefixedConn{Conn: conn, prefix: prefix})
+	if strings.TrimSpace(integrityKey) != "" {
+		out = &gatewayIntegrityKeyConn{Conn: out, integrityKey: integrityKey}
+	}
+	return out, nil
 }
 
 func dialGatewayPeerGrid(nodeID string) (net.Conn, error) {
@@ -543,7 +950,6 @@ func dialGatewayPeerGrid(nodeID string) (net.Conn, error) {
 
 	endpointGatewayRuntime.mu.Lock()
 	peer, ok := endpointGatewayRuntime.peers[nodeID]
-	token := strings.TrimSpace(endpointGatewayRuntime.token)
 	origin := normalizeGatewayNodeID(endpointGatewayRuntime.nodeID)
 	endpointGatewayRuntime.mu.Unlock()
 
@@ -552,7 +958,6 @@ func dialGatewayPeerGrid(nodeID string) (net.Conn, error) {
 	}
 
 	meta := gatewayConnectMeta{
-		Token:        token,
 		OriginNodeID: origin,
 		HopLimit:     defaultGatewayHopLimit,
 	}
@@ -563,6 +968,131 @@ func dialGatewayPeerGrid(nodeID string) (net.Conn, error) {
 	conn, err := dialGatewayGridWithMeta(peer.Addr, meta)
 	recordGatewayPeerDialResult(nodeID, time.Since(started), err == nil)
 	return conn, err
+}
+
+func selectGatewayPeerDialCandidates(primaryNodeID string, exclude []string, limit int) []string {
+	primaryNodeID = normalizeGatewayNodeID(primaryNodeID)
+	if limit <= 0 {
+		limit = gatewayRouteBundleMaxAddrs
+	}
+
+	excludeSet := make(map[string]struct{}, len(exclude)+1)
+	for _, raw := range exclude {
+		node := normalizeGatewayNodeID(raw)
+		if node == "" {
+			continue
+		}
+		excludeSet[node] = struct{}{}
+	}
+
+	type peerCandidate struct {
+		nodeID string
+		cost   float64
+	}
+	now := time.Now()
+	endpointGatewayRuntime.mu.Lock()
+	pruneGatewayStateLocked(now)
+	peerCandidates := make([]peerCandidate, 0, len(endpointGatewayRuntime.peers))
+	for nodeID, peer := range endpointGatewayRuntime.peers {
+		nodeID = normalizeGatewayNodeID(nodeID)
+		if nodeID == "" || strings.TrimSpace(peer.Addr) == "" {
+			continue
+		}
+		if _, blocked := excludeSet[nodeID]; blocked {
+			continue
+		}
+		metric := endpointGatewayRuntime.peerMetrics[nodeID]
+		cost := gatewayRouteCost(1, peer.LastSeen, metric, now)
+		peerCandidates = append(peerCandidates, peerCandidate{nodeID: nodeID, cost: cost})
+	}
+	endpointGatewayRuntime.mu.Unlock()
+
+	sort.SliceStable(peerCandidates, func(i, j int) bool {
+		if peerCandidates[i].cost == peerCandidates[j].cost {
+			return peerCandidates[i].nodeID < peerCandidates[j].nodeID
+		}
+		return peerCandidates[i].cost < peerCandidates[j].cost
+	})
+
+	out := make([]string, 0, limit)
+	seen := make(map[string]struct{}, limit)
+	add := func(nodeID string) {
+		nodeID = normalizeGatewayNodeID(nodeID)
+		if nodeID == "" {
+			return
+		}
+		if _, blocked := excludeSet[nodeID]; blocked {
+			return
+		}
+		if _, exists := seen[nodeID]; exists {
+			return
+		}
+		seen[nodeID] = struct{}{}
+		out = append(out, nodeID)
+	}
+
+	if primaryNodeID != "" {
+		add(primaryNodeID)
+	}
+	for _, c := range peerCandidates {
+		if len(out) >= limit {
+			break
+		}
+		add(c.nodeID)
+	}
+	return out
+}
+
+func dialGatewayPeerGridBundle(primaryNodeID string, exclude []string, limit int) (net.Conn, string, error) {
+	candidates := selectGatewayPeerDialCandidates(primaryNodeID, exclude, limit)
+	if len(candidates) == 0 {
+		return nil, "", fmt.Errorf("no gateway peer candidate available (primary=%s)", strings.TrimSpace(primaryNodeID))
+	}
+	if len(candidates) == 1 {
+		conn, err := dialGatewayPeerGrid(candidates[0])
+		if err != nil {
+			return nil, "", err
+		}
+		return conn, candidates[0], nil
+	}
+
+	type dialResult struct {
+		nodeID string
+		conn   net.Conn
+		err    error
+	}
+	results := make(chan dialResult, len(candidates))
+	for _, nodeID := range candidates {
+		nodeID := nodeID
+		go func() {
+			conn, err := dialGatewayPeerGrid(nodeID)
+			results <- dialResult{nodeID: nodeID, conn: conn, err: err}
+		}()
+	}
+
+	var (
+		lastErr  error
+		received int
+	)
+	for received < len(candidates) {
+		res := <-results
+		received++
+		if res.err == nil && res.conn != nil {
+			winnerConn := res.conn
+			winnerNodeID := res.nodeID
+			go func(remaining int) {
+				for i := 0; i < remaining; i++ {
+					r := <-results
+					if r.err == nil && r.conn != nil && r.conn != winnerConn {
+						_ = r.conn.Close()
+					}
+				}
+			}(len(candidates) - received)
+			return winnerConn, winnerNodeID, nil
+		}
+		lastErr = res.err
+	}
+	return nil, "", fmt.Errorf("gateway peer bundle failed (primary=%s): %w", strings.TrimSpace(primaryNodeID), lastErr)
 }
 
 func dialGatewayGridWithMeta(peerAddr string, meta gatewayConnectMeta) (net.Conn, error) {
@@ -578,6 +1108,12 @@ func dialGatewayGridWithMeta(peerAddr string, meta gatewayConnectMeta) (net.Conn
 		meta.HopLimit = maxGatewayHopLimit
 	}
 	meta.Path = normalizeGatewayPath(meta.Path)
+	kexOffer, err := newGatewayKEXOffer()
+	if err != nil {
+		return nil, err
+	}
+	meta.KEXPublicKey = kexOffer.publicKey
+	meta.KEXNonce = kexOffer.nonce
 
 	dialer := &net.Dialer{Timeout: 15 * time.Second, KeepAlive: 30 * time.Second}
 	conn, err := dialer.Dial("tcp", peerAddr)
@@ -597,15 +1133,18 @@ func dialGatewayGridWithMeta(peerAddr string, meta gatewayConnectMeta) (net.Conn
 		_ = conn.Close()
 		return nil, err
 	}
-	respLine = strings.TrimSpace(respLine)
-	if !strings.HasPrefix(respLine, "OK") {
+	integrityKey, err := completeGatewayKEXClient(conn, reader, respLine, gatewayCommandGrid, "", meta, kexOffer)
+	if err != nil {
 		_ = conn.Close()
-		return nil, fmt.Errorf("gateway rejected grid transit: %s", respLine)
+		return nil, err
 	}
 
 	_ = conn.SetDeadline(time.Time{})
 	buffered := reader.Buffered()
 	if buffered == 0 {
+		if strings.TrimSpace(integrityKey) != "" {
+			return &gatewayIntegrityKeyConn{Conn: conn, integrityKey: integrityKey}, nil
+		}
 		return conn, nil
 	}
 	prefixBytes, err := reader.Peek(buffered)
@@ -615,7 +1154,11 @@ func dialGatewayGridWithMeta(peerAddr string, meta gatewayConnectMeta) (net.Conn
 	}
 	prefix := make([]byte, len(prefixBytes))
 	copy(prefix, prefixBytes)
-	return &prefixedConn{Conn: conn, prefix: prefix}, nil
+	out := net.Conn(&prefixedConn{Conn: conn, prefix: prefix})
+	if strings.TrimSpace(integrityKey) != "" {
+		out = &gatewayIntegrityKeyConn{Conn: out, integrityKey: integrityKey}
+	}
+	return out, nil
 }
 
 func buildGatewayConnectLine(targetAddr string, meta gatewayConnectMeta) string {
@@ -624,9 +1167,6 @@ func buildGatewayConnectLine(targetAddr string, meta gatewayConnectMeta) string 
 		gatewayCommandConnect,
 		normalizeGatewayAddress(targetAddr),
 	}
-	if token := strings.TrimSpace(meta.Token); token != "" {
-		parts = append(parts, "token="+encodeGatewayField(token))
-	}
 	if origin := normalizeGatewayNodeID(meta.OriginNodeID); origin != "" {
 		parts = append(parts, "origin="+encodeGatewayField(origin))
 	}
@@ -638,6 +1178,12 @@ func buildGatewayConnectLine(targetAddr string, meta gatewayConnectMeta) string 
 		hop = defaultGatewayHopLimit
 	}
 	parts = append(parts, "hop="+strconv.Itoa(hop))
+	if kex := strings.TrimSpace(meta.KEXPublicKey); kex != "" {
+		parts = append(parts, "kex="+encodeGatewayField(kex))
+	}
+	if nonce := strings.TrimSpace(meta.KEXNonce); nonce != "" {
+		parts = append(parts, "nonce="+encodeGatewayField(nonce))
+	}
 	return strings.Join(parts, " ") + "\n"
 }
 
@@ -646,9 +1192,6 @@ func buildGatewayGridLine(meta gatewayConnectMeta) string {
 		gatewayProtocolVersion,
 		gatewayCommandGrid,
 	}
-	if token := strings.TrimSpace(meta.Token); token != "" {
-		parts = append(parts, "token="+encodeGatewayField(token))
-	}
 	if origin := normalizeGatewayNodeID(meta.OriginNodeID); origin != "" {
 		parts = append(parts, "origin="+encodeGatewayField(origin))
 	}
@@ -660,10 +1203,208 @@ func buildGatewayGridLine(meta gatewayConnectMeta) string {
 		hop = defaultGatewayHopLimit
 	}
 	parts = append(parts, "hop="+strconv.Itoa(hop))
+	if kex := strings.TrimSpace(meta.KEXPublicKey); kex != "" {
+		parts = append(parts, "kex="+encodeGatewayField(kex))
+	}
+	if nonce := strings.TrimSpace(meta.KEXNonce); nonce != "" {
+		parts = append(parts, "nonce="+encodeGatewayField(nonce))
+	}
 	return strings.Join(parts, " ") + "\n"
 }
 
-func serveGatewayDiscovery(conn *net.UDPConn, listenAddr string, discoverPort int) {
+func parseGatewayKVFields(fields []string) map[string]string {
+	kv := make(map[string]string, len(fields))
+	for _, raw := range fields {
+		part := strings.TrimSpace(raw)
+		if part == "" {
+			continue
+		}
+		eq := strings.IndexByte(part, '=')
+		if eq <= 0 {
+			continue
+		}
+		key := strings.ToLower(strings.TrimSpace(part[:eq]))
+		value := decodeGatewayField(strings.TrimSpace(part[eq+1:]))
+		kv[key] = strings.TrimSpace(value)
+	}
+	return kv
+}
+
+func newGatewayKEXOffer() (*gatewayKEXOffer, error) {
+	curve := ecdh.X25519()
+	privateKey, err := curve.GenerateKey(rand.Reader)
+	if err != nil {
+		return nil, err
+	}
+	nonceRaw := make([]byte, gatewayKEXNonceBytes)
+	if _, err := rand.Read(nonceRaw); err != nil {
+		return nil, err
+	}
+	return &gatewayKEXOffer{
+		privateKey: privateKey,
+		publicKey:  base64.RawStdEncoding.EncodeToString(privateKey.PublicKey().Bytes()),
+		nonce:      hex.EncodeToString(nonceRaw),
+	}, nil
+}
+
+func deriveGatewayKEXShared(privateKey *ecdh.PrivateKey, peerPublicKey string) ([]byte, error) {
+	if privateKey == nil {
+		return nil, errors.New("missing local kex private key")
+	}
+	peerPublicKey = strings.TrimSpace(peerPublicKey)
+	if peerPublicKey == "" {
+		return nil, errors.New("missing peer kex public key")
+	}
+	peerRaw, err := base64.RawStdEncoding.DecodeString(peerPublicKey)
+	if err != nil {
+		return nil, fmt.Errorf("invalid peer kex key encoding: %w", err)
+	}
+	curve := ecdh.X25519()
+	peer, err := curve.NewPublicKey(peerRaw)
+	if err != nil {
+		return nil, fmt.Errorf("invalid peer kex public key: %w", err)
+	}
+	return privateKey.ECDH(peer)
+}
+
+func deriveGatewayKEXAuthKey(shared []byte, command, targetAddr string, meta gatewayConnectMeta, clientPublicKey, serverPublicKey, clientNonce, serverNonce string) []byte {
+	mac := hmac.New(sha256.New, shared)
+	writeField := func(v string) {
+		mac.Write([]byte(strings.TrimSpace(v)))
+		mac.Write([]byte{'\n'})
+	}
+	writeField("gw-kex-auth-v1")
+	writeField(gatewayProtocolVersion)
+	writeField(strings.ToUpper(strings.TrimSpace(command)))
+	writeField(normalizeGatewayAddress(targetAddr))
+	writeField(normalizeGatewayNodeID(meta.OriginNodeID))
+	writeField(strings.Join(normalizeGatewayPath(meta.Path), ","))
+	hop := meta.HopLimit
+	if hop <= 0 {
+		hop = defaultGatewayHopLimit
+	}
+	writeField(strconv.Itoa(hop))
+	writeField(clientPublicKey)
+	writeField(serverPublicKey)
+	writeField(clientNonce)
+	writeField(serverNonce)
+	return mac.Sum(nil)
+}
+
+func computeGatewayKEXProof(authKey []byte, role string) string {
+	mac := hmac.New(sha256.New, authKey)
+	mac.Write([]byte("gw-kex-proof-v1"))
+	mac.Write([]byte{'\n'})
+	mac.Write([]byte(strings.ToLower(strings.TrimSpace(role))))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+func deriveGatewayKEXIntegritySecret(authKey []byte) string {
+	h := sha256.New()
+	h.Write(authKey)
+	h.Write([]byte(":gw-grid-integrity-v1"))
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+func buildGatewayChallengeLine(serverPublicKey, serverNonce, proof string) string {
+	parts := []string{
+		gatewayProtocolVersion,
+		gatewayCommandChallenge,
+		"skey=" + encodeGatewayField(strings.TrimSpace(serverPublicKey)),
+		"snonce=" + encodeGatewayField(strings.TrimSpace(serverNonce)),
+		"proof=" + encodeGatewayField(strings.TrimSpace(proof)),
+	}
+	return strings.Join(parts, " ") + "\n"
+}
+
+func buildGatewayAuthLine(proof string) string {
+	parts := []string{
+		gatewayProtocolVersion,
+		gatewayCommandAuth,
+		"proof=" + encodeGatewayField(strings.TrimSpace(proof)),
+	}
+	return strings.Join(parts, " ") + "\n"
+}
+
+func completeGatewayKEXClient(conn net.Conn, reader *bufio.Reader, initialResponseLine, command, targetAddr string, meta gatewayConnectMeta, offer *gatewayKEXOffer) (string, error) {
+	if offer == nil || offer.privateKey == nil {
+		return "", errors.New("missing local kex offer")
+	}
+	fields, err := parseGatewayCommandFields(initialResponseLine, gatewayCommandChallenge, 3)
+	if err != nil {
+		return "", fmt.Errorf("gateway rejected kex challenge: %s", strings.TrimSpace(initialResponseLine))
+	}
+	kv := parseGatewayKVFields(fields[2:])
+	serverPublicKey := strings.TrimSpace(kv["skey"])
+	serverNonce := strings.TrimSpace(kv["snonce"])
+	serverProof := strings.ToLower(strings.TrimSpace(kv["proof"]))
+	if serverPublicKey == "" || serverNonce == "" || serverProof == "" {
+		return "", errors.New("gateway kex challenge missing fields")
+	}
+	shared, err := deriveGatewayKEXShared(offer.privateKey, serverPublicKey)
+	if err != nil {
+		return "", err
+	}
+	authKey := deriveGatewayKEXAuthKey(shared, command, targetAddr, meta, offer.publicKey, serverPublicKey, offer.nonce, serverNonce)
+	expectedServerProof := computeGatewayKEXProof(authKey, "server")
+	if !hmac.Equal([]byte(serverProof), []byte(strings.ToLower(expectedServerProof))) {
+		return "", errors.New("gateway kex server proof mismatch")
+	}
+	clientProof := computeGatewayKEXProof(authKey, "client")
+	if _, err := io.WriteString(conn, buildGatewayAuthLine(clientProof)); err != nil {
+		return "", err
+	}
+	finalLine, err := reader.ReadString('\n')
+	if err != nil {
+		return "", err
+	}
+	finalLine = strings.TrimSpace(finalLine)
+	if !strings.HasPrefix(finalLine, "OK") {
+		return "", fmt.Errorf("gateway rejected auth: %s", finalLine)
+	}
+	return deriveGatewayKEXIntegritySecret(authKey), nil
+}
+
+func completeGatewayKEXServer(conn net.Conn, reader *bufio.Reader, command, targetAddr string, meta gatewayConnectMeta) (string, error) {
+	clientPublicKey := strings.TrimSpace(meta.KEXPublicKey)
+	clientNonce := strings.TrimSpace(meta.KEXNonce)
+	if clientPublicKey == "" || clientNonce == "" {
+		return "", errors.New("missing kex parameters")
+	}
+	offer, err := newGatewayKEXOffer()
+	if err != nil {
+		return "", err
+	}
+	shared, err := deriveGatewayKEXShared(offer.privateKey, clientPublicKey)
+	if err != nil {
+		return "", err
+	}
+	authKey := deriveGatewayKEXAuthKey(shared, command, targetAddr, meta, clientPublicKey, offer.publicKey, clientNonce, offer.nonce)
+	serverProof := computeGatewayKEXProof(authKey, "server")
+	if _, err := io.WriteString(conn, buildGatewayChallengeLine(offer.publicKey, offer.nonce, serverProof)); err != nil {
+		return "", err
+	}
+	authLine, err := reader.ReadString('\n')
+	if err != nil {
+		return "", err
+	}
+	fields, err := parseGatewayCommandFields(authLine, gatewayCommandAuth, 3)
+	if err != nil {
+		return "", errors.New("invalid auth response")
+	}
+	kv := parseGatewayKVFields(fields[2:])
+	clientProof := strings.ToLower(strings.TrimSpace(kv["proof"]))
+	if clientProof == "" {
+		return "", errors.New("missing auth proof")
+	}
+	expectedClientProof := computeGatewayKEXProof(authKey, "client")
+	if !hmac.Equal([]byte(clientProof), []byte(strings.ToLower(expectedClientProof))) {
+		return "", errors.New("auth proof mismatch")
+	}
+	return deriveGatewayKEXIntegritySecret(authKey), nil
+}
+
+func serveGatewayDiscovery(conn *net.UDPConn, listenAddr string) {
 	buf := make([]byte, 4096)
 	for {
 		n, remoteAddr, err := conn.ReadFromUDP(buf)
@@ -676,18 +1417,9 @@ func serveGatewayDiscovery(conn *net.UDPConn, listenAddr string, discoverPort in
 		}
 
 		if strings.HasPrefix(msg, gatewayDiscoverMagic) {
-			fields := strings.Fields(msg)
-			token, _ := currentGatewayTokenAndNodeID()
-			if token != "" {
-				if len(fields) < 2 || strings.TrimSpace(fields[1]) != token {
-					continue
-				}
-			}
-
 			announceAddr := buildGatewayAnnounceAddr(listenAddr, remoteAddr.IP)
 			resp := fmt.Sprintf("%s %s\n", gatewayAnnounceMagic, announceAddr)
 			_, _ = conn.WriteToUDP([]byte(resp), remoteAddr)
-
 			if peerLine := buildGatewayPeerAnnounceLine(listenAddr); peerLine != "" {
 				_, _ = conn.WriteToUDP([]byte(peerLine+"\n"), remoteAddr)
 			}
@@ -743,15 +1475,11 @@ func buildGatewayPeerAnnounceLine(listenAddr string) string {
 	if nodeID == "" {
 		return ""
 	}
-	token := strings.TrimSpace(endpointGatewayRuntime.token)
 
 	parts := []string{
 		gatewayPeerMagic,
 		"node=" + encodeGatewayField(nodeID),
 		"addr=" + encodeGatewayField(listenAddr),
-	}
-	if token != "" {
-		parts = append(parts, "token="+encodeGatewayField(token))
 	}
 
 	peerEntries := make([]string, 0, len(endpointGatewayRuntime.peers))
@@ -805,6 +1533,75 @@ func buildGatewayPeerAnnounceLine(listenAddr string) string {
 	return strings.Join(parts, " ")
 }
 
+func generateGatewayPeerAuthNonce() string {
+	buf := make([]byte, gatewayPeerAuthNonceBytes)
+	if _, err := rand.Read(buf); err != nil {
+		return fmt.Sprintf("%d", time.Now().UTC().UnixNano())
+	}
+	return hex.EncodeToString(buf)
+}
+
+func isGatewayPeerAuthTimestampFresh(ts int64) bool {
+	if ts <= 0 {
+		return false
+	}
+	now := time.Now().UTC().Unix()
+	delta := now - ts
+	if delta < 0 {
+		delta = -delta
+	}
+	return time.Duration(delta)*time.Second <= gatewayPeerAuthWindow
+}
+
+func computeGatewayPeerAnnounceSignature(token, nodeID, addr, peers, targets string, ts int64, nonce string) string {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return ""
+	}
+	mac := hmac.New(sha256.New, []byte(token))
+	writeField := func(v string) {
+		mac.Write([]byte(v))
+		mac.Write([]byte{'\n'})
+	}
+	writeField("gw-peer-auth-v1")
+	writeField(normalizeGatewayNodeID(nodeID))
+	writeField(normalizeGatewayAddress(addr))
+	writeField(strings.TrimSpace(peers))
+	writeField(strings.TrimSpace(targets))
+	writeField(strconv.FormatInt(ts, 10))
+	writeField(strings.TrimSpace(nonce))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+func consumeGatewayPeerAuthReplayLocked(nodeID, nonce string, ts int64, now time.Time) bool {
+	nowUnix := now.UTC().Unix()
+	for key, exp := range endpointGatewayRuntime.peerAuthSeen {
+		if exp < nowUnix {
+			delete(endpointGatewayRuntime.peerAuthSeen, key)
+		}
+	}
+	key := normalizeGatewayNodeID(nodeID) + "|" + strings.TrimSpace(nonce)
+	if key == "|" {
+		return false
+	}
+	if exp, exists := endpointGatewayRuntime.peerAuthSeen[key]; exists && exp >= nowUnix {
+		return false
+	}
+	expiry := ts + int64((gatewayPeerAuthWindow + time.Minute).Seconds())
+	endpointGatewayRuntime.peerAuthSeen[key] = expiry
+	if len(endpointGatewayRuntime.peerAuthSeen) > gatewayPeerAuthReplayEntries {
+		toDelete := len(endpointGatewayRuntime.peerAuthSeen) - gatewayPeerAuthReplayEntries
+		for k := range endpointGatewayRuntime.peerAuthSeen {
+			delete(endpointGatewayRuntime.peerAuthSeen, k)
+			toDelete--
+			if toDelete <= 0 {
+				break
+			}
+		}
+	}
+	return true
+}
+
 func applyGatewayPeerAnnounce(msg string, remoteAddr *net.UDPAddr) bool {
 	fields := strings.Fields(strings.TrimSpace(msg))
 	if len(fields) < 2 || fields[0] != gatewayPeerMagic {
@@ -823,7 +1620,8 @@ func applyGatewayPeerAnnounce(msg string, remoteAddr *net.UDPAddr) bool {
 	}
 
 	nodeID := normalizeGatewayNodeID(kv["node"])
-	peerAddr := normalizeGatewayAddress(kv["addr"])
+	announcedAddr := normalizeGatewayAddress(kv["addr"])
+	peerAddr := announcedAddr
 	if peerAddr == "" && remoteAddr != nil {
 		if _, port, err := net.SplitHostPort(strings.TrimSpace(kv["addr"])); err == nil {
 			peerAddr = net.JoinHostPort(remoteAddr.IP.String(), port)
@@ -841,11 +1639,6 @@ func applyGatewayPeerAnnounce(msg string, remoteAddr *net.UDPAddr) bool {
 	defer endpointGatewayRuntime.mu.Unlock()
 
 	pruneGatewayStateLocked(now)
-
-	localToken := strings.TrimSpace(endpointGatewayRuntime.token)
-	if localToken != "" && strings.TrimSpace(kv["token"]) != localToken {
-		return false
-	}
 
 	selfNodeID := normalizeGatewayNodeID(endpointGatewayRuntime.nodeID)
 	if selfNodeID != "" && nodeID == selfNodeID {
@@ -1103,6 +1896,27 @@ func pruneGatewayStateLocked(now time.Time) {
 			delete(endpointGatewayRuntime.targetRoutes, target)
 		}
 	}
+	for target, cached := range endpointGatewayRuntime.routeCache {
+		if cached.Addr == "" {
+			delete(endpointGatewayRuntime.routeCache, target)
+			continue
+		}
+		if !cached.ExpiresAt.IsZero() && now.After(cached.ExpiresAt.Add(gatewayRouteProbeTTL)) {
+			delete(endpointGatewayRuntime.routeCache, target)
+		}
+	}
+	nowUnix := now.UTC().Unix()
+	for key, exp := range endpointGatewayRuntime.peerAuthSeen {
+		if exp < nowUnix {
+			delete(endpointGatewayRuntime.peerAuthSeen, key)
+		}
+	}
+	for len(endpointGatewayRuntime.peerAuthSeen) > gatewayPeerAuthReplayEntries {
+		for key := range endpointGatewayRuntime.peerAuthSeen {
+			delete(endpointGatewayRuntime.peerAuthSeen, key)
+			break
+		}
+	}
 	trimGatewayPeerMapLocked()
 	trimGatewayRouteMapLocked()
 }
@@ -1221,19 +2035,43 @@ func invalidateGatewayNodeAndRoutes(nodeID string) int {
 			removed++
 		}
 	}
+	for target, cached := range endpointGatewayRuntime.routeCache {
+		if normalizeGatewayNodeID(cached.NodeID) == nodeID {
+			delete(endpointGatewayRuntime.routeCache, target)
+		}
+	}
 	endpointGatewayRuntime.mu.Unlock()
 	return removed
 }
 
-func currentGatewayTokenAndNodeID() (string, string) {
+func currentGatewayNodeID() string {
 	endpointGatewayRuntime.mu.Lock()
 	defer endpointGatewayRuntime.mu.Unlock()
-	return strings.TrimSpace(endpointGatewayRuntime.token), normalizeGatewayNodeID(endpointGatewayRuntime.nodeID)
+	return normalizeGatewayNodeID(endpointGatewayRuntime.nodeID)
 }
 
-func currentGatewayIdentity() (string, string) {
-	token, nodeID := currentGatewayTokenAndNodeID()
-	return token, nodeID
+func isGatewayBootstrapDirectTarget(targetAddr string) bool {
+	target := normalizeGatewayAddress(targetAddr)
+	if target == "" {
+		return false
+	}
+	endpointGatewayRuntime.mu.Lock()
+	defer endpointGatewayRuntime.mu.Unlock()
+	if _, exists := endpointGatewayRuntime.directTargets[target]; exists {
+		return true
+	}
+	for addr := range endpointGatewayRuntime.directTargets {
+		if sameGatewayAddress(addr, target) {
+			return true
+		}
+	}
+	return false
+}
+
+func isGatewayRelayAuthorized(targetAddr string, meta gatewayConnectMeta) bool {
+	_ = targetAddr
+	_ = meta
+	return true
 }
 
 func isLocalGatewayAddress(addr string) bool {
@@ -1241,23 +2079,115 @@ func isLocalGatewayAddress(addr string) bool {
 	if addr == "" {
 		return false
 	}
+	targetHost, targetPort, err := net.SplitHostPort(addr)
+	if err != nil {
+		endpointGatewayRuntime.mu.Lock()
+		defer endpointGatewayRuntime.mu.Unlock()
+		return sameGatewayAddress(addr, endpointGatewayRuntime.listenAddr)
+	}
+	targetHost = strings.Trim(strings.TrimSpace(targetHost), "[]")
+
 	endpointGatewayRuntime.mu.Lock()
-	defer endpointGatewayRuntime.mu.Unlock()
-	return sameGatewayAddress(addr, endpointGatewayRuntime.listenAddr)
+	listenAddr := endpointGatewayRuntime.listenAddr
+	endpointGatewayRuntime.mu.Unlock()
+
+	if sameGatewayAddress(addr, listenAddr) {
+		return true
+	}
+
+	listenHost, listenPort, listenErr := net.SplitHostPort(strings.TrimSpace(listenAddr))
+	if listenErr == nil {
+		listenHost = strings.Trim(strings.TrimSpace(listenHost), "[]")
+		if strings.TrimSpace(targetPort) == strings.TrimSpace(listenPort) {
+			// Wildcard listener means any local interface address is self.
+			if listenHost == "" || listenHost == "0.0.0.0" || listenHost == "::" {
+				if gatewayHostBelongsToLocalInterface(targetHost) {
+					return true
+				}
+			}
+		}
+	}
+
+	return gatewayHostBelongsToLocalInterface(targetHost)
+}
+
+func gatewayHostBelongsToLocalInterface(host string) bool {
+	host = strings.Trim(strings.TrimSpace(host), "[]")
+	if host == "" {
+		return false
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		if ip.IsLoopback() || ip.IsUnspecified() {
+			return true
+		}
+		ifaces, err := net.Interfaces()
+		if err != nil {
+			return false
+		}
+		for _, iface := range ifaces {
+			addrs, addrErr := iface.Addrs()
+			if addrErr != nil {
+				continue
+			}
+			for _, rawAddr := range addrs {
+				switch v := rawAddr.(type) {
+				case *net.IPNet:
+					if v.IP != nil && v.IP.Equal(ip) {
+						return true
+					}
+				case *net.IPAddr:
+					if v.IP != nil && v.IP.Equal(ip) {
+						return true
+					}
+				}
+			}
+		}
+		return false
+	}
+
+	hostname, err := os.Hostname()
+	if err == nil && strings.EqualFold(strings.TrimSpace(hostname), host) {
+		return true
+	}
+	return false
 }
 
 func buildGatewayAnnounceAddr(listenAddr string, responderIP net.IP) string {
 	listenAddr = strings.TrimSpace(listenAddr)
 	if _, port, err := net.SplitHostPort(listenAddr); err == nil {
-		if responderIP != nil && !responderIP.IsUnspecified() {
-			return net.JoinHostPort(responderIP.String(), port)
+		if sourceIP := resolveGatewaySourceIPForResponder(responderIP); sourceIP != nil {
+			return net.JoinHostPort(sourceIP.String(), port)
 		}
 		return listenAddr
 	}
 	return listenAddr
 }
 
-func discoverGatewayAddress(discoverPort int, token string) (string, error) {
+func resolveGatewaySourceIPForResponder(responderIP net.IP) net.IP {
+	if responderIP == nil || responderIP.IsUnspecified() {
+		return nil
+	}
+	network := "udp4"
+	if responderIP.To4() == nil {
+		network = "udp6"
+	}
+	probeConn, err := net.DialUDP(network, nil, &net.UDPAddr{IP: responderIP, Port: 9})
+	if err != nil {
+		return nil
+	}
+	defer probeConn.Close()
+
+	localAddr, ok := probeConn.LocalAddr().(*net.UDPAddr)
+	if !ok || localAddr == nil || localAddr.IP == nil || localAddr.IP.IsUnspecified() {
+		return nil
+	}
+	return localAddr.IP
+}
+
+func discoverGatewayAddress(discoverPort int) (string, error) {
 	if discoverPort <= 0 {
 		return "", errors.New("invalid discovery port")
 	}
@@ -1270,11 +2200,7 @@ func discoverGatewayAddress(discoverPort int, token string) (string, error) {
 	if err := conn.SetDeadline(time.Now().Add(2 * time.Second)); err != nil {
 		return "", err
 	}
-	request := gatewayDiscoverMagic
-	if strings.TrimSpace(token) != "" {
-		request = request + " " + strings.TrimSpace(token)
-	}
-	request += "\n"
+	request := gatewayDiscoverMagic + "\n"
 	_, err = conn.WriteToUDP([]byte(request), &net.UDPAddr{IP: net.IPv4bcast, Port: discoverPort})
 	if err != nil {
 		return "", err
@@ -1292,7 +2218,14 @@ func discoverGatewayAddress(discoverPort int, token string) (string, error) {
 			if announceAddr == "" {
 				continue
 			}
-			return normalizeGatewayAddress(announceAddr), nil
+			normalized := normalizeGatewayAddress(announceAddr)
+			if normalized == "" {
+				continue
+			}
+			if isLocalGatewayAddress(normalized) {
+				continue
+			}
+			return normalized, nil
 		}
 		if strings.HasPrefix(resp, gatewayPeerMagic+" ") {
 			_ = applyGatewayPeerAnnounce(resp, remoteAddr)

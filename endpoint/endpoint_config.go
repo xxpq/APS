@@ -24,7 +24,6 @@ type EndpointRuntimeConfig struct {
 	PortMappings        []PortMappingConfig `json:"portMappings,omitempty"`
 	GatewayListen       string              `json:"gatewayListen,omitempty"`
 	GatewayAddress      string              `json:"gatewayAddress,omitempty"`
-	GatewayToken        string              `json:"gatewayToken,omitempty"`
 	GatewayDiscovery    bool                `json:"gatewayDiscovery,omitempty"`
 	GatewayDiscoverPort int                 `json:"gatewayDiscoverPort,omitempty"`
 	SSH                 *EndpointSSHConfig  `json:"ssh,omitempty"`
@@ -41,9 +40,11 @@ func (c *EndpointRuntimeConfig) UnmarshalJSON(data []byte) error {
 	}
 	defaulted.GatewayListen = strings.TrimSpace(defaulted.GatewayListen)
 	defaulted.GatewayAddress = strings.TrimSpace(defaulted.GatewayAddress)
-	defaulted.GatewayToken = strings.TrimSpace(defaulted.GatewayToken)
 	if defaulted.GatewayDiscoverPort <= 0 {
 		defaulted.GatewayDiscoverPort = defaultGatewayDiscoverPort
+	}
+	if defaulted.GatewayListen == "" {
+		defaulted.GatewayListen = defaultGatewayListenAddress(defaulted.GatewayDiscoverPort)
 	}
 	*c = EndpointRuntimeConfig(defaulted)
 	return nil
@@ -141,6 +142,8 @@ type ConfigResponse struct {
 
 // FetchConfigFromAPS retrieves endpoint configuration from APS server
 func FetchConfigFromAPS(apsAddr, configID string) (*EndpointRuntimeConfig, error) {
+	ensureBootstrapGatewayRuntimeForConfigFetch(apsAddr, configID)
+
 	var lastErr error
 	for attempt := 0; attempt < 2; attempt++ {
 		encryptedID, requestSalt, pin, err := buildEncryptedConfigIDForServer(apsAddr, configID)

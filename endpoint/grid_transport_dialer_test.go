@@ -179,6 +179,9 @@ func TestSelectBestGridDialResultQoS(t *testing.T) {
 }
 
 func TestOrderGridICEAddressesByConnectivity(t *testing.T) {
+	resetGridICEProbeCacheForTest()
+	t.Cleanup(resetGridICEProbeCacheForTest)
+
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen failed: %v", err)
@@ -226,6 +229,9 @@ func TestGridICEProbeResultScoreTypeAndPriority(t *testing.T) {
 }
 
 func TestOrderGridICEProbeTargetsByConnectivityPairPriority(t *testing.T) {
+	resetGridICEProbeCacheForTest()
+	t.Cleanup(resetGridICEProbeCacheForTest)
+
 	reachableLn, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen failed: %v", err)
@@ -265,6 +271,9 @@ func TestOrderGridICEProbeTargetsByConnectivityPairPriority(t *testing.T) {
 }
 
 func TestOrderGridICEProbeTargetsByConnectivityMetadataTieBreak(t *testing.T) {
+	resetGridICEProbeCacheForTest()
+	t.Cleanup(resetGridICEProbeCacheForTest)
+
 	addrA := "127.0.0.1:9"
 	addrB := "127.0.0.1:10"
 	ordered := orderGridICEProbeTargetsByConnectivity([]gridICEProbeTarget{
@@ -302,4 +311,70 @@ func TestDedupeGridDialCandidates(t *testing.T) {
 	if len(deduped) != 2 {
 		t.Fatalf("expected 2 deduped candidates, got %v", deduped)
 	}
+}
+
+func TestGridICEProbeRouteCacheRefreshWithoutInterruptingCurrentSelection(t *testing.T) {
+	resetGridICEProbeCacheForTest()
+	t.Cleanup(resetGridICEProbeCacheForTest)
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen failed: %v", err)
+	}
+	defer ln.Close()
+	go func() {
+		conn, acceptErr := ln.Accept()
+		if acceptErr == nil && conn != nil {
+			_ = conn.Close()
+		}
+	}()
+
+	reachable := ln.Addr().String()
+	unreachable := "127.0.0.1:9"
+	candidates := []gridICEProbeTarget{
+		{
+			addr:           unreachable,
+			network:        "tcp",
+			candidateType:  "host",
+			role:           "peer",
+			remotePriority: gridICEDefaultPriority("host"),
+			localPriority:  gridICEDefaultPriority("host"),
+		},
+		{
+			addr:           reachable,
+			network:        "tcp",
+			candidateType:  "host",
+			role:           "peer",
+			remotePriority: gridICEDefaultPriority("host"),
+			localPriority:  gridICEDefaultPriority("host"),
+		},
+	}
+	candidates = normalizeGridICEProbeTargets(candidates)
+	cacheKey := gridICEProbeCacheKey(candidates)
+	now := time.Now()
+
+	endpointGridICEProbeCache.mu.Lock()
+	endpointGridICEProbeCache.entries[cacheKey] = gridICEProbeCacheEntry{
+		ordered:    []string{unreachable, reachable},
+		scores:     map[string]float64{unreachable: -1_000_000, reachable: -1_000_100},
+		refreshed:  now.Add(-2 * gridRouteProbeTTL),
+		nextProbe:  now.Add(-time.Second),
+		refreshing: false,
+	}
+	endpointGridICEProbeCache.mu.Unlock()
+
+	first := orderGridICEProbeTargetsByConnectivity(candidates, 200*time.Millisecond)
+	if len(first) < 2 || first[0] != unreachable {
+		t.Fatalf("expected first call to keep cached order for in-flight stability, got %v", first)
+	}
+
+	deadline := time.Now().Add(600 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		ordered := orderGridICEProbeTargetsByConnectivity(candidates, 200*time.Millisecond)
+		if len(ordered) > 0 && ordered[0] == reachable {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("expected async probe refresh to promote reachable route")
 }

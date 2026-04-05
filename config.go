@@ -69,7 +69,6 @@ type EndpointConfig_APS struct {
 	PortMappings        []EndpointPortMapping `json:"portMappings,omitempty"`
 	GatewayListen       string                `json:"gatewayListen,omitempty"`       // gateway endpoint: local listen addr for leaf relay
 	GatewayAddress      string                `json:"gatewayAddress,omitempty"`      // leaf endpoint: gateway addr to reach APS
-	GatewayToken        string                `json:"gatewayToken,omitempty"`        // optional shared token for gateway relay auth
 	GatewayDiscovery    bool                  `json:"gatewayDiscovery,omitempty"`    // default true: leaf endpoint discovers gateway via LAN broadcast
 	GatewayDiscoverPort int                   `json:"gatewayDiscoverPort,omitempty"` // UDP discovery port
 	SSH                 *EndpointSSHConfig    `json:"ssh,omitempty"`
@@ -88,7 +87,6 @@ func (c *EndpointConfig_APS) UnmarshalJSON(data []byte) error {
 	}
 	defaulted.GatewayListen = strings.TrimSpace(defaulted.GatewayListen)
 	defaulted.GatewayAddress = strings.TrimSpace(defaulted.GatewayAddress)
-	defaulted.GatewayToken = strings.TrimSpace(defaulted.GatewayToken)
 	if defaulted.GatewayDiscoverPort <= 0 {
 		defaulted.GatewayDiscoverPort = DefaultGatewayDiscoverPort
 	}

@@ -1151,6 +1151,11 @@ func (ep *TCPEndpoint) readLoop(server *TCPTunnelServer) {
 			ep.handleProbePing(msg)
 		case MsgTypeProbePong:
 			ep.handleProbePong(msg)
+		case MsgTypeResponseChunk:
+			log.Printf("[TCP TUNNEL] Legacy response chunk format is not supported for endpoint '%s' (id=%s, remote=%s)",
+				ep.EndpointName, ep.ID, ep.RemoteAddr)
+			ep.CloseWithReason("legacy response chunk unsupported")
+			return
 		case MsgTypeResponseHeader, MsgTypeResponseChunkBin, MsgTypeResponseEnd:
 			ep.handleResponseMessage(msg)
 		case MsgTypeProxyConnectAck:

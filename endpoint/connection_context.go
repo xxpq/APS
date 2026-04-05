@@ -20,7 +20,6 @@ type ImmutableConnectionContext struct {
 	PortMappings        []PortMappingConfig
 	GatewayListen       string
 	GatewayAddress      string
-	GatewayToken        string
 	GatewayDiscovery    bool
 	GatewayDiscoverPort int
 	SSH                 *EndpointSSHConfig
@@ -124,7 +123,6 @@ func BuildImmutableConnectionContext(serverAddress, configID string) (*Immutable
 		PortMappings:      clonePortMappingsForContext(cfg.PortMappings),
 		GatewayListen:     strings.TrimSpace(cfg.GatewayListen),
 		GatewayAddress:    strings.TrimSpace(cfg.GatewayAddress),
-		GatewayToken:      strings.TrimSpace(cfg.GatewayToken),
 		GatewayDiscovery:  cfg.GatewayDiscovery,
 		GatewayDiscoverPort: func() int {
 			if cfg.GatewayDiscoverPort > 0 {
