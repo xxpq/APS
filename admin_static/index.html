@@ -478,8 +478,8 @@
           <div class="bx--form-item mt-1"><label class="bx--label">通信密码</label><input id="add-endpoint-password" type="password" class="bx--text-input" placeholder="留空使用隧道密码"></div>
           <div class="bx--form-item mt-1">
             <label class="bx--label">端口映射 (JSON数组)</label>
-            <textarea id="add-endpoint-port-mappings" class="bx--text-input" rows="4" placeholder='[{"localPort": 8080, "targetEndpoint": "other-ep", "remoteTarget": "127.0.0.1:80"}]'></textarea>
-            <div class="bx--form__helper-text">localPort: 本地监听端口, targetEndpoint: 目标节点名, remoteTarget: 目标地址</div>
+            <textarea id="add-endpoint-port-mappings" class="bx--text-input" rows="4" placeholder='[{"localListen": 8080, "targetEndpoint": "other-ep", "remoteTarget": "127.0.0.1:80"}]'></textarea>
+            <div class="bx--form__helper-text">localListen: 本地监听地址(支持 8080 / :8080 / 127.0.0.2:8080), targetEndpoint: 目标节点名, remoteTarget: 目标地址</div>
           </div>
           <div class="bx--form-item mt-1">
             <label class="bx--label">SSH配置 (JSON对象)</label>
