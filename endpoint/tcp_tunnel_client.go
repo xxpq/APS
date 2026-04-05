@@ -662,59 +662,154 @@ func dialTunnelServer(serverAddress, serverHost string, expectedPinHash []byte, 
 		return nil, err
 	}
 
-	var baseConn net.Conn
-	var gatewayDialErr error
-	var gatewayAddress string
-	gatewayCandidates := resolveGatewayAddressCandidates(connCtx)
-	if len(gatewayCandidates) > 0 {
-		for idx, candidate := range gatewayCandidates {
-			baseConn, err = dialTunnelServerViaGateway(candidate, serverAddress, connCtx.ConfigID)
-			if err == nil {
-				gatewayAddress = candidate
-				promoteGatewayRouteCacheCandidate(connCtx.ServerAddress, candidate)
-				DebugLog("[GATEWAY] Using gateway %s for APS %s (candidate %d/%d)", candidate, serverAddress, idx+1, len(gatewayCandidates))
-				break
-			}
-			gatewayDialErr = err
-			DebugLog("[GATEWAY] Dial via %s failed for APS %s: %v", candidate, serverAddress, err)
+	establishTunnel := func(rawConn net.Conn) (net.Conn, error) {
+		if rawConn == nil {
+			return nil, errors.New("raw connection is nil")
 		}
-	}
-	if baseConn == nil {
-		dialer := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}
-		baseConn, err = dialer.Dial("tcp", serverAddress)
+		tlsConn := tls.Client(rawConn, tlsConfig)
+		if err := tlsConn.SetDeadline(time.Now().Add(30 * time.Second)); err != nil {
+			_ = rawConn.Close()
+			return nil, fmt.Errorf("tls deadline setup failed: %w", err)
+		}
+		if err := tlsConn.Handshake(); err != nil {
+			_ = rawConn.Close()
+			return nil, fmt.Errorf("tls handshake failed: %w", err)
+		}
+		_ = tlsConn.SetDeadline(time.Time{})
+
+		upgradedConn, err := connectWithHTTPTunnelHandshake(tlsConn, serverAddress)
 		if err != nil {
-			if gatewayDialErr != nil {
-				return nil, fmt.Errorf("dial via gateway candidates failed (last=%s err=%v); direct dial failed: %w", gatewayAddress, gatewayDialErr, err)
-			}
-			return nil, err
+			_ = tlsConn.Close()
+			return nil, fmt.Errorf("CONNECT /.tunnel over TLS failed: %w", err)
 		}
-		if gatewayDialErr != nil {
-			DebugLog("[GATEWAY] Direct dial succeeded after gateway bundle failure (last=%s, aps=%s)", gatewayAddress, serverAddress)
+		return upgradedConn, nil
+	}
+
+	dialAndEstablishDirect := func(timeout time.Duration) (net.Conn, error) {
+		if timeout <= 0 {
+			timeout = 12 * time.Second
+		}
+		dialer := &net.Dialer{Timeout: timeout, KeepAlive: 30 * time.Second}
+		rawConn, err := dialer.Dial("tcp", serverAddress)
+		if err != nil {
+			return nil, fmt.Errorf("direct dial failed: %w", err)
+		}
+		conn, err := establishTunnel(rawConn)
+		if err != nil {
+			return nil, fmt.Errorf("direct tunnel setup failed: %w", err)
+		}
+		return conn, nil
+	}
+
+	dialAndEstablishGateway := func(candidate string) (net.Conn, error) {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "" {
+			return nil, errors.New("empty gateway candidate")
+		}
+		rawConn, err := dialTunnelServerViaGateway(candidate, serverAddress, connCtx.ConfigID)
+		if err != nil {
+			return nil, fmt.Errorf("dial via gateway failed: %w", err)
+		}
+		conn, err := establishTunnel(rawConn)
+		if err != nil {
+			return nil, fmt.Errorf("gateway tunnel setup failed: %w", err)
+		}
+		return conn, nil
+	}
+
+	gatewayCandidates := resolveGatewayAddressCandidates(connCtx)
+	type dialAttemptResult struct {
+		kind      string // direct|gateway
+		candidate string
+		conn      net.Conn
+		err       error
+	}
+
+	totalAttempts := 1
+	for _, raw := range gatewayCandidates {
+		if strings.TrimSpace(raw) != "" {
+			totalAttempts++
 		}
 	}
-	defer func() {
-		if baseConn != nil {
-			_ = baseConn.Close()
-		}
+	results := make(chan dialAttemptResult, totalAttempts)
+
+	go func() {
+		conn, err := dialAndEstablishDirect(12 * time.Second)
+		results <- dialAttemptResult{kind: "direct", conn: conn, err: err}
 	}()
-
-	tlsConn := tls.Client(baseConn, tlsConfig)
-	if err := tlsConn.SetDeadline(time.Now().Add(30 * time.Second)); err != nil {
-		return nil, err
+	for _, raw := range gatewayCandidates {
+		candidate := strings.TrimSpace(raw)
+		if candidate == "" {
+			continue
+		}
+		go func(addr string) {
+			conn, err := dialAndEstablishGateway(addr)
+			results <- dialAttemptResult{kind: "gateway", candidate: addr, conn: conn, err: err}
+		}(candidate)
 	}
-	if err := tlsConn.Handshake(); err != nil {
-		return nil, err
-	}
-	_ = tlsConn.SetDeadline(time.Time{})
 
-	upgradedConn, err := connectWithHTTPTunnelHandshake(tlsConn, serverAddress)
-	if err != nil {
-		return nil, fmt.Errorf("CONNECT /.tunnel over TLS failed: %w", err)
-	}
-	baseConn = nil
+	errorParts := make([]string, 0, totalAttempts)
+	received := 0
+	for received < totalAttempts {
+		res := <-results
+		received++
+		if res.err == nil && res.conn != nil {
+			if res.kind == "direct" {
+				markGatewayDirectTargetReachable(connCtx.ServerAddress)
+				DebugLog("[CONN] Selected direct APS path for %s", serverAddress)
+			} else {
+				promoteGatewayRouteCacheCandidate(connCtx.ServerAddress, res.candidate)
+				DebugLog("[GATEWAY] Using gateway %s for APS %s (race winner)", res.candidate, serverAddress)
+			}
 
-	DebugLog("[CONN] CONNECT /.tunnel handshake over TLS succeeded")
-	return upgradedConn, nil
+			remaining := totalAttempts - received
+			if remaining > 0 {
+				go func(rem int) {
+					for i := 0; i < rem; i++ {
+						r := <-results
+						if r.conn != nil {
+							_ = r.conn.Close()
+						}
+					}
+				}(remaining)
+			}
+
+			DebugLog("[CONN] CONNECT /.tunnel handshake over TLS succeeded")
+			return res.conn, nil
+		}
+
+		if res.conn != nil {
+			_ = res.conn.Close()
+		}
+		if res.kind == "gateway" {
+			if isGatewayTargetNotAllowedError(res.err) {
+				markGatewayRouteDenied(connCtx.ServerAddress, res.candidate)
+			}
+			markGatewayRouteCacheCandidateFailure(connCtx.ServerAddress, res.candidate)
+			DebugLog("[GATEWAY] Dial via %s failed for APS %s: %v", res.candidate, serverAddress, res.err)
+		} else {
+			DebugLog("[CONN] Direct path failed for APS %s: %v", serverAddress, res.err)
+		}
+
+		label := res.kind
+		if res.kind == "gateway" {
+			label = "gateway(" + strings.TrimSpace(res.candidate) + ")"
+		}
+		errText := "unknown error"
+		if res.err != nil {
+			errText = strings.TrimSpace(res.err.Error())
+		}
+		errorParts = append(errorParts, label+": "+errText)
+	}
+
+	return nil, fmt.Errorf("all connect attempts failed for APS %s: %s", serverAddress, strings.Join(errorParts, "; "))
+}
+
+func isGatewayTargetNotAllowedError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "target not allowed")
 }
 
 // runTCPTunnelSession connects to APS via TCP tunnel protocol
@@ -757,6 +852,17 @@ func runTCPTunnelSession(ctx context.Context, connCtx ImmutableConnectionContext
 	DebugLog("Connecting to TCP tunnel server at %s", serverAddress)
 	DebugLog("[CONN] Tunnel transport mode: strict TLS + CONNECT /.tunnel")
 	ensureGatewayRuntime(connCtx)
+	if strings.TrimSpace(connCtx.GatewayListen) != "" {
+		started, listenAddr, startErr := gatewayRuntimeStateSnapshot()
+		if !started {
+			if startErr == "" {
+				startErr = "gateway runtime not started"
+			}
+			log.Printf("Failed to connect: gateway runtime unavailable (listen=%s): %s", strings.TrimSpace(connCtx.GatewayListen), startErr)
+			return true
+		}
+		DebugLog("[GATEWAY] Runtime ready on %s", listenAddr)
+	}
 	ensureEndpointICEConnectivityRuntime(connCtx)
 
 	// 如果serverAddr不包含端口，则添加默认端口

@@ -140,9 +140,28 @@ type ConfigResponse struct {
 	Error   string                 `json:"error,omitempty"`
 }
 
+func shouldEnableBootstrapGatewayRuntimeForConfigFetch() bool {
+	// Service lifecycle commands should not bind local gateway listener during config fetch.
+	// They only need outbound gateway-client capability.
+	if install != nil && *install {
+		return false
+	}
+	if reinstall != nil && *reinstall {
+		return false
+	}
+	if uninstall != nil && *uninstall {
+		return false
+	}
+	return true
+}
+
 // FetchConfigFromAPS retrieves endpoint configuration from APS server
 func FetchConfigFromAPS(apsAddr, configID string) (*EndpointRuntimeConfig, error) {
-	ensureBootstrapGatewayRuntimeForConfigFetch(apsAddr, configID)
+	if shouldEnableBootstrapGatewayRuntimeForConfigFetch() {
+		ensureBootstrapGatewayRuntimeForConfigFetch(apsAddr, configID)
+	} else {
+		DebugLog("[CONN-INIT] Skip bootstrap gateway runtime during service lifecycle command")
+	}
 
 	var lastErr error
 	for attempt := 0; attempt < 2; attempt++ {

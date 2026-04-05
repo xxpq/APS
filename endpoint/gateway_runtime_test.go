@@ -8,6 +8,7 @@ import (
 func resetGatewayRuntimeStateForTest() {
 	endpointGatewayRuntime.mu.Lock()
 	endpointGatewayRuntime.started = false
+	endpointGatewayRuntime.startErr = ""
 	endpointGatewayRuntime.listenAddr = ""
 	endpointGatewayRuntime.nodeID = ""
 	endpointGatewayRuntime.discoverPort = 0
@@ -16,10 +17,79 @@ func resetGatewayRuntimeStateForTest() {
 	endpointGatewayRuntime.peers = make(map[string]gatewayPeerInfo)
 	endpointGatewayRuntime.peerMetrics = make(map[string]gatewayPeerMetric)
 	endpointGatewayRuntime.targetRoutes = make(map[string]gatewayTargetRoute)
+	endpointGatewayRuntime.directRoutes = make(map[string]map[string]time.Time)
 	endpointGatewayRuntime.directTargets = make(map[string]struct{})
+	endpointGatewayRuntime.allowedTargets = make(map[string]struct{})
 	endpointGatewayRuntime.routeCache = make(map[string]gatewayRouteProbeCandidate)
+	endpointGatewayRuntime.routeDenied = make(map[string]map[string]time.Time)
 	endpointGatewayRuntime.peerAuthSeen = make(map[string]int64)
 	endpointGatewayRuntime.mu.Unlock()
+}
+
+func TestNormalizeGatewayRuntimeListenAddress(t *testing.T) {
+	tests := []struct {
+		name       string
+		input      string
+		discover   int
+		wantListen string
+	}{
+		{name: "ipv6 wildcard rewritten to ipv4 wildcard", input: "[::]:37990", discover: 37990, wantListen: "0.0.0.0:37990"},
+		{name: "ipv4 wildcard kept", input: "0.0.0.0:37990", discover: 37990, wantListen: "0.0.0.0:37990"},
+		{name: "explicit host kept", input: "10.1.105.40:37990", discover: 37990, wantListen: "10.1.105.40:37990"},
+		{name: "missing port gets discover", input: "0.0.0.0", discover: 37990, wantListen: "0.0.0.0:37990"},
+	}
+	for _, tt := range tests {
+		got := normalizeGatewayRuntimeListenAddress(tt.input, tt.discover)
+		if got != tt.wantListen {
+			t.Fatalf("%s: got=%s want=%s", tt.name, got, tt.wantListen)
+		}
+	}
+}
+
+func TestGatewayRuntimeListenNetwork(t *testing.T) {
+	tests := []struct {
+		addr string
+		want string
+	}{
+		{addr: "0.0.0.0:37990", want: "tcp4"},
+		{addr: "127.0.0.1:37990", want: "tcp4"},
+		{addr: "[::1]:37990", want: "tcp6"},
+		{addr: "localhost:37990", want: "tcp4"},
+	}
+	for _, tt := range tests {
+		if got := gatewayRuntimeListenNetwork(tt.addr); got != tt.want {
+			t.Fatalf("addr=%s got=%s want=%s", tt.addr, got, tt.want)
+		}
+	}
+}
+
+func TestResolveGatewayAddressCandidatesSkipsDenied(t *testing.T) {
+	resetGatewayRuntimeStateForTest()
+	defer resetGatewayRuntimeStateForTest()
+
+	target := "203.0.113.10:443"
+	denyAddr := "198.51.100.22:37990"
+	backupAddr := "198.51.100.40:37990"
+
+	now := time.Now()
+	endpointGatewayRuntime.mu.Lock()
+	endpointGatewayRuntime.routeCache[normalizeGatewayAddress(target)] = gatewayRouteProbeCandidate{
+		Addr:      normalizeGatewayAddress(denyAddr),
+		Backups:   []string{normalizeGatewayAddress(backupAddr)},
+		ProbedAt:  now,
+		NextProbe: now.Add(gatewayRouteProbeTTL),
+		ExpiresAt: now.Add(gatewayRouteProbeTTL),
+	}
+	endpointGatewayRuntime.mu.Unlock()
+
+	markGatewayRouteDenied(target, denyAddr)
+	got := resolveGatewayAddressCandidates(ImmutableConnectionContext{
+		ServerAddress:    target,
+		GatewayDiscovery: false,
+	})
+	if len(got) != 1 || got[0] != normalizeGatewayAddress(backupAddr) {
+		t.Fatalf("expected backup only, got=%v", got)
+	}
 }
 
 func TestParseGatewayConnectLineExtended(t *testing.T) {
@@ -381,6 +451,72 @@ func TestPromoteGatewayRouteCacheCandidatePromotesBackup(t *testing.T) {
 	}
 }
 
+func TestMarkGatewayRouteCacheCandidateFailureRotatesPrimary(t *testing.T) {
+	resetGatewayRuntimeStateForTest()
+	defer resetGatewayRuntimeStateForTest()
+
+	target := "203.0.113.101:443"
+	now := time.Now()
+	endpointGatewayRuntime.mu.Lock()
+	endpointGatewayRuntime.nodeID = "node-a"
+	endpointGatewayRuntime.listenAddr = "10.0.0.1:37990"
+	endpointGatewayRuntime.routeCache[target] = gatewayRouteProbeCandidate{
+		Addr:      "10.0.0.2:37990",
+		Backups:   []string{"10.0.0.3:37990", "10.0.0.4:37990"},
+		Score:     1.0,
+		ProbedAt:  now,
+		NextProbe: now.Add(gatewayRouteProbeTTL),
+		ExpiresAt: now.Add(gatewayRouteProbeTTL),
+	}
+	endpointGatewayRuntime.mu.Unlock()
+
+	markGatewayRouteCacheCandidateFailure(target, "10.0.0.2:37990")
+
+	endpointGatewayRuntime.mu.Lock()
+	updated := endpointGatewayRuntime.routeCache[target]
+	endpointGatewayRuntime.mu.Unlock()
+	if updated.Addr != "10.0.0.3:37990" {
+		t.Fatalf("expected rotated primary 10.0.0.3:37990, got %s", updated.Addr)
+	}
+	if len(updated.Backups) == 0 || updated.Backups[len(updated.Backups)-1] != "10.0.0.2:37990" {
+		t.Fatalf("expected failed primary to be moved to backup tail, got %v", updated.Backups)
+	}
+}
+
+func TestMarkGatewayRouteCacheCandidateFailureRemovesFailedBackup(t *testing.T) {
+	resetGatewayRuntimeStateForTest()
+	defer resetGatewayRuntimeStateForTest()
+
+	target := "203.0.113.102:443"
+	now := time.Now()
+	endpointGatewayRuntime.mu.Lock()
+	endpointGatewayRuntime.nodeID = "node-a"
+	endpointGatewayRuntime.listenAddr = "10.0.0.1:37990"
+	endpointGatewayRuntime.routeCache[target] = gatewayRouteProbeCandidate{
+		Addr:      "10.0.0.2:37990",
+		Backups:   []string{"10.0.0.3:37990", "10.0.0.4:37990"},
+		Score:     1.0,
+		ProbedAt:  now,
+		NextProbe: now.Add(gatewayRouteProbeTTL),
+		ExpiresAt: now.Add(gatewayRouteProbeTTL),
+	}
+	endpointGatewayRuntime.mu.Unlock()
+
+	markGatewayRouteCacheCandidateFailure(target, "10.0.0.4:37990")
+
+	endpointGatewayRuntime.mu.Lock()
+	updated := endpointGatewayRuntime.routeCache[target]
+	endpointGatewayRuntime.mu.Unlock()
+	if updated.Addr != "10.0.0.2:37990" {
+		t.Fatalf("expected primary unchanged, got %s", updated.Addr)
+	}
+	for _, b := range updated.Backups {
+		if b == "10.0.0.4:37990" {
+			t.Fatalf("expected failed backup removed, got %v", updated.Backups)
+		}
+	}
+}
+
 func TestSelectGatewayPeerDialCandidatesPrimaryAndLimitFive(t *testing.T) {
 	resetGatewayRuntimeStateForTest()
 	defer resetGatewayRuntimeStateForTest()
@@ -411,6 +547,36 @@ func TestSelectGatewayPeerDialCandidatesPrimaryAndLimitFive(t *testing.T) {
 	}
 }
 
+func TestSelectGatewayRouteCandidatesPrefersDirectAPSPeerOverRelayedPeer(t *testing.T) {
+	resetGatewayRuntimeStateForTest()
+	defer resetGatewayRuntimeStateForTest()
+
+	target := "203.0.113.200:443"
+	now := time.Now()
+	endpointGatewayRuntime.mu.Lock()
+	endpointGatewayRuntime.nodeID = "node-a"
+	endpointGatewayRuntime.listenAddr = "10.0.0.1:37990"
+	endpointGatewayRuntime.peers["node-direct"] = gatewayPeerInfo{NodeID: "node-direct", Addr: "10.0.0.2:37990", LastSeen: now}
+	endpointGatewayRuntime.peers["node-relay"] = gatewayPeerInfo{NodeID: "node-relay", Addr: "10.0.0.3:37990", LastSeen: now}
+	endpointGatewayRuntime.directRoutes[target] = map[string]time.Time{"node-direct": now}
+	endpointGatewayRuntime.targetRoutes[target] = gatewayTargetRoute{
+		Target:        target,
+		NextHopNodeID: "node-relay",
+		NextHopAddr:   "10.0.0.3:37990",
+		Hop:           2,
+		LastSeen:      now,
+	}
+	endpointGatewayRuntime.mu.Unlock()
+
+	candidates := selectGatewayRouteCandidates(target, nil, "node-a", 3)
+	if len(candidates) == 0 {
+		t.Fatal("expected non-empty candidates")
+	}
+	if candidates[0].NextHopNodeID != "node-direct" {
+		t.Fatalf("expected direct APS peer first, got %s", candidates[0].NextHopNodeID)
+	}
+}
+
 func TestApplyGatewayPeerAnnounceAcceptsUnsigned(t *testing.T) {
 	resetGatewayRuntimeStateForTest()
 	defer resetGatewayRuntimeStateForTest()
@@ -426,17 +592,17 @@ func TestApplyGatewayPeerAnnounceAcceptsUnsigned(t *testing.T) {
 	}
 }
 
-func TestValidateGatewayRelayRequestOnlyAllowsDirectAPSTarget(t *testing.T) {
+func TestValidateGatewayRelayRequestOnlyAllowsConfiguredAPSTarget(t *testing.T) {
 	resetGatewayRuntimeStateForTest()
 	defer resetGatewayRuntimeStateForTest()
 
 	endpointGatewayRuntime.mu.Lock()
-	endpointGatewayRuntime.directTargets["203.0.113.10:443"] = struct{}{}
+	endpointGatewayRuntime.allowedTargets["203.0.113.10:443"] = struct{}{}
 	endpointGatewayRuntime.mu.Unlock()
 
 	meta := gatewayConnectMeta{HopLimit: 4}
 	if err := validateGatewayRelayRequest("203.0.113.10:443", "10.0.0.1:3900", "node-a", meta); err != nil {
-		t.Fatalf("expected direct APS target to be allowed, got %v", err)
+		t.Fatalf("expected configured APS target to be allowed, got %v", err)
 	}
 	if err := validateGatewayRelayRequest("198.51.100.20:443", "10.0.0.1:3900", "node-a", meta); err == nil {
 		t.Fatal("expected non-APS target to be rejected")

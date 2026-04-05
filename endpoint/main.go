@@ -36,6 +36,7 @@ var (
 	mtlsKeyFile    = flag.String("mtls-key", "", "Client private key PEM path for mTLS tunnel")
 	mtlsCAFile     = flag.String("mtls-ca", "", "Custom CA PEM bundle for APS tunnel TLS verification")
 	debug          = flag.Bool("debug", false, "enable debug logging")
+	logPath        = flag.String("log", "", "path to log file (optional)")
 
 	install   = flag.Bool("install", false, "install system service")
 	uninstall = flag.Bool("uninstall", false, "uninstall system service")
@@ -46,6 +47,7 @@ var (
 
 	proxyConnections sync.Map // Stores map[string]net.Conn for proxy connections
 	logger           service.Logger
+	logOutputFile    *os.File
 
 	// Runtime configuration (loaded from APS when using -cid)
 	runtimeConfig   *EndpointRuntimeConfig
@@ -94,33 +96,61 @@ func (p *program) run() {
 		return
 	}
 
-	go func() {
-		for {
-			select {
-			case <-p.exit:
-				cancel()
-				return
-			default:
-				shouldReconnect := runClientSession(ctx)
-				if !shouldReconnect {
-					if logger != nil {
-						logger.Info("Permanent error detected, stopping reconnection attempts.")
-					} else {
-						log.Println("Permanent error detected, stopping reconnection attempts.")
-					}
-					return
-				}
-				if logger != nil {
-					logger.Infof("Session ended. Reconnecting in %v...", reconnectDelay)
-				} else {
-					log.Printf("Session ended. Reconnecting in %v...", reconnectDelay)
-				}
-				time.Sleep(reconnectDelay)
-			}
+	// Service mode now follows the same multi-seed concurrent model as interactive mode.
+	serverAddrs := parseServerAddresses(*serverAddr)
+	if len(serverAddrs) == 0 {
+		if logger != nil {
+			logger.Error("No server addresses specified")
+		} else {
+			log.Println("No server addresses specified")
 		}
-	}()
+		return
+	}
+
+	globalCID := ""
+	if *configID != "" {
+		globalCID = *configID
+	}
+
+	connectionManager = NewConnectionManager(globalCID)
+	for _, addr := range serverAddrs {
+		cfg := connectionManager.ParseServerAddress(addr, true)
+		connectionManager.AddSeedServer(cfg)
+	}
+
+	// Prime TLS pin cache for all seed servers before starting any APS requests.
+	for _, addr := range connectionManager.GetAllServers() {
+		if err := PrimeTLSPinForServer(addr); err != nil {
+			if logger != nil {
+				logger.Errorf("Failed to initialize TLS pin for server %s: %v", addr, err)
+			} else {
+				log.Printf("Failed to initialize TLS pin for server %s: %v", addr, err)
+			}
+			return
+		}
+	}
+
+	if logger != nil {
+		logger.Infof("Connecting to %d seed server(s)", len(connectionManager.GetAllServers()))
+	} else {
+		log.Printf("Connecting to %d seed server(s)", len(connectionManager.GetAllServers()))
+	}
+
+	var wg sync.WaitGroup
+	for _, addr := range connectionManager.GetAllServers() {
+		wg.Add(1)
+		go func(serverAddress string) {
+			defer wg.Done()
+			runServerConnection(ctx, serverAddress)
+		}(addr)
+	}
 
 	<-p.exit
+	cancel()
+	if connectionManager != nil {
+		connectionManager.CloseAll()
+	}
+	wg.Wait()
 }
 
 func (p *program) Stop(s service.Service) error {
@@ -128,9 +158,46 @@ func (p *program) Stop(s service.Service) error {
 	return nil
 }
 
+func configureLogging() error {
+	log.SetFlags(log.LstdFlags | log.Lshortfile)
+	log.SetPrefix(fmt.Sprintf("[pid=%d] ", os.Getpid()))
+
+	resolvedLogPath := strings.TrimSpace(*logPath)
+	if resolvedLogPath == "" {
+		return nil
+	}
+
+	logDir := filepath.Dir(resolvedLogPath)
+	if logDir != "" && logDir != "." {
+		if err := os.MkdirAll(logDir, 0755); err != nil {
+			return fmt.Errorf("failed to create log directory %s: %w", logDir, err)
+		}
+	}
+
+	file, err := os.OpenFile(resolvedLogPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		return fmt.Errorf("failed to open log file %s: %w", resolvedLogPath, err)
+	}
+
+	log.SetOutput(file)
+	logOutputFile = file
+	log.Printf("Logging to file: %s", resolvedLogPath)
+	return nil
+}
+
+func closeLogOutputFile() {
+	if logOutputFile != nil {
+		_ = logOutputFile.Close()
+		logOutputFile = nil
+	}
+}
+
 func main() {
 	flag.Parse()
-	log.SetFlags(log.LstdFlags | log.Lshortfile)
+	if err := configureLogging(); err != nil {
+		log.Fatalf("Failed to configure logging: %v", err)
+	}
+	defer closeLogOutputFile()
 
 	if *install {
 		err := installService()
@@ -517,6 +584,10 @@ func runServerConnection(ctx context.Context, serverAddress string) {
 			shouldReconnect := runTCPTunnelSession(connCtx, *immutableCtx)
 
 			connectionManager.CloseConnection(serverAddress)
+			if ctx.Err() != nil {
+				DebugLog("[%s] Context cancelled after session exit, stop reconnect loop.", cfg.Address)
+				return
+			}
 
 			if !shouldReconnect {
 				log.Printf("[%s] Permanent error detected, stopping.", cfg.Address)
