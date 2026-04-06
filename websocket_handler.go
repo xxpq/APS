@@ -233,14 +233,11 @@ func (p *MapRemoteProxy) handleWebSocket(w http.ResponseWriter, r *http.Request)
 		// - For invalid/self-signed certificates (insecure mode): use target hostname or IP
 		//   This avoids SNI mismatch errors with certificates like ESXi's "localhost.localdomain"
 		if useTLS {
-			// Check if insecure mode is enabled in mapping config
-			insecureMode := false
+			var toConfig *EndpointConfig
 			if mapping != nil {
-				toConfig := mapping.GetToConfig()
-				if toConfig != nil && toConfig.Insecure != nil && *toConfig.Insecure {
-					insecureMode = true
-				}
+				toConfig = mapping.GetToConfig()
 			}
+			insecureMode := shouldUseInsecureBackendMode(toConfig, targetWsURL.String())
 
 			legacyTLSMode := shouldUseLegacyBackendTLS(host, insecureMode)
 
@@ -339,13 +336,11 @@ func (p *MapRemoteProxy) handleWebSocket(w http.ResponseWriter, r *http.Request)
 		copyHeaders(serverHeader, r.Header)
 
 		dialer := *websocket.DefaultDialer
-		insecureMode := false
+		var toConfig *EndpointConfig
 		if mapping != nil {
-			toConfig := mapping.GetToConfig()
-			if toConfig != nil && toConfig.Insecure != nil && *toConfig.Insecure {
-				insecureMode = true
-			}
+			toConfig = mapping.GetToConfig()
 		}
+		insecureMode := shouldUseInsecureBackendMode(toConfig, targetWsURL.String())
 		if targetWsURL.Scheme == "wss" {
 			legacyTLSMode := shouldUseLegacyBackendTLS(targetWsURL.Hostname(), insecureMode)
 			tlsConfig := &tls.Config{

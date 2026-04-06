@@ -131,6 +131,10 @@
     "sucdri": {
       "servers": ["default"],
       "password": "sucdri"
+    },
+    "p2p_mesh": {
+      "servers": ["ssl"],
+      "password": "replace-with-strong-password"
     }
   },
   "endpoints": {
@@ -163,7 +167,63 @@
     "my_pc": {
       "tunnelName": "sucdri",
       "endpointName": "my_pc"
+    },
+    "p2p_a_leaf": {
+      "tunnelName": "p2p_mesh",
+      "endpointName": "p2p_a_leaf",
+      "allowMultiNode": true,
+      "gatewayAddress": ["10.1.105.40:37990", "10.1.105.105:37990"],
+      "gatewayDiscovery": true,
+      "gatewayDiscoverPort": 37990,
+      "portMappings": [
+        {
+          "localListen": 18080,
+          "remoteTarget": "10.20.30.40:80",
+          "targetEndpoint": "p2p_c_remote"
+        },
+        {
+          "localListen": ":15432",
+          "remoteTarget": "10.20.30.41:5432",
+          "targetEndpoint": "p2p_c_remote"
+        }
+      ]
+    },
+    "p2p_b_gateway": {
+      "tunnelName": "p2p_mesh",
+      "endpointName": "p2p_b_gateway",
+      "allowMultiNode": true,
+      "gatewayListen": "0.0.0.0:37990",
+      "gatewayDiscovery": true,
+      "gatewayDiscoverPort": 37990
+    },
+    "p2p_c_remote": {
+      "tunnelName": "p2p_mesh",
+      "endpointName": "p2p_c_remote",
+      "allowMultiNode": true,
+      "gatewayListen": "0.0.0.0:37990",
+      "gatewayDiscovery": true,
+      "gatewayDiscoverPort": 37990
     }
+  },
+  "p2p_case_example": {
+    "name": "A-B-APS-C full P2P case",
+    "tunnel": "p2p_mesh",
+    "roles": {
+      "p2p_a_leaf": "A: no direct internet, discovers B/C and registers through gateway path",
+      "p2p_b_gateway": "B: LAN gateway with APS reachability, accepts peer registration and forwarding",
+      "p2p_c_remote": "C: remote site endpoint (direct APS reachable), provides target services"
+    },
+    "expected_paths": [
+      "A -> B -> C (preferred multi-hop P2P)",
+      "A -> B -> APS -> C (gateway fallback)",
+      "A -> APS -> C (direct/relay fallback)"
+    ],
+    "notes": [
+      "All endpoints keep gatewayDiscovery enabled and use UDP/TCP 37990.",
+      "You can configure static gateways via gatewayAddress as either string (comma/semicolon/space separated) or string array while keeping broadcast discovery enabled.",
+      "Grid runtime handles QUIC+TCP parallel, ICE candidate exchange, and APS relay fallback.",
+      "Route/path cache TTL follows grid.routing.path_ttl_seconds and runtime probe refresh."
+    ]
   },
   "auth": {
     "users": {
@@ -476,6 +536,27 @@
       },
       "via": {
         "endpoints": "cjy_server"
+      }
+    },
+    {
+      "from": ["https://p2p-demo.a.l-l.cn/*"],
+      "to": "http://127.0.0.1:18080/*",
+      "via": {
+        "endpoints": "p2p_a_leaf"
+      }
+    },
+    {
+      "from": "tcp://0.0.0.0:15432",
+      "to": "tcp://127.0.0.1:15432",
+      "via": {
+        "endpoints": "p2p_a_leaf"
+      }
+    },
+    {
+      "from": "tcp://0.0.0.0:12230",
+      "to": "tcp://10.20.30.42:22",
+      "via": {
+        "endpoints": ["p2p_a_leaf", "p2p_b_gateway"]
       }
     }
   ],

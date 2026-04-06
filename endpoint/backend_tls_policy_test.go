@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/tls"
 	"net/http"
 	"testing"
 )
@@ -66,5 +67,27 @@ func TestShouldAllowInsecureBackendTLS(t *testing.T) {
 				t.Fatalf("shouldAllowInsecureBackendTLS(%s) = %v, want %v", tc.rawURL, got, tc.allowed)
 			}
 		})
+	}
+}
+
+func TestCloneInsecureBackendTransportTLSCompatibility(t *testing.T) {
+	base := &http.Transport{
+		TLSClientConfig: &tls.Config{
+			MinVersion: tls.VersionTLS13,
+		},
+	}
+
+	insecureTransport := cloneInsecureBackendTransport(base)
+	if insecureTransport.TLSClientConfig == nil {
+		t.Fatalf("TLSClientConfig should not be nil")
+	}
+	if !insecureTransport.TLSClientConfig.InsecureSkipVerify {
+		t.Fatalf("InsecureSkipVerify should be true")
+	}
+	if insecureTransport.TLSClientConfig.MinVersion != tls.VersionTLS10 {
+		t.Fatalf("MinVersion = %v, want %v", insecureTransport.TLSClientConfig.MinVersion, tls.VersionTLS10)
+	}
+	if base.TLSClientConfig.MinVersion != tls.VersionTLS13 {
+		t.Fatalf("base transport should remain unchanged, got MinVersion=%v", base.TLSClientConfig.MinVersion)
 	}
 }

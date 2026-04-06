@@ -53,15 +53,20 @@ func (t *backendPolicyTransport) RoundTrip(req *http.Request) (*http.Response, e
 		return t.base.RoundTrip(clonedReq)
 	}
 
-	insecureTransport := t.base.Clone()
+	insecureTransport := cloneInsecureBackendTransport(t.base)
+	return insecureTransport.RoundTrip(clonedReq)
+}
+
+func cloneInsecureBackendTransport(base *http.Transport) *http.Transport {
+	insecureTransport := base.Clone()
 	if insecureTransport.TLSClientConfig == nil {
-		insecureTransport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS13}
+		insecureTransport.TLSClientConfig = &tls.Config{}
 	} else {
 		insecureTransport.TLSClientConfig = insecureTransport.TLSClientConfig.Clone()
 	}
 	insecureTransport.TLSClientConfig.InsecureSkipVerify = true
-
-	return insecureTransport.RoundTrip(clonedReq)
+	insecureTransport.TLSClientConfig.MinVersion = tls.VersionTLS10
+	return insecureTransport
 }
 
 func shouldAllowInsecureBackendTLS(req *http.Request) bool {

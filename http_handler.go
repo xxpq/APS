@@ -938,8 +938,13 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if isTunnelRequest {
-		// If insecure is set, add a header to signal the endpoint to skip TLS verification.
-		if toConfig := mapping.GetToConfig(); toConfig != nil && toConfig.Insecure != nil && *toConfig.Insecure {
+		var toConfig *EndpointConfig
+		if mapping != nil {
+			toConfig = mapping.GetToConfig()
+		}
+		// If insecure mode is enabled (explicitly or by internal https target auto-detection),
+		// add a header to signal the endpoint to skip strict TLS verification.
+		if shouldUseInsecureBackendMode(toConfig, proxyReq.URL.String()) {
 			proxyReq.Header.Set("X-Aps-Insecure", "true")
 		}
 
@@ -980,10 +985,16 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		// The body from ReadResponse is empty; we will stream the real body.
 		resp.Body = bodyStream
 	} else {
-		// This is a direct request (not via tunnel)
-		// If we are using IP substitution for an HTTPS request, we need to
-		// customize the TLS client config to set the SNI to the original host.
-		if selectedIP != "" && proxyReq.URL.Scheme == "https" {
+		// This is a direct request (not via tunnel).
+		// For HTTPS, build a per-request transport when:
+		// - we are using IP substitution (to preserve correct SNI), or
+		// - backend is in insecure mode (explicit or internal-IP auto mode).
+		var toConfig *EndpointConfig
+		if mapping != nil {
+			toConfig = mapping.GetToConfig()
+		}
+		insecureMode := shouldUseInsecureBackendMode(toConfig, proxyReq.URL.String())
+		if proxyReq.URL.Scheme == "https" && (selectedIP != "" || insecureMode) {
 			// Clone the default transport and set the ServerName for SNI.
 			baseTransport, ok := p.client.Transport.(*http.Transport)
 			if !ok {
@@ -1002,9 +1013,10 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 					customTransport.TLSClientConfig = &tls.Config{}
 				}
 
-				// Apply the insecure setting from the mapping
-				if toConfig := mapping.GetToConfig(); toConfig != nil && toConfig.Insecure != nil && *toConfig.Insecure {
+				// Apply insecure/legacy TLS mode when enabled.
+				if insecureMode {
 					customTransport.TLSClientConfig.InsecureSkipVerify = true
+					customTransport.TLSClientConfig.MinVersion = tls.VersionTLS10
 					log.Printf("[IPS] InsecureSkipVerify enabled for direct request to %s", actualTargetURL)
 				}
 
