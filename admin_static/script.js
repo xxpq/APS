@@ -3358,6 +3358,75 @@ function initEndpointModals() {
 }
 initEndpointModals();
 
+var tlsPinTokenUrl = "/.api/tls-pin-token";
+var endpointTokenDefaultTTLSeconds = 3600;
+
+function formatUnixTimestamp(unixSeconds) {
+  if (!unixSeconds) return "";
+  var dt = new Date(unixSeconds * 1000);
+  if (isNaN(dt.getTime())) return "";
+  return dt.toLocaleString();
+}
+
+async function copyTextToClipboard(text) {
+  if (navigator.clipboard && window.isSecureContext) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+
+  var textArea = document.createElement("textarea");
+  textArea.value = text;
+  textArea.style.position = "fixed";
+  textArea.style.left = "-9999px";
+  textArea.style.top = "-9999px";
+  document.body.appendChild(textArea);
+  textArea.focus();
+  textArea.select();
+  var copied = false;
+  try {
+    copied = document.execCommand("copy");
+  } finally {
+    textArea.remove();
+  }
+  if (!copied) throw new Error("clipboard unavailable");
+}
+
+async function copyEndpointPinToken(endpointId) {
+  if (!endpointId) {
+    showNotification("error", "Copy token failed", "empty endpoint id");
+    return;
+  }
+  try {
+    var params = new URLSearchParams();
+    params.set("cid", endpointId);
+    params.set("ttl", String(endpointTokenDefaultTTLSeconds));
+    var res = await authFetch(tlsPinTokenUrl + "?" + params.toString(), {
+      method: "GET",
+      headers: buildAuthHeaders({})
+    });
+    var raw = await res.text();
+    if (!res.ok) throw new Error(raw || ("HTTP " + res.status));
+
+    var payload = {};
+    try {
+      payload = JSON.parse(raw || "{}");
+    } catch (parseErr) {
+      throw new Error("invalid token response");
+    }
+    if (!payload.token) throw new Error("token missing in response");
+
+    await copyTextToClipboard(payload.token);
+    var expiry = formatUnixTimestamp(payload.exp);
+    showNotification(
+      "success",
+      "Token copied",
+      expiry ? ("Expires at " + expiry) : "Use with -token or APS_TOKEN"
+    );
+  } catch (e) {
+    showNotification("error", "Copy token failed", e.message || String(e));
+  }
+}
+
 async function loadEndpoints() {
   var msg = document.getElementById("endpoints-msg");
   if (msg) msg.textContent = "";
@@ -3377,14 +3446,16 @@ async function loadEndpoints() {
       }
       
       var tr = document.createElement("tr");
+      var escapedID = id.replace(/"/g, '&quot;');
       tr.innerHTML =
         "<td>" + id + "</td>" +
         "<td>" + (ep.tunnelName || "") + "</td>" +
         "<td>" + (ep.endpointName || "") + "</td>" +
         "<td>" + sshStr + "</td>" +
         "<td>" + portMappingsStr + "</td>" +
-        "<td><button class='bx--btn bx--btn--sm bx--btn--ghost' onclick='openEditEndpointModal(\"" + id.replace(/"/g, '&quot;') + "\")'>编辑</button> " +
-        "<button class='bx--btn bx--btn--sm bx--btn--danger--ghost' onclick='deleteEndpoint(\"" + id.replace(/"/g, '&quot;') + "\")'>删除</button></td>";
+        "<td><button class='bx--btn bx--btn--sm bx--btn--ghost' onclick='openEditEndpointModal(\"" + escapedID + "\")'>编辑</button> " +
+        "<button class='bx--btn bx--btn--sm bx--btn--secondary' onclick='copyEndpointPinToken(\"" + escapedID + "\")'>生成令牌</button> " +
+        "<button class='bx--btn bx--btn--sm bx--btn--danger--ghost' onclick='deleteEndpoint(\"" + escapedID + "\")'>删除</button></td>";
       if (tbody) tbody.appendChild(tr);
     });
     if (msg) msg.textContent = "节点配置已加载";
@@ -3606,6 +3677,7 @@ document.getElementById("confirm-edit-endpoint").addEventListener("click", confi
 window.loadEndpoints = loadEndpoints;
 window.openAddEndpointModal = openAddEndpointModal;
 window.openEditEndpointModal = openEditEndpointModal;
+window.copyEndpointPinToken = copyEndpointPinToken;
 window.deleteEndpoint = deleteEndpoint;
 window.confirmAddEndpoint = confirmAddEndpoint;
 window.confirmEditEndpoint = confirmEditEndpoint;

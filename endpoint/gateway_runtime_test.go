@@ -126,6 +126,29 @@ func TestResolveGatewayAddressCandidatesSkipsDenied(t *testing.T) {
 	}
 }
 
+func TestResolveGatewayAddressCandidatesUsesConfiguredGatewayAddresses(t *testing.T) {
+	resetGatewayRuntimeStateForTest()
+	defer resetGatewayRuntimeStateForTest()
+
+	connCtx := ImmutableConnectionContext{
+		ServerAddress:       "203.0.113.10:443",
+		GatewayAddress:      "10.9.0.2:37990,10.9.0.3:37990,10.9.0.4:37990",
+		GatewayDiscovery:    false,
+		GatewayDiscoverPort: defaultGatewayDiscoverPort,
+	}
+
+	got := resolveGatewayAddressCandidates(connCtx)
+	if len(got) == 0 {
+		t.Fatal("expected configured gateway candidates")
+	}
+	if got[0] != "10.9.0.2:37990" {
+		t.Fatalf("expected first configured gateway as primary, got %v", got)
+	}
+	if len(got) < 3 {
+		t.Fatalf("expected merged configured gateways, got %v", got)
+	}
+}
+
 func TestParseGatewayConnectLineExtended(t *testing.T) {
 	line := "APS-GW/1 CONNECT 203.0.113.10:443 origin=node-a path=node-a,node-b hop=6 service=grid\n"
 	target, meta, err := parseGatewayConnectLine(line)

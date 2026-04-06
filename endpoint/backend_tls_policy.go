@@ -16,6 +16,7 @@ type backendPolicyTransport struct {
 
 func newSharedBackendHTTPClient() *http.Client {
 	baseTransport := &http.Transport{
+		Proxy:                 endpointHTTPProxySelector,
 		TLSClientConfig:       &tls.Config{MinVersion: tls.VersionTLS13},
 		MaxIdleConns:          1000,
 		MaxIdleConnsPerHost:   100,

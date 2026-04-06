@@ -8,7 +8,9 @@ import (
 	"net"
 	"os/exec"
 	"runtime"
+	"strconv"
 	"sync"
+	"time"
 
 	"aps/endpoint/utils/ssh/shlex"
 
@@ -71,12 +73,6 @@ func (s *session) handleUnknownChannel(newChannel ssh.NewChannel) {
 // ports from the channel's extra data, dialing the local address, and managing the communication
 // between the client and the server.
 func (s *session) handleDirectTcpip(newChannel ssh.NewChannel) {
-	channel, _, err := newChannel.Accept()
-	if err != nil {
-		// log.Echo().WithError(err).Error("could not accept direct-tcpip request")
-		return
-	}
-
 	var payload struct {
 		DestAddr   string
 		DestPort   uint32
@@ -85,6 +81,7 @@ func (s *session) handleDirectTcpip(newChannel ssh.NewChannel) {
 	}
 	if err := ssh.Unmarshal(newChannel.ExtraData(), &payload); err != nil {
 		// log.Echo().WithError(err).Error("could not unmarshal direct-tcpip request")
+		_ = newChannel.Reject(ssh.ConnectionFailed, "invalid direct-tcpip payload")
 		return
 	}
 
@@ -95,22 +92,23 @@ func (s *session) handleDirectTcpip(newChannel ssh.NewChannel) {
 	// 	"origin_port": payload.OriginPort,
 	// }).Trace("direct-tcpip request")
 
-	localConn, err := net.Dial("tcp", fmt.Sprintf("%s:%d", payload.DestAddr, payload.DestPort))
+	dest := net.JoinHostPort(payload.DestAddr, strconv.Itoa(int(payload.DestPort)))
+	dialer := net.Dialer{Timeout: 10 * time.Second}
+	localConn, err := dialer.Dial("tcp", dest)
 	if err != nil {
 		// log.Echo().WithError(err).Error("could not dial local address")
-		channel.Write([]byte(fmt.Sprintf("Error: %s", err)))
-		channel.Close()
+		_ = newChannel.Reject(ssh.ConnectionFailed, "failed to connect destination")
 		return
 	}
 
-	go func() {
-		defer localConn.Close()
-		io.Copy(channel, localConn)
-	}()
-	go func() {
-		defer channel.Close()
-		io.Copy(localConn, channel)
-	}()
+	channel, requests, err := newChannel.Accept()
+	if err != nil {
+		_ = localConn.Close()
+		return
+	}
+	go ssh.DiscardRequests(requests)
+
+	pipeChannelAndConn(channel, localConn)
 }
 
 // The `handleForwardedTcpip` function is responsible for handling incoming SSH forwarded-tcpip
@@ -120,12 +118,6 @@ func (s *session) handleDirectTcpip(newChannel ssh.NewChannel) {
 // communication between the client and the server. It also adds a firewall rule to allow traffic on
 // the specified destination port.
 func (s *session) handleForwardedTcpip(newChannel ssh.NewChannel) {
-	channel, _, err := newChannel.Accept()
-	if err != nil {
-		// log.Echo().WithError(err).Error("could not accept forwarded-tcpip request")
-		return
-	}
-
 	var payload struct {
 		DestAddr   string
 		DestPort   uint32
@@ -133,39 +125,26 @@ func (s *session) handleForwardedTcpip(newChannel ssh.NewChannel) {
 		OriginPort uint32
 	}
 	if err := ssh.Unmarshal(newChannel.ExtraData(), &payload); err != nil {
-		// log.Echo().WithError(err).Error("could not unmarshal forwarded-tcpip request")
+		_ = newChannel.Reject(ssh.ConnectionFailed, "invalid forwarded-tcpip payload")
 		return
 	}
 
-	// s.l
-	// 	"dest_addr":   payload.DestAddr,
-	// 	"dest_port":   payload.DestPort,
-	// 	"origin_addr": payload.OriginAddr,
-	// 	"origin_port": payload.OriginPort,
-	// }).Trace("forwarded-tcpip request")
-
-	localListener, err := net.Listen("tcp", fmt.Sprintf("%s:%d", payload.DestAddr, payload.DestPort))
+	dest := net.JoinHostPort(payload.DestAddr, strconv.Itoa(int(payload.DestPort)))
+	dialer := net.Dialer{Timeout: 10 * time.Second}
+	localConn, err := dialer.Dial("tcp", dest)
 	if err != nil {
-		// log.Echo().WithError(err).Error("could not listen on local address")
-		channel.Write([]byte(fmt.Sprintf("Error: %s", err)))
-		channel.Close()
+		_ = newChannel.Reject(ssh.ConnectionFailed, "failed to connect destination")
 		return
 	}
 
-	go func() {
-		defer localListener.Close()
-		for {
-			localConn, err := localListener.Accept()
-			if err != nil {
-				// log.Echo().WithError(err).Error("could not accept forwarded-tcpip request")
-				return
-			}
-			go func(localConn net.Conn) {
-				defer localConn.Close()
-				io.Copy(channel, localConn)
-			}(localConn)
-		}
-	}()
+	channel, requests, err := newChannel.Accept()
+	if err != nil {
+		_ = localConn.Close()
+		return
+	}
+	go ssh.DiscardRequests(requests)
+
+	pipeChannelAndConn(channel, localConn)
 }
 
 // The `handleSftp` function is responsible for handling an SSH session that is used for SFTP (SSH File
@@ -245,6 +224,17 @@ func (s *session) dispatchCommand(line string, w StringWriter) {
 // The `Close()` function is a method of the `session` struct. It is responsible for closing the SSH
 // connection and signaling the `exitChan` channel to indicate that the session has ended.
 func (s *session) Close() {
+	s.mu.Lock()
+	for key, listener := range s.forwardedTCPPorts {
+		_ = listener.Close()
+		delete(s.forwardedTCPPorts, key)
+	}
+	for key, listener := range s.directTCPPorts {
+		_ = listener.Close()
+		delete(s.directTCPPorts, key)
+	}
+	s.mu.Unlock()
+
 	if s.conPTY != nil {
 		_ = s.conPTY.Close()
 		s.conPTY = nil

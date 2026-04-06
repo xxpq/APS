@@ -77,22 +77,124 @@ type EndpointConfig_APS struct {
 	LogRetentionHours   *int                  `json:"logRetentionHours,omitempty"`
 }
 
+func decodeAPSGatewayAddressField(raw json.RawMessage) (string, error) {
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" || strings.EqualFold(trimmed, "null") {
+		return "", nil
+	}
+
+	var asString string
+	if err := json.Unmarshal(raw, &asString); err == nil {
+		return strings.TrimSpace(asString), nil
+	}
+
+	var asList []string
+	if err := json.Unmarshal(raw, &asList); err == nil {
+		parts := make([]string, 0, len(asList))
+		for _, item := range asList {
+			item = strings.TrimSpace(item)
+			if item == "" {
+				continue
+			}
+			parts = append(parts, item)
+		}
+		return strings.Join(parts, ","), nil
+	}
+
+	return "", fmt.Errorf("gatewayAddress must be string or []string")
+}
+
+func canonicalizeAPSGatewayAddressField(raw string) string {
+	normalized := normalizeAPSConfiguredGatewayAddresses(raw)
+	if len(normalized) == 0 {
+		return ""
+	}
+	return strings.Join(normalized, ",")
+}
+
 func (c *EndpointConfig_APS) UnmarshalJSON(data []byte) error {
 	type alias EndpointConfig_APS
-	defaulted := alias{
+	var aux struct {
+		alias
+		GatewayAddress json.RawMessage `json:"gatewayAddress"`
+	}
+	aux.alias = alias{
 		GatewayDiscovery:    true,
 		GatewayDiscoverPort: DefaultGatewayDiscoverPort,
 	}
-	if err := json.Unmarshal(data, &defaulted); err != nil {
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	defaulted := aux.alias
+	decodedGatewayAddress, err := decodeAPSGatewayAddressField(aux.GatewayAddress)
+	if err != nil {
 		return err
 	}
 	defaulted.GatewayListen = strings.TrimSpace(defaulted.GatewayListen)
-	defaulted.GatewayAddress = strings.TrimSpace(defaulted.GatewayAddress)
+	defaulted.GatewayAddress = canonicalizeAPSGatewayAddressField(decodedGatewayAddress)
 	if defaulted.GatewayDiscoverPort <= 0 {
 		defaulted.GatewayDiscoverPort = DefaultGatewayDiscoverPort
 	}
 	*c = EndpointConfig_APS(defaulted)
 	return nil
+}
+
+func splitAPSGatewayAddressText(raw string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	parts := strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ',' || r == ';' || r == ' ' || r == '\t' || r == '\n' || r == '\r'
+	})
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		item := strings.TrimSpace(part)
+		if item == "" {
+			continue
+		}
+		out = append(out, item)
+	}
+	return out
+}
+
+func normalizeAPSGatewayAddress(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	if _, _, err := net.SplitHostPort(raw); err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "missing port") {
+			host := strings.Trim(strings.TrimSpace(raw), "[]")
+			if host == "" {
+				return ""
+			}
+			return net.JoinHostPort(host, strconv.Itoa(DefaultGatewayDiscoverPort))
+		}
+		return ""
+	}
+	return raw
+}
+
+func normalizeAPSConfiguredGatewayAddresses(gatewayAddress string) []string {
+	parts := splitAPSGatewayAddressText(gatewayAddress)
+	seen := make(map[string]struct{}, len(parts))
+	out := make([]string, 0, len(parts))
+	add := func(raw string) {
+		addr := normalizeAPSGatewayAddress(raw)
+		if addr == "" {
+			return
+		}
+		if _, exists := seen[addr]; exists {
+			return
+		}
+		seen[addr] = struct{}{}
+		out = append(out, addr)
+	}
+	for _, raw := range splitAPSGatewayAddressText(gatewayAddress) {
+		add(raw)
+	}
+	return out
 }
 
 // EndpointPortMapping defines a port mapping between endpoints

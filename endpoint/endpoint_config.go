@@ -32,17 +32,61 @@ type EndpointRuntimeConfig struct {
 	SSH                 *EndpointSSHConfig  `json:"ssh,omitempty"`
 }
 
+func decodeGatewayAddressField(raw json.RawMessage) (string, error) {
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" || strings.EqualFold(trimmed, "null") {
+		return "", nil
+	}
+
+	var asString string
+	if err := json.Unmarshal(raw, &asString); err == nil {
+		return strings.TrimSpace(asString), nil
+	}
+
+	var asList []string
+	if err := json.Unmarshal(raw, &asList); err == nil {
+		parts := make([]string, 0, len(asList))
+		for _, item := range asList {
+			item = strings.TrimSpace(item)
+			if item == "" {
+				continue
+			}
+			parts = append(parts, item)
+		}
+		return strings.Join(parts, ","), nil
+	}
+
+	return "", fmt.Errorf("gatewayAddress must be string or []string")
+}
+
+func canonicalizeEndpointGatewayAddressField(raw string) string {
+	normalized := normalizeEndpointGatewayAddresses(raw)
+	if len(normalized) == 0 {
+		return ""
+	}
+	return strings.Join(normalized, ",")
+}
+
 func (c *EndpointRuntimeConfig) UnmarshalJSON(data []byte) error {
 	type alias EndpointRuntimeConfig
-	defaulted := alias{
+	var aux struct {
+		alias
+		GatewayAddress json.RawMessage `json:"gatewayAddress"`
+	}
+	aux.alias = alias{
 		GatewayDiscovery:    true,
 		GatewayDiscoverPort: defaultGatewayDiscoverPort,
 	}
-	if err := json.Unmarshal(data, &defaulted); err != nil {
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	defaulted := aux.alias
+	decodedGatewayAddress, err := decodeGatewayAddressField(aux.GatewayAddress)
+	if err != nil {
 		return err
 	}
 	defaulted.GatewayListen = strings.TrimSpace(defaulted.GatewayListen)
-	defaulted.GatewayAddress = strings.TrimSpace(defaulted.GatewayAddress)
+	defaulted.GatewayAddress = canonicalizeEndpointGatewayAddressField(decodedGatewayAddress)
 	if defaulted.GatewayDiscoverPort <= 0 {
 		defaulted.GatewayDiscoverPort = defaultGatewayDiscoverPort
 	}
@@ -138,6 +182,50 @@ func validatePortMappingLocalListenPort(port int) error {
 		return fmt.Errorf("localListen port out of range: %d", port)
 	}
 	return nil
+}
+
+func splitEndpointGatewayAddressText(raw string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	parts := strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ',' || r == ';' || r == ' ' || r == '\t' || r == '\n' || r == '\r'
+	})
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		item := strings.TrimSpace(part)
+		if item == "" {
+			continue
+		}
+		out = append(out, item)
+	}
+	return out
+}
+
+func normalizeEndpointGatewayAddresses(gatewayAddress string) []string {
+	parts := splitEndpointGatewayAddressText(gatewayAddress)
+	seen := make(map[string]struct{}, len(parts))
+	out := make([]string, 0, len(parts))
+	add := func(raw string) {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			return
+		}
+		addr := normalizeGatewayAddress(raw)
+		if addr == "" {
+			return
+		}
+		if _, exists := seen[addr]; exists {
+			return
+		}
+		seen[addr] = struct{}{}
+		out = append(out, addr)
+	}
+	for _, raw := range splitEndpointGatewayAddressText(gatewayAddress) {
+		add(raw)
+	}
+	return out
 }
 
 // EndpointSSHConfig holds SSH plugin settings for endpoint runtime.
@@ -349,6 +437,7 @@ func (c *EndpointRuntimeConfig) ValidateConfig() error {
 	if c.GatewayDiscoverPort <= 0 {
 		c.GatewayDiscoverPort = defaultGatewayDiscoverPort
 	}
+	c.GatewayAddress = canonicalizeEndpointGatewayAddressField(c.GatewayAddress)
 	return nil
 }
 

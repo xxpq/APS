@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"sort"
 	"strconv"
@@ -917,7 +918,7 @@ func buildEndpointGridGatewayPinnedClient(pin *endpointTLSPin, serverAddress str
 			return result.conn, result.err
 		}
 	}
-	client := newPinnedHTTPClientWithDialContext(pin, dialViaGateway)
+	client := newPinnedHTTPClientWithDialContextAndProxy(pin, dialViaGateway, false)
 	putEndpointGridGatewayClientToCache(cacheKey, endpointGridGatewayClientEntry{
 		client:         client,
 		serverAddress:  targetAddress,
@@ -992,6 +993,14 @@ func doPinnedAPSJSONPost(serverAddress, requestPath string, reqBody any, respBod
 
 	trySendWithGatewayFallback := func(p *endpointTLSPin) (*http.Response, error) {
 		directPreferred := isGatewayDirectTargetReachable(targetAddress)
+		if !directPreferred {
+			targetURL := &url.URL{Scheme: "https", Host: targetAddress}
+			if proxyURL, proxyErr := endpointProxyURLForTarget(targetURL); proxyErr != nil {
+				DebugLog("[GRID] control api %s proxy resolution failed for target=%s: %v", strings.TrimSpace(requestPath), targetAddress, proxyErr)
+			} else if proxyURL != nil {
+				directPreferred = true
+			}
+		}
 		if directPreferred {
 			resp, directErr := trySendDirect(p)
 			if directErr == nil {

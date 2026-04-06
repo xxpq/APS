@@ -30,13 +30,16 @@ const (
 	TLSEncryptedSaltParam            = "salt"
 	endpointTLSPinSaltLayout         = "200601021504"
 	endpointPinnedHTTPProxyEnableEnv = "APS_PINNED_HTTP_PROXY_ENABLE"
+	endpointTLSPinTokenEnv           = "APS_TOKEN"
+	endpointTLSPinTokenPrefix        = "apspt1."
 
 	endpointBootstrapGatewayAddressEnv      = "APS_GATEWAY_ADDRESS"
 	endpointBootstrapGatewayDiscoverPortEnv = "APS_GATEWAY_DISCOVER_PORT"
 )
 
 var (
-	errEndpointTLSPinMismatch = errors.New("tls pin mismatch")
+	errEndpointTLSPinMismatch     = errors.New("tls pin mismatch")
+	errEndpointTLSPinTokenExpired = errors.New("pin token expired")
 
 	endpointTLSPins = struct {
 		mu        sync.Mutex
@@ -64,11 +67,19 @@ type endpointTLSPin struct {
 	serverAddress string
 	serverName    string
 
-	mu           sync.RWMutex
-	allowed      map[string][]byte
-	allowedOrder []string
-	activeHash   string
-	client       *http.Client
+	mu            sync.RWMutex
+	allowed       map[string][]byte
+	allowedOrder  []string
+	activeHash    string
+	enforceTLSPin bool
+	client        *http.Client
+}
+
+type endpointTLSPinTokenPayload struct {
+	Pin  string `json:"pin"`
+	CID  string `json:"cid,omitempty"`
+	Host string `json:"host,omitempty"`
+	Exp  int64  `json:"exp,omitempty"`
 }
 
 func normalizeEndpointTLSPinHost(host string) string {
@@ -111,6 +122,152 @@ func normalizeEndpointServerAddress(serverAddress string) (string, string, error
 	}
 
 	return urlAuthority, host, nil
+}
+
+func parseEndpointTLSPinHashHex(raw string) ([]byte, error) {
+	raw = strings.TrimSpace(raw)
+	raw = strings.TrimPrefix(strings.ToLower(raw), "sha256:")
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, errors.New("empty pin hash")
+	}
+	decoded, err := hex.DecodeString(raw)
+	if err != nil {
+		return nil, fmt.Errorf("invalid pin hash hex: %w", err)
+	}
+	if len(decoded) != sha256.Size {
+		return nil, fmt.Errorf("pin hash length must be %d bytes, got %d", sha256.Size, len(decoded))
+	}
+	return decoded, nil
+}
+
+func deriveEndpointTLSPinTokenKey(cid, authority string) []byte {
+	h := sha256.New()
+	h.Write([]byte("aps-pin-token-v1"))
+	h.Write([]byte("|"))
+	h.Write([]byte(strings.TrimSpace(cid)))
+	h.Write([]byte("|"))
+	h.Write([]byte(normalizeEndpointTLSPinHost(authority)))
+	return h.Sum(nil)
+}
+
+func encodeEndpointTLSPinToken(pinHash []byte, cid, authority string, expUnix int64) (string, error) {
+	if len(pinHash) != sha256.Size {
+		return "", fmt.Errorf("pin hash length must be %d bytes, got %d", sha256.Size, len(pinHash))
+	}
+	payload := endpointTLSPinTokenPayload{
+		Pin:  hex.EncodeToString(pinHash),
+		CID:  strings.TrimSpace(cid),
+		Host: normalizeEndpointTLSPinHost(authority),
+		Exp:  expUnix,
+	}
+	plain, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+	block, err := aes.NewCipher(deriveEndpointTLSPinTokenKey(cid, authority))
+	if err != nil {
+		return "", err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", err
+	}
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		return "", err
+	}
+	ciphertext := gcm.Seal(nonce, nonce, plain, nil)
+	return endpointTLSPinTokenPrefix + base64.RawURLEncoding.EncodeToString(ciphertext), nil
+}
+
+func decodeEndpointTLSPinToken(token, cid, authority string) ([]byte, error) {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return nil, errors.New("empty token")
+	}
+	body := token
+	lower := strings.ToLower(token)
+	if strings.HasPrefix(lower, endpointTLSPinTokenPrefix) {
+		body = token[len(endpointTLSPinTokenPrefix):]
+	} else if strings.HasPrefix(lower, "apspt1:") {
+		body = token[len("apspt1:"):]
+	} else {
+		return nil, errors.New("unsupported token format")
+	}
+	body = strings.TrimSpace(body)
+	if body == "" {
+		return nil, errors.New("empty token payload")
+	}
+	cid = strings.TrimSpace(cid)
+	if cid == "" {
+		return nil, errors.New("token requires non-empty cid")
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(body)
+	if err != nil {
+		return nil, fmt.Errorf("invalid token payload: %w", err)
+	}
+	block, err := aes.NewCipher(deriveEndpointTLSPinTokenKey(cid, authority))
+	if err != nil {
+		return nil, err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, err
+	}
+	nonceSize := gcm.NonceSize()
+	if len(raw) <= nonceSize {
+		return nil, errors.New("token payload too short")
+	}
+	plain, err := gcm.Open(nil, raw[:nonceSize], raw[nonceSize:], nil)
+	if err != nil {
+		return nil, fmt.Errorf("token decrypt failed: %w", err)
+	}
+	var payload endpointTLSPinTokenPayload
+	if err := json.Unmarshal(plain, &payload); err != nil {
+		return nil, fmt.Errorf("token payload parse failed: %w", err)
+	}
+	if payload.Exp > 0 && time.Now().UTC().Unix() > payload.Exp {
+		return nil, errEndpointTLSPinTokenExpired
+	}
+	if strings.TrimSpace(payload.CID) != "" && !strings.EqualFold(strings.TrimSpace(payload.CID), cid) {
+		return nil, errors.New("token cid mismatch")
+	}
+	tokenHost := normalizeEndpointTLSPinHost(payload.Host)
+	currentHost := normalizeEndpointTLSPinHost(authority)
+	if tokenHost != "" && currentHost != "" && !strings.EqualFold(tokenHost, currentHost) {
+		return nil, errors.New("token host mismatch")
+	}
+	return parseEndpointTLSPinHashHex(payload.Pin)
+}
+
+func isEndpointTLSPinTokenExpiredError(err error) bool {
+	return errors.Is(err, errEndpointTLSPinTokenExpired)
+}
+
+func resolveEndpointTLSPinOverride(authority string) ([]byte, string, error) {
+	authority = normalizeEndpointTLSPinHost(authority)
+	token := strings.TrimSpace(*pinToken)
+	if token == "" {
+		token = strings.TrimSpace(os.Getenv(endpointTLSPinTokenEnv))
+	}
+	if token == "" {
+		return nil, "", nil
+	}
+
+	// Emergency compatibility: token can still carry a direct hash payload.
+	if hash, err := parseEndpointTLSPinHashHex(token); err == nil {
+		return hash, "token(raw-hash)", nil
+	}
+
+	hash, err := decodeEndpointTLSPinToken(token, strings.TrimSpace(*configID), authority)
+	if err != nil {
+		return nil, "", fmt.Errorf("invalid pin token: %w", err)
+	}
+	if authority != "" {
+		return hash, "token(encrypted) for " + authority, nil
+	}
+	return hash, "token(encrypted)", nil
 }
 
 func endpointBootstrapGatewayDiscoverPort() int {
@@ -202,7 +359,7 @@ func endpointPinnedHTTPProxyEnabled() bool {
 
 func endpointPinnedHTTPProxySelector(req *http.Request) (*url.URL, error) {
 	if endpointPinnedHTTPProxyEnabled() {
-		return http.ProxyFromEnvironment(req)
+		return endpointHTTPProxySelector(req)
 	}
 	return nil, nil
 }
@@ -248,12 +405,18 @@ func (p *endpointTLSPin) allowedSummaryLocked() string {
 }
 
 func (p *endpointTLSPin) addAllowedHash(hash []byte) (bool, string) {
+	return p.addAllowedHashWithMode(hash, true)
+}
+
+func (p *endpointTLSPin) addAllowedHashWithMode(hash []byte, activate bool) (bool, string) {
 	hashHex := hex.EncodeToString(hash)
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
 	if _, exists := p.allowed[hashHex]; exists {
-		p.activeHash = hashHex
+		if activate {
+			p.activeHash = hashHex
+		}
 		return false, hashHex
 	}
 
@@ -264,7 +427,9 @@ func (p *endpointTLSPin) addAllowedHash(hash []byte) (bool, string) {
 		p.allowedOrder = p.allowedOrder[1:]
 		delete(p.allowed, evict)
 	}
-	p.activeHash = hashHex
+	if activate {
+		p.activeHash = hashHex
+	}
 	return true, hashHex
 }
 
@@ -304,6 +469,32 @@ func (p *endpointTLSPin) candidateKeys() [][]byte {
 		}
 	}
 	return keys
+}
+
+func (p *endpointTLSPin) setEnforceTLSPin(enforce bool) {
+	p.mu.Lock()
+	p.enforceTLSPin = enforce
+	p.mu.Unlock()
+}
+
+func (p *endpointTLSPin) isTLSPinEnforced() bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.enforceTLSPin
+}
+
+func shouldEnforceTLSPinForOverride(overrideHash []byte, overrideSource string) bool {
+	if len(overrideHash) == 0 {
+		// No override: always enforce transport TLS pin.
+		return true
+	}
+	// Encrypted token is the compatibility path for MITM/proxy environments:
+	// transport certificate may be substituted, but control-plane pin-based crypto stays bound to APS pin.
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(overrideSource)), "token(encrypted)") {
+		return false
+	}
+	// Raw hash input keeps strict transport pin semantics.
+	return true
 }
 
 func fetchServerSPKIHashOverHTTPS(authority, serverName string) ([]byte, string, error) {
@@ -394,23 +585,32 @@ func (p *endpointTLSPin) verifyPinnedTLSConnection(cs tls.ConnectionState) error
 	if ok {
 		p.activeHash = hashHex
 	}
+	enforceTLSPin := p.enforceTLSPin
 	summary := p.allowedSummaryLocked()
 	p.mu.Unlock()
 
 	if !ok {
+		if !enforceTLSPin {
+			DebugLog("[CONN-INIT] Transport TLS pin mismatch tolerated for %s (configured token mode). cached=%s got=%s", p.serverAddress, summary, hashHex)
+			return nil
+		}
 		DebugLog("[CONN-INIT] Pin mismatch for %s. cached=%s got=%s", p.serverAddress, summary, hashHex)
 		return fmt.Errorf("%w: connectivity test failed", errEndpointTLSPinMismatch)
 	}
 	return nil
 }
 
-func newPinnedHTTPClientWithDialContext(pin *endpointTLSPin, dialContext func(context.Context, string, string) (net.Conn, error)) *http.Client {
+func newPinnedHTTPClientWithDialContextAndProxy(pin *endpointTLSPin, dialContext func(context.Context, string, string) (net.Conn, error), enableProxy bool) *http.Client {
 	if dialContext == nil {
 		dialer := &net.Dialer{Timeout: 15 * time.Second, KeepAlive: 30 * time.Second}
 		dialContext = dialer.DialContext
 	}
+	var proxySelector func(*http.Request) (*url.URL, error)
+	if enableProxy {
+		proxySelector = endpointPinnedHTTPProxySelector
+	}
 	transport := &http.Transport{
-		Proxy:               endpointPinnedHTTPProxySelector,
+		Proxy:               proxySelector,
 		DialContext:         dialContext,
 		ForceAttemptHTTP2:   true,
 		MaxIdleConns:        64,
@@ -430,6 +630,10 @@ func newPinnedHTTPClientWithDialContext(pin *endpointTLSPin, dialContext func(co
 	}
 }
 
+func newPinnedHTTPClientWithDialContext(pin *endpointTLSPin, dialContext func(context.Context, string, string) (net.Conn, error)) *http.Client {
+	return newPinnedHTTPClientWithDialContextAndProxy(pin, dialContext, true)
+}
+
 func newPinnedHTTPClient(pin *endpointTLSPin) *http.Client {
 	return newPinnedHTTPClientWithDialContext(pin, nil)
 }
@@ -444,22 +648,62 @@ func ensureEndpointTLSPin(serverAddress string) (*endpointTLSPin, error) {
 	endpointTLSPins.mu.Lock()
 	if pin, exists := endpointTLSPins.byAddress[cacheKey]; exists {
 		endpointTLSPins.mu.Unlock()
+		overrideHash, overrideSource, overrideErr := resolveEndpointTLSPinOverride(authority)
+		if overrideErr != nil {
+			if isEndpointTLSPinTokenExpiredError(overrideErr) {
+				DebugLog("[CONN-INIT] Pin token expired for %s; continue with cached pin", authority)
+				return pin, nil
+			}
+			return nil, overrideErr
+		}
+		pin.setEnforceTLSPin(shouldEnforceTLSPinForOverride(overrideHash, overrideSource))
+		if len(overrideHash) > 0 {
+			activateOverrideHash := pin.isTLSPinEnforced()
+			added, hashHex := pin.addAllowedHashWithMode(overrideHash, activateOverrideHash)
+			if added {
+				DebugLog("[CONN-INIT] Applied configured TLS pin (%s) for %s hash=%s", overrideSource, authority, hashHex)
+			}
+			if pin.isTLSPinEnforced() {
+				DebugLog("[CONN-INIT] Token override active; TLS transport pin enforcement remains strict for %s", authority)
+			} else {
+				DebugLog("[CONN-INIT] Token override active; TLS transport pin enforcement relaxed for %s", authority)
+			}
+		}
 		return pin, nil
 	}
 	endpointTLSPins.mu.Unlock()
 
-	hash, _, err := fetchServerSPKIHashOverHTTPS(authority, serverName)
-	if err != nil {
-		return nil, err
+	overrideHash, overrideSource, overrideErr := resolveEndpointTLSPinOverride(authority)
+	if overrideErr != nil {
+		return nil, overrideErr
+	}
+
+	var hash []byte
+	if len(overrideHash) > 0 {
+		hash = append([]byte(nil), overrideHash...)
+		DebugLog("[CONN-INIT] Using configured TLS pin (%s) for %s", overrideSource, authority)
+	} else {
+		hash, _, err = fetchServerSPKIHashOverHTTPS(authority, serverName)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	pin := &endpointTLSPin{
 		serverAddress: authority,
 		serverName:    serverName,
 		allowed:       make(map[string][]byte),
+		enforceTLSPin: shouldEnforceTLSPinForOverride(overrideHash, overrideSource),
 	}
 	pin.addAllowedHash(hash)
 	pin.client = newPinnedHTTPClient(pin)
+	if len(overrideHash) > 0 {
+		if pin.isTLSPinEnforced() {
+			DebugLog("[CONN-INIT] Token override active; TLS transport pin enforcement remains strict for %s", authority)
+		} else {
+			DebugLog("[CONN-INIT] Token override active; TLS transport pin enforcement relaxed for %s", authority)
+		}
+	}
 
 	endpointTLSPins.mu.Lock()
 	if existing, exists := endpointTLSPins.byAddress[cacheKey]; exists {
@@ -478,6 +722,36 @@ func refreshEndpointTLSPin(serverAddress string) (*endpointTLSPin, error) {
 	pin, err := ensureEndpointTLSPin(serverAddress)
 	if err != nil {
 		return nil, err
+	}
+
+	overrideHash, overrideSource, overrideErr := resolveEndpointTLSPinOverride(pin.serverAddress)
+	if overrideErr != nil {
+		if isEndpointTLSPinTokenExpiredError(overrideErr) {
+			DebugLog("[CONN-INIT] Pin token expired for %s during refresh; keep cached pin", pin.serverAddress)
+			return pin, nil
+		}
+		return nil, overrideErr
+	}
+	if len(overrideHash) > 0 {
+		added, _ := pin.addAllowedHash(overrideHash)
+		if added {
+			DebugLog("[CONN-INIT] Refreshed configured TLS pin (%s) for %s", overrideSource, pin.serverAddress)
+		}
+		// In encrypted-token compatibility mode, transport TLS pin enforcement is relaxed.
+		// If APS rejects encrypted eid, promote the currently observed SPKI hash once and retry.
+		if !pin.isTLSPinEnforced() {
+			liveHash, liveHashHex, liveErr := fetchServerSPKIHashOverHTTPS(pin.serverAddress, pin.serverName)
+			if liveErr != nil {
+				DebugLog("[CONN-INIT] Token mode live SPKI probe failed for %s: %v", pin.serverAddress, liveErr)
+				return pin, nil
+			}
+			liveAdded, _ := pin.addAllowedHash(liveHash)
+			if liveAdded {
+				DebugLog("[CONN-INIT] Token mode added live SPKI hash for %s hash=%s", pin.serverAddress, liveHashHex)
+			}
+			DebugLog("[CONN-INIT] Token mode promoted live SPKI hash for %s (eid retry path)", pin.serverAddress)
+		}
+		return pin, nil
 	}
 
 	hash, _, err := fetchServerSPKIHashOverHTTPS(pin.serverAddress, pin.serverName)
@@ -506,16 +780,16 @@ func PrimeTLSPinForServer(serverAddress string) error {
 	return err
 }
 
-func GetTLSPinRegistrationInfo(serverAddress string) (string, []byte, error) {
+func GetTLSPinRegistrationInfo(serverAddress string) (string, []byte, bool, error) {
 	pin, err := ensureEndpointTLSPin(serverAddress)
 	if err != nil {
-		return "", nil, err
+		return "", nil, true, err
 	}
 	key, _, err := pin.getActiveKey()
 	if err != nil {
-		return "", nil, err
+		return "", nil, pin.isTLSPinEnforced(), err
 	}
-	return pin.serverName, key, nil
+	return pin.serverName, key, pin.isTLSPinEnforced(), nil
 }
 
 func currentEndpointTLSPinSalt() string {
@@ -623,6 +897,18 @@ func buildEncryptedConfigIDForServer(serverAddress, configID string) (string, st
 		Timestamp: ts,
 		Token:     computeEndpointConfigToken(key, strings.TrimSpace(configID), nonce, ts, salt),
 	}
+	keyHex := hex.EncodeToString(key)
+	keyHint := keyHex
+	if len(keyHint) > 12 {
+		keyHint = keyHint[:12]
+	}
+	DebugLog("[CONFIG] Encrypted eid prepared for server=%s cid=%s salt=%s key=%s... enforce_tls_pin=%v",
+		pin.serverAddress,
+		strings.TrimSpace(configID),
+		salt,
+		keyHint,
+		pin.isTLSPinEnforced(),
+	)
 	payload, err := json.Marshal(request)
 	if err != nil {
 		return "", "", nil, err
@@ -691,7 +977,7 @@ func doPinnedAPSGet(serverAddress, requestPath string) (*http.Response, *endpoin
 		}
 		for i, dialViaGateway := range dialViaGateways {
 			gatewayAddress := gatewayAddresses[i]
-			gatewayClient := newPinnedHTTPClientWithDialContext(p, dialViaGateway)
+			gatewayClient := newPinnedHTTPClientWithDialContextAndProxy(p, dialViaGateway, false)
 			gatewayResp, gatewayErr := send(gatewayClient, p)
 			if gatewayErr == nil {
 				DebugLog("[CONN-INIT] pinned GET %s via bootstrap gateway=%s target=%s", strings.TrimSpace(requestPath), gatewayAddress, p.serverAddress)

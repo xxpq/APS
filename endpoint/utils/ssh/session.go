@@ -2,6 +2,7 @@ package ssh
 
 import (
 	"context"
+	"net"
 
 	"aps/endpoint/utils/ssh/radix"
 
@@ -16,9 +17,11 @@ var (
 // The function creates a new session for handling SSH connections and channels.
 func NewSession(commands *radix.Tree, conn *ssh.ServerConn, chans <-chan ssh.NewChannel) *session {
 	s := &session{
-		commands: commands,
-		c:        conn,
-		exitChan: make(chan bool, 1),
+		commands:          commands,
+		c:                 conn,
+		exitChan:          make(chan bool, 1),
+		forwardedTCPPorts: make(map[string]net.Listener),
+		directTCPPorts:    make(map[string]net.Listener),
 	}
 
 	if err := s.initPty(); err != nil {

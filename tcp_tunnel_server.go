@@ -12,6 +12,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -56,6 +57,7 @@ type TCPEndpoint struct {
 	ID               string
 	TunnelName       string
 	EndpointName     string
+	ConfigID         string
 	GridNodeID       string
 	GridSessionToken string
 	Conn             *TunnelConn
@@ -523,7 +525,16 @@ func (s *TCPTunnelServer) handleConnection(conn net.Conn) {
 	}
 	expectedHashHex := hex.EncodeToString(expectedPinHash)
 	if !strings.EqualFold(expectedHashHex, reg.PinHash) {
-		DebugLog("[TCP TUNNEL] TLS pin hash mismatch for host '%s' from %s", reg.ServerHost, remoteAddr)
+		providedHash := strings.ToLower(strings.TrimSpace(reg.PinHash))
+		providedHint := providedHash
+		if len(providedHint) > 12 {
+			providedHint = providedHint[:12]
+		}
+		expectedHint := expectedHashHex
+		if len(expectedHint) > 12 {
+			expectedHint = expectedHint[:12]
+		}
+		DebugLog("[TCP TUNNEL] TLS pin hash mismatch for host '%s' from %s provided=%s... expected=%s...", reg.ServerHost, remoteAddr, providedHint, expectedHint)
 		tc.SendJSON(MsgTypeRegisterAck, RegisterAckPayload{
 			Success: false,
 			Error:   "tls pin hash mismatch",
@@ -601,6 +612,7 @@ func (s *TCPTunnelServer) handleConnection(conn net.Conn) {
 		ID:               generateRequestID(),
 		TunnelName:       reg.TunnelName,
 		EndpointName:     reg.EndpointName,
+		ConfigID:         strings.TrimSpace(reg.ConfigID),
 		Conn:             tc,
 		RemoteAddr:       remoteAddr,
 		OnlineTime:       time.Now(),
@@ -1837,21 +1849,21 @@ func (ep *TCPEndpoint) handlePortForwardRequest(server *TCPTunnelServer, msg *Tu
 	DebugLog("[PORT-FWD] Request from %s to endpoint %s -> %s",
 		ep.EndpointName, payload.TargetEndpoint, payload.RemoteTarget)
 
-	// Find the target endpoint in the same tunnel
-	var targetEp *TCPEndpoint
+	// Find the target endpoint in the same tunnel by endpointName or CID.
+	var (
+		targetEp     *TCPEndpoint
+		onlineTarget string
+	)
 	server.mu.RLock()
-	for _, endpoint := range server.endpoints {
-		if endpoint.TunnelName == ep.TunnelName &&
-			endpoint.EndpointName == payload.TargetEndpoint {
-			targetEp = endpoint
-			break
-		}
+	targetEp = server.findPortForwardTargetEndpointLocked(ep.TunnelName, payload.TargetEndpoint)
+	if targetEp == nil {
+		onlineTarget = server.listOnlinePortForwardEndpointsLocked(ep.TunnelName)
 	}
 	server.mu.RUnlock()
 
 	if targetEp == nil {
-		DebugLog("[PORT-FWD] Target endpoint %s not found in tunnel %s",
-			payload.TargetEndpoint, ep.TunnelName)
+		DebugLog("[PORT-FWD] Target endpoint %s not found in tunnel %s (online=%s)",
+			payload.TargetEndpoint, ep.TunnelName, onlineTarget)
 		_ = ep.SendJSON(MsgTypePortForwardResponse, PortForwardResponsePayload{
 			ConnectionID: payload.ConnectionID,
 			Success:      false,
@@ -1891,6 +1903,63 @@ func (ep *TCPEndpoint) handlePortForwardRequest(server *TCPTunnelServer, msg *Tu
 
 	DebugLog("[PORT-FWD] Request forwarded conn=%s route=%s -> APS -> %s -> %s",
 		payload.ConnectionID, ep.EndpointName, payload.TargetEndpoint, payload.RemoteTarget)
+}
+
+func endpointMatchesPortForwardTarget(endpoint *TCPEndpoint, target string) bool {
+	if endpoint == nil {
+		return false
+	}
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(endpoint.EndpointName), target) {
+		return true
+	}
+	if strings.EqualFold(strings.TrimSpace(endpoint.ConfigID), target) {
+		return true
+	}
+	return false
+}
+
+func (s *TCPTunnelServer) findPortForwardTargetEndpointLocked(tunnelName, target string) *TCPEndpoint {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return nil
+	}
+	for _, endpoint := range s.endpoints {
+		if endpoint == nil || endpoint.TunnelName != tunnelName {
+			continue
+		}
+		if endpointMatchesPortForwardTarget(endpoint, target) {
+			return endpoint
+		}
+	}
+	return nil
+}
+
+func (s *TCPTunnelServer) listOnlinePortForwardEndpointsLocked(tunnelName string) string {
+	labels := make([]string, 0, len(s.endpoints))
+	for _, endpoint := range s.endpoints {
+		if endpoint == nil || endpoint.TunnelName != tunnelName {
+			continue
+		}
+		name := strings.TrimSpace(endpoint.EndpointName)
+		cid := strings.TrimSpace(endpoint.ConfigID)
+		switch {
+		case name != "" && cid != "" && !strings.EqualFold(name, cid):
+			labels = append(labels, fmt.Sprintf("%s[cid=%s]", name, cid))
+		case name != "":
+			labels = append(labels, name)
+		case cid != "":
+			labels = append(labels, "cid="+cid)
+		}
+	}
+	if len(labels) == 0 {
+		return "-"
+	}
+	sort.Strings(labels)
+	return strings.Join(labels, ",")
 }
 
 // handlePortForwardResponseRoute routes port-forward response to the other endpoint.

@@ -12,7 +12,6 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -288,13 +287,14 @@ func (s *session) handleSessionRequests(in <-chan *ssh.Request, channel ssh.Chan
 				_ = req.Reply(false, nil)
 				continue
 			}
-			termLen := req.Payload[3]
-			if len(req.Payload) < int(termLen)+12 {
+			termLen := binary.BigEndian.Uint32(req.Payload[:4])
+			dimsOffset := 4 + termLen
+			if termLen > uint32(len(req.Payload)-4) || len(req.Payload) < int(dimsOffset)+8 {
 				_ = req.Reply(false, nil)
 				continue
 			}
 			// termEnv := string(req.Payload[4 : termLen+4])
-			w, h := parseDims(req.Payload[termLen+4:])
+			w, h := parseDims(req.Payload[dimsOffset:])
 			if w > 0 {
 				s.termCols = uint16(w)
 			}
@@ -356,142 +356,40 @@ func (s *session) handleSessionRequests(in <-chan *ssh.Request, channel ssh.Chan
 			return
 
 		case "subsystem":
-			if string(req.Payload[4:]) == "sftp" {
+			subsystem, parseErr := parseSubsystemPayload(req.Payload)
+			if parseErr != nil {
+				err = req.Reply(false, nil)
+				continue
+			}
+			if subsystem == "sftp" {
 				// log.Warn("sftp request")
-				req.Reply(true, nil)
-				go s.handleSftp(channel)
+				err = req.Reply(true, nil)
+				if err != nil {
+					return
+				}
+				// Serve SFTP in-place. Returning immediately would trigger deferred
+				// channel/session close and break directory listings for clients.
+				s.handleSftp(channel)
 			} else {
-				req.Reply(false, nil)
+				err = req.Reply(false, nil)
 			}
 			return
 
 		case "tcpip-forward":
-			var payload = struct {
-				BoundAddr string
-				BoundPort uint32
-			}{}
-			err := ssh.Unmarshal(req.Payload, &payload)
-			if err != nil {
-				req.Reply(false, nil)
-				continue
-			}
-
-			listener, err := net.Listen("tcp", net.JoinHostPort(payload.BoundAddr, strconv.Itoa(int(payload.BoundPort))))
-			if err != nil {
-				req.Reply(false, nil)
-				continue
-			}
-
-			// Store the listener to be able to close it later
-			s.mu.Lock()
-			s.forwardedTCPPorts[listener.Addr().String()] = listener
-			s.mu.Unlock()
-
-			go func() {
-				for {
-					conn, err := listener.Accept()
-					if err != nil {
-						break
-					}
-					go s.handleForwardedTCPConnection(conn)
-				}
-			}()
-
-			req.Reply(true, nil)
+			// tcpip-forward is a global request (connection-level), not a session request.
+			err = req.Reply(false, nil)
 
 		case "cancel-tcpip-forward":
-			var payload = struct {
-				BoundAddr string
-				BoundPort uint32
-			}{}
-			err := ssh.Unmarshal(req.Payload, &payload)
-			if err != nil {
-				req.Reply(false, nil)
-				continue
-			}
-
-			addr := net.JoinHostPort(payload.BoundAddr, strconv.Itoa(int(payload.BoundPort)))
-
-			s.mu.Lock()
-			listener, ok := s.forwardedTCPPorts[addr]
-			if ok {
-				delete(s.forwardedTCPPorts, addr)
-				listener.Close()
-			}
-			s.mu.Unlock()
-			req.Reply(true, nil)
+			// cancel-tcpip-forward is a global request (connection-level), not a session request.
+			err = req.Reply(false, nil)
 
 		case "direct-tcpip":
-			var payload = struct {
-				DestAddr   string
-				DestPort   uint32
-				OriginAddr string
-				OriginPort uint32
-			}{}
-			err := ssh.Unmarshal(req.Payload, &payload)
-			if err != nil {
-				req.Reply(false, nil)
-				continue
-			}
-
-			listener, err := net.Listen("tcp", net.JoinHostPort(payload.OriginAddr, strconv.Itoa(int(payload.OriginPort))))
-			if err != nil {
-				req.Reply(false, nil)
-				continue
-			}
-
-			// Store the listener to be able to close it later
-			s.mu.Lock()
-			s.directTCPPorts[listener.Addr().String()] = listener
-			s.mu.Unlock()
-
-			go func() {
-				for {
-					conn, err := listener.Accept()
-					if err != nil {
-						break
-					}
-					go s.handleDirectTCPConnection(conn, payload.DestAddr, int(payload.DestPort))
-				}
-			}()
-
-			req.Reply(true, nil)
+			// direct-tcpip is a channel type, not a session request.
+			err = req.Reply(false, nil)
 
 		case "forwarded-tcpip":
-			var payload = struct {
-				BindAddr   string
-				BindPort   uint32
-				OriginAddr string
-				OriginPort uint32
-			}{}
-			err := ssh.Unmarshal(req.Payload, &payload)
-			if err != nil {
-				req.Reply(false, nil)
-				continue
-			}
-
-			listener, err := net.Listen("tcp", net.JoinHostPort(payload.BindAddr, strconv.Itoa(int(payload.BindPort))))
-			if err != nil {
-				req.Reply(false, nil)
-				continue
-			}
-
-			// Store the listener to be able to close it later
-			s.mu.Lock()
-			s.forwardedTCPPorts[listener.Addr().String()] = listener
-			s.mu.Unlock()
-
-			go func() {
-				for {
-					conn, err := listener.Accept()
-					if err != nil {
-						break
-					}
-					go s.handleForwardedTCPIPConnection(conn, payload.OriginAddr, int(payload.OriginPort))
-				}
-			}()
-
-			req.Reply(true, nil)
+			// forwarded-tcpip is a channel type, not a session request.
+			err = req.Reply(false, nil)
 
 		case "exit-status":
 			req.Reply(true, nil)
@@ -511,6 +409,19 @@ func (s *session) handleSessionRequests(in <-chan *ssh.Request, channel ssh.Chan
 			return
 		}
 	}
+}
+
+func parseSubsystemPayload(payload []byte) (string, error) {
+	var req struct {
+		Name string
+	}
+	if err := ssh.Unmarshal(payload, &req); err != nil {
+		return "", err
+	}
+	if req.Name == "" {
+		return "", errors.New("empty subsystem request")
+	}
+	return req.Name, nil
 }
 
 // Start assigns a pseudo-terminal tty os.File to c.Stdin, c.Stdout,

@@ -185,8 +185,7 @@ func (pm *PortMapper) tryPortForwardP2P(connectionID string, mapping PortMapping
 	if remoteTarget == "" {
 		return nil, "", fmt.Errorf("empty remote target")
 	}
-	self := strings.TrimSpace(GetEffectiveEndpointName())
-	if self != "" && strings.EqualFold(self, targetEndpoint) {
+	if isLocalGatewayNodeID(targetEndpoint) {
 		return nil, "", fmt.Errorf("target endpoint is self")
 	}
 
@@ -272,7 +271,7 @@ func buildPortForwardP2PRouteChain(mapping PortMappingConfig, selectedNode, next
 
 func buildPortForwardPeerCandidates(targetEndpoint string, extra []string) []string {
 	targetEndpoint = normalizeGatewayNodeID(targetEndpoint)
-	self := normalizeGatewayNodeID(GetEffectiveEndpointName())
+	self := localPrimaryGatewayNodeID()
 	seen := make(map[string]struct{}, gatewayRouteBundleMaxAddrs+len(extra)+1)
 	out := make([]string, 0, gatewayRouteBundleMaxAddrs+len(extra)+1)
 	add := func(nodeID string) {

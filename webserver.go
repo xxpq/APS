@@ -2,7 +2,11 @@ package main
 
 import (
 	"aps/charts"
+	"crypto/aes"
+	"crypto/cipher"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -17,6 +21,8 @@ import (
 	"sync"
 	"time"
 )
+
+const apsTLSPinTokenPrefix = "apspt1."
 
 // CertHandlers contains the HTTP handlers for the certificate download page.
 type CertHandlers struct{}
@@ -167,6 +173,7 @@ func (h *AdminHandlers) RegisterHandlers(mux *http.ServeMux) {
 	mux.HandleFunc("/.api/tunnels/endpoints", h.handleTunnelEndpoints)
 	mux.HandleFunc("/.api/endpoints", h.handleEndpointConfigs) // Endpoint configuration for P2P management
 	mux.HandleFunc("/.api/tls-pin", h.handleTLSPin)
+	mux.HandleFunc("/.api/tls-pin-token", h.handleTLSPinToken)
 	mux.HandleFunc("/.api/servers", h.handleServers)
 	mux.HandleFunc("/.api/rules", h.handleRules)
 	mux.HandleFunc("/.api/rate_limit_rules", h.handleRateLimitRules)  // New endpoint
@@ -934,6 +941,111 @@ func (h *AdminHandlers) handleTLSPin(w http.ResponseWriter, r *http.Request) {
 		"alg":     TLSPinAlgorithm,
 		"host":    host,
 		"hash":    hex.EncodeToString(pinKey),
+	})
+}
+
+func deriveAPSTLSPinTokenKey(cid, host string) []byte {
+	h := sha256.New()
+	h.Write([]byte("aps-pin-token-v1"))
+	h.Write([]byte("|"))
+	h.Write([]byte(strings.TrimSpace(cid)))
+	h.Write([]byte("|"))
+	h.Write([]byte(normalizeTLSPinHost(host)))
+	return h.Sum(nil)
+}
+
+func encodeAPSTLSPinToken(pinHash []byte, cid, host string, expUnix int64) (string, error) {
+	if len(pinHash) != sha256.Size {
+		return "", fmt.Errorf("pin hash length must be %d bytes, got %d", sha256.Size, len(pinHash))
+	}
+	payload := map[string]interface{}{
+		"pin":  hex.EncodeToString(pinHash),
+		"cid":  strings.TrimSpace(cid),
+		"host": normalizeTLSPinHost(host),
+		"exp":  expUnix,
+	}
+	plain, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+	block, err := aes.NewCipher(deriveAPSTLSPinTokenKey(cid, host))
+	if err != nil {
+		return "", err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", err
+	}
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		return "", err
+	}
+	ciphertext := gcm.Seal(nonce, nonce, plain, nil)
+	return apsTLSPinTokenPrefix + base64.RawURLEncoding.EncodeToString(ciphertext), nil
+}
+
+func (h *AdminHandlers) handleTLSPinToken(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !isAdminRequest(r, h.config) {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	cid := strings.TrimSpace(r.URL.Query().Get("cid"))
+	if cid == "" {
+		http.Error(w, "cid is required", http.StatusBadRequest)
+		return
+	}
+
+	host := normalizeTLSPinHost(strings.TrimSpace(r.URL.Query().Get("host")))
+	var pinKey []byte
+	if host != "" {
+		var ok bool
+		pinKey, ok = lookupTLSPinHashForHost(host)
+		if !ok {
+			http.Error(w, "TLS pin not available for host", http.StatusBadRequest)
+			return
+		}
+	} else {
+		var err error
+		pinKey, host, err = getTLSPinHashForRequest(r)
+		if err != nil {
+			http.Error(w, "TLS pin not available for host", http.StatusBadRequest)
+			return
+		}
+		host = normalizeTLSPinHost(host)
+	}
+
+	ttlSeconds := int64(600)
+	if rawTTL := strings.TrimSpace(r.URL.Query().Get("ttl")); rawTTL != "" {
+		parsedTTL, err := strconv.ParseInt(rawTTL, 10, 64)
+		if err != nil || parsedTTL <= 0 {
+			http.Error(w, "invalid ttl", http.StatusBadRequest)
+			return
+		}
+		if parsedTTL > 86400 {
+			parsedTTL = 86400
+		}
+		ttlSeconds = parsedTTL
+	}
+	expUnix := time.Now().UTC().Unix() + ttlSeconds
+	token, err := encodeAPSTLSPinToken(pinKey, cid, host, expUnix)
+	if err != nil {
+		http.Error(w, "failed to encode tls pin token", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"alg":     "apspt1-aesgcm",
+		"host":    host,
+		"cid":     cid,
+		"exp":     expUnix,
+		"token":   token,
 	})
 }
 

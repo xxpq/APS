@@ -35,6 +35,7 @@ var (
 	mtlsCertFile   = flag.String("mtls-cert", "", "Client certificate PEM path for mTLS tunnel")
 	mtlsKeyFile    = flag.String("mtls-key", "", "Client private key PEM path for mTLS tunnel")
 	mtlsCAFile     = flag.String("mtls-ca", "", "Custom CA PEM bundle for APS tunnel TLS verification")
+	pinToken       = flag.String("token", "", "Optional secure compatibility token for APS SPKI pin bootstrap")
 	debug          = flag.Bool("debug", false, "enable debug logging")
 	logPath        = flag.String("log", "", "path to log file (optional)")
 
@@ -57,6 +58,14 @@ var (
 	portMapper        *PortMapper
 	connectionManager *ConnectionManager // Manages multiple APS connections
 )
+
+var serviceProxyEnvKeys = []string{
+	"HTTP_PROXY",
+	"HTTPS_PROXY",
+	"ALL_PROXY",
+	"NO_PROXY",
+	endpointTLSPinTokenEnv,
+}
 
 var sharedClient = newSharedBackendHTTPClient()
 
@@ -401,7 +410,28 @@ func createServiceConfig() (*service.Config, error) {
 		DisplayName: displayName,
 		Description: description,
 		Arguments:   args,
+		EnvVars:     collectServiceProxyEnvVars(),
 	}, nil
+}
+
+func collectServiceProxyEnvVars() map[string]string {
+	envVars := make(map[string]string)
+	for _, key := range serviceProxyEnvKeys {
+		value := strings.TrimSpace(os.Getenv(key))
+		if value == "" {
+			value = strings.TrimSpace(os.Getenv(strings.ToLower(key)))
+		}
+		if value == "" {
+			continue
+		}
+		// Export both uppercase/lowercase forms for compatibility across libraries and platforms.
+		envVars[key] = value
+		envVars[strings.ToLower(key)] = value
+	}
+	if len(envVars) == 0 {
+		return nil
+	}
+	return envVars
 }
 
 func installService() error {

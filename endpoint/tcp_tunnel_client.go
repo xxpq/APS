@@ -590,6 +590,36 @@ func (c *prefixedConn) Read(b []byte) (int, error) {
 	return c.Conn.Read(b)
 }
 
+func tunnelPeerSPKIHashFromConn(conn net.Conn) ([]byte, string, error) {
+	current := conn
+	for i := 0; i < 4 && current != nil; i++ {
+		switch c := current.(type) {
+		case *prefixedConn:
+			current = c.Conn
+			continue
+		case *tls.Conn:
+			state := c.ConnectionState()
+			if len(state.PeerCertificates) == 0 {
+				return nil, "", errors.New("tls peer certificate missing")
+			}
+			sum := sha256.Sum256(state.PeerCertificates[0].RawSubjectPublicKeyInfo)
+			hash := append([]byte(nil), sum[:]...)
+			return hash, hex.EncodeToString(hash), nil
+		case interface{ ConnectionState() tls.ConnectionState }:
+			state := c.ConnectionState()
+			if len(state.PeerCertificates) == 0 {
+				return nil, "", errors.New("tls peer certificate missing")
+			}
+			sum := sha256.Sum256(state.PeerCertificates[0].RawSubjectPublicKeyInfo)
+			hash := append([]byte(nil), sum[:]...)
+			return hash, hex.EncodeToString(hash), nil
+		default:
+			return nil, "", fmt.Errorf("connection type %T does not expose tls state", current)
+		}
+	}
+	return nil, "", errors.New("unable to unwrap tunnel tls connection state")
+}
+
 func deriveRegistrationProofKey(password, cid string, pinHash []byte, kdfVersion, kdfSalt string) ([]byte, error) {
 	baseKey, err := deriveInitialKeyWithKDF(password, kdfVersion, kdfSalt)
 	if err != nil {
@@ -623,13 +653,16 @@ func computeSecureRegistrationProof(password, cid, tunnelName, endpointName, ser
 	return hex.EncodeToString(mac.Sum(nil)), nil
 }
 
-func buildTunnelTLSConfig(serverHost string, expectedPinHash []byte, connCtx ImmutableConnectionContext) (*tls.Config, error) {
+func buildTunnelTLSConfig(serverHost string, expectedPinHash []byte, enforceTLSPin bool, connCtx ImmutableConnectionContext) (*tls.Config, error) {
 	tlsConfig := &tls.Config{
 		MinVersion: tls.VersionTLS13,
 		ServerName: serverHost,
 		VerifyConnection: func(cs tls.ConnectionState) error {
 			if len(cs.PeerCertificates) == 0 {
 				return errors.New("missing peer certificate")
+			}
+			if !enforceTLSPin {
+				return nil
 			}
 			sum := sha256.Sum256(cs.PeerCertificates[0].RawSubjectPublicKeyInfo)
 			if !hmac.Equal(sum[:], expectedPinHash) {
@@ -713,8 +746,8 @@ func connectWithHTTPTunnelHandshake(conn net.Conn, serverAddress string) (net.Co
 	return &prefixedConn{Conn: conn, prefix: prefix}, nil
 }
 
-func dialTunnelServer(serverAddress, serverHost string, expectedPinHash []byte, connCtx ImmutableConnectionContext) (net.Conn, error) {
-	tlsConfig, err := buildTunnelTLSConfig(serverHost, expectedPinHash, connCtx)
+func dialTunnelServer(serverAddress, serverHost string, expectedPinHash []byte, enforceTLSPin bool, connCtx ImmutableConnectionContext) (net.Conn, error) {
+	tlsConfig, err := buildTunnelTLSConfig(serverHost, expectedPinHash, enforceTLSPin, connCtx)
 	if err != nil {
 		return nil, err
 	}
@@ -758,6 +791,31 @@ func dialTunnelServer(serverAddress, serverHost string, expectedPinHash []byte, 
 		return conn, nil
 	}
 
+	var envProxyURL *url.URL
+	targetURL := &url.URL{Scheme: "https", Host: serverAddress}
+	if parsedProxyURL, proxyErr := endpointProxyURLForTarget(targetURL); proxyErr != nil {
+		DebugLog("[CONN] Failed to resolve environment proxy for APS %s: %v", serverAddress, proxyErr)
+	} else if parsedProxyURL != nil {
+		envProxyURL = parsedProxyURL
+	}
+
+	dialAndEstablishEnvProxy := func(proxyURL *url.URL, timeout time.Duration) (net.Conn, error) {
+		if proxyURL == nil {
+			return nil, errors.New("environment proxy is nil")
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+		rawConn, err := dialTargetViaEnvironmentProxy(ctx, serverAddress, proxyURL, timeout)
+		if err != nil {
+			return nil, fmt.Errorf("dial via env proxy failed: %w", err)
+		}
+		conn, err := establishTunnel(rawConn)
+		if err != nil {
+			return nil, fmt.Errorf("env proxy tunnel setup failed: %w", err)
+		}
+		return conn, nil
+	}
+
 	dialAndEstablishGateway := func(candidate string) (net.Conn, error) {
 		candidate = strings.TrimSpace(candidate)
 		if candidate == "" {
@@ -776,13 +834,16 @@ func dialTunnelServer(serverAddress, serverHost string, expectedPinHash []byte, 
 
 	gatewayCandidates := resolveGatewayAddressCandidates(connCtx)
 	type dialAttemptResult struct {
-		kind      string // direct|gateway
+		kind      string // direct|gateway|env-proxy
 		candidate string
 		conn      net.Conn
 		err       error
 	}
 
 	totalAttempts := 1
+	if envProxyURL != nil {
+		totalAttempts++
+	}
 	for _, raw := range gatewayCandidates {
 		if strings.TrimSpace(raw) != "" {
 			totalAttempts++
@@ -794,6 +855,13 @@ func dialTunnelServer(serverAddress, serverHost string, expectedPinHash []byte, 
 		conn, err := dialAndEstablishDirect(12 * time.Second)
 		results <- dialAttemptResult{kind: "direct", conn: conn, err: err}
 	}()
+	if envProxyURL != nil {
+		proxyLabel := envProxyURL.Redacted()
+		go func(proxyURL *url.URL, label string) {
+			conn, err := dialAndEstablishEnvProxy(proxyURL, 12*time.Second)
+			results <- dialAttemptResult{kind: "env-proxy", candidate: label, conn: conn, err: err}
+		}(envProxyURL, proxyLabel)
+	}
 	for _, raw := range gatewayCandidates {
 		candidate := strings.TrimSpace(raw)
 		if candidate == "" {
@@ -814,6 +882,9 @@ func dialTunnelServer(serverAddress, serverHost string, expectedPinHash []byte, 
 			if res.kind == "direct" {
 				markGatewayDirectTargetReachable(connCtx.ServerAddress)
 				DebugLog("[CONN] Selected direct APS path for %s", serverAddress)
+			} else if res.kind == "env-proxy" {
+				markGatewayDirectTargetReachable(connCtx.ServerAddress)
+				DebugLog("[CONN] Selected environment proxy APS path for %s via %s", serverAddress, strings.TrimSpace(res.candidate))
 			} else {
 				promoteGatewayRouteCacheCandidate(connCtx.ServerAddress, res.candidate)
 				DebugLog("[GATEWAY] Using gateway %s for APS %s (race winner)", res.candidate, serverAddress)
@@ -844,6 +915,8 @@ func dialTunnelServer(serverAddress, serverHost string, expectedPinHash []byte, 
 			}
 			markGatewayRouteCacheCandidateFailure(connCtx.ServerAddress, res.candidate)
 			DebugLog("[GATEWAY] Dial via %s failed for APS %s: %v", res.candidate, serverAddress, res.err)
+		} else if res.kind == "env-proxy" {
+			DebugLog("[CONN] Environment proxy path failed for APS %s via %s: %v", serverAddress, strings.TrimSpace(res.candidate), res.err)
 		} else {
 			DebugLog("[CONN] Direct path failed for APS %s: %v", serverAddress, res.err)
 		}
@@ -851,6 +924,9 @@ func dialTunnelServer(serverAddress, serverHost string, expectedPinHash []byte, 
 		label := res.kind
 		if res.kind == "gateway" {
 			label = "gateway(" + strings.TrimSpace(res.candidate) + ")"
+		}
+		if res.kind == "env-proxy" {
+			label = "env-proxy(" + strings.TrimSpace(res.candidate) + ")"
 		}
 		errText := "unknown error"
 		if res.err != nil {
@@ -928,7 +1004,7 @@ func runTCPTunnelSession(ctx context.Context, connCtx ImmutableConnectionContext
 		return true
 	}
 
-	regServerHost, regPinHash, err := GetTLSPinRegistrationInfo(serverAddress)
+	regServerHost, regPinHash, enforceTLSPin, err := GetTLSPinRegistrationInfo(serverAddress)
 	if err != nil {
 		log.Printf("Failed to load TLS pin registration info: %v", err)
 		return true
@@ -946,10 +1022,38 @@ func runTCPTunnelSession(ctx context.Context, connCtx ImmutableConnectionContext
 		return false
 	}
 
-	conn, err := dialTunnelServer(serverAddress, regServerHost, regPinHash, connCtx)
+	if !enforceTLSPin {
+		DebugLog("[CONN] Token override mode active: TLS transport pin enforcement relaxed for %s", serverAddress)
+	}
+	conn, err := dialTunnelServer(serverAddress, regServerHost, regPinHash, enforceTLSPin, connCtx)
 	if err != nil {
 		log.Printf("Failed to connect: %v", err)
 		return true
+	}
+
+	// In token compatibility mode, align registration proof pin hash with the
+	// actual negotiated tunnel peer certificate to avoid transient mismatch loops
+	// when multiple APS paths race (direct/gateway/env-proxy).
+	if !enforceTLSPin {
+		liveHash, liveHashHex, liveHashErr := tunnelPeerSPKIHashFromConn(conn)
+		if liveHashErr != nil {
+			DebugLog("[CONN] Token mode could not inspect tunnel peer SPKI for %s: %v", serverAddress, liveHashErr)
+		} else if !hmac.Equal(liveHash, regPinHash) {
+			oldHashHex := hex.EncodeToString(regPinHash)
+			oldHint := oldHashHex
+			if len(oldHint) > 12 {
+				oldHint = oldHint[:12]
+			}
+			regPinHash = append([]byte(nil), liveHash...)
+			if pin, pinErr := ensureEndpointTLSPin(serverAddress); pinErr == nil {
+				pin.addAllowedHashWithMode(liveHash, true)
+			}
+			newHint := liveHashHex
+			if len(newHint) > 12 {
+				newHint = newHint[:12]
+			}
+			DebugLog("[CONN] Token mode aligned registration pin hash for %s: %s... -> %s...", serverAddress, oldHint, newHint)
+		}
 	}
 
 	tc := NewTunnelConn(conn)
@@ -964,6 +1068,11 @@ func runTCPTunnelSession(ctx context.Context, connCtx ImmutableConnectionContext
 	}
 
 	regPinHashHex := hex.EncodeToString(regPinHash)
+	regPinHint := regPinHashHex
+	if len(regPinHint) > 12 {
+		regPinHint = regPinHint[:12]
+	}
+	DebugLog("[CONN] Registration pin context host=%s hash=%s... enforce_tls_pin=%v", regServerHost, regPinHint, enforceTLSPin)
 	regTS := time.Now().UTC().Unix()
 	regProof, proofErr := computeSecureRegistrationProof(
 		sessionCredential,
@@ -1018,6 +1127,13 @@ func runTCPTunnelSession(ctx context.Context, connCtx ImmutableConnectionContext
 
 	if !ack.Success {
 		log.Printf("Registration failed: %s", ack.Error)
+		if strings.Contains(strings.ToLower(strings.TrimSpace(ack.Error)), "tls pin hash mismatch") {
+			if enforceTLSPin {
+				log.Printf("[CONN] APS rejected registration pin hash=%s... host=%s (strict transport pin mode)", regPinHint, regServerHost)
+			} else {
+				log.Printf("[CONN] APS rejected registration pin hash=%s... host=%s (token compatibility mode). Regenerate -token from current APS pin.", regPinHint, regServerHost)
+			}
+		}
 		if isPermanentError(errors.New(ack.Error)) {
 			return false
 		}
@@ -2076,6 +2192,30 @@ type ConfigUpdatePayload struct {
 	SSH                 *EndpointSSHConfig  `json:"ssh,omitempty"`
 }
 
+func (p *ConfigUpdatePayload) UnmarshalJSON(data []byte) error {
+	type alias ConfigUpdatePayload
+	var aux struct {
+		alias
+		GatewayAddress json.RawMessage `json:"gatewayAddress"`
+	}
+	aux.alias = alias(*p)
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	parsed := alias(aux.alias)
+	if len(aux.GatewayAddress) > 0 {
+		decodedGatewayAddress, err := decodeGatewayAddressField(aux.GatewayAddress)
+		if err != nil {
+			return err
+		}
+		parsed.GatewayAddress = canonicalizeEndpointGatewayAddressField(decodedGatewayAddress)
+	} else {
+		parsed.GatewayAddress = canonicalizeEndpointGatewayAddressField(parsed.GatewayAddress)
+	}
+	*p = ConfigUpdatePayload(parsed)
+	return nil
+}
+
 // MirrorUpdatePayload is sent by APS to inform endpoint of mirror addresses
 type MirrorUpdatePayload struct {
 	Mirrors []string `json:"mirrors"` // Format: ["addr:port", "cid@addr:port", ...]
@@ -2092,7 +2232,7 @@ func handleConfigUpdate(tc *TunnelConn, msg *TunnelMessage, sessionState *Tunnel
 		return
 	}
 	payload.GatewayListen = strings.TrimSpace(payload.GatewayListen)
-	payload.GatewayAddress = strings.TrimSpace(payload.GatewayAddress)
+	payload.GatewayAddress = canonicalizeEndpointGatewayAddressField(payload.GatewayAddress)
 	if payload.GatewayDiscoverPort <= 0 {
 		payload.GatewayDiscoverPort = defaultGatewayDiscoverPort
 	}
@@ -2135,7 +2275,7 @@ func handleConfigUpdate(tc *TunnelConn, msg *TunnelMessage, sessionState *Tunnel
 	if payload.KDFSalt != "" && payload.KDFSalt != oldKDFSalt {
 		shouldReconnect = true
 	}
-	if payload.GatewayAddress != oldGatewayAddress ||
+	if !equalGatewayAddressField(payload.GatewayAddress, oldGatewayAddress) ||
 		payload.GatewayDiscovery != oldGatewayDiscovery ||
 		payload.GatewayDiscoverPort != oldGatewayDiscoverPort {
 		shouldReconnect = true
@@ -2208,11 +2348,25 @@ func handleConfigUpdate(tc *TunnelConn, msg *TunnelMessage, sessionState *Tunnel
 		payload.TunnelName,
 		payload.EndpointName,
 		len(payload.PortMappings),
-		payload.GatewayAddress,
+		strings.TrimSpace(payload.GatewayAddress),
 		payload.GatewayDiscovery,
 		payload.GatewayDiscoverPort,
 		sshState,
 	)
+}
+
+func equalGatewayAddressField(a, b string) bool {
+	aList := normalizeEndpointGatewayAddresses(strings.TrimSpace(a))
+	bList := normalizeEndpointGatewayAddresses(strings.TrimSpace(b))
+	if len(aList) != len(bList) {
+		return false
+	}
+	for i := range aList {
+		if !sameGatewayAddress(aList[i], bList[i]) {
+			return false
+		}
+	}
+	return true
 }
 
 // handleMirrorUpdate processes mirror address updates from APS
@@ -2627,14 +2781,17 @@ func handleIncomingPortForwardStream(tc *TunnelConn, stream net.Conn, bootstrap 
 	DebugLog("[PORT-MAP] Inbound P2P request conn=%s from=%s target_endpoint=%s remote_target=%s",
 		connectionID, sourceClient, targetEndpoint, remoteTarget)
 
-	selfNode := normalizeGatewayNodeID(GetEffectiveEndpointName())
+	selfNode := localPrimaryGatewayNodeID()
 	targetNode := normalizeGatewayNodeID(targetEndpoint)
+	if isLocalGatewayNodeID(targetNode) {
+		targetNode = selfNode
+	}
 	nextHopNode := normalizeGatewayNodeID(nextHop)
-	if nextHopNode != "" && (selfNode == "" || !strings.EqualFold(nextHopNode, selfNode)) {
+	if nextHopNode != "" && !isLocalGatewayNodeID(nextHopNode) {
 		handleIncomingPortForwardTransit(tc, stream, payload, sourceClient)
 		return
 	}
-	if targetNode != "" && selfNode != "" && !strings.EqualFold(targetNode, selfNode) {
+	if targetNode != "" && !isLocalGatewayNodeID(targetNode) {
 		payload.GridNextHop = targetNode
 		handleIncomingPortForwardTransit(tc, stream, payload, sourceClient)
 		return

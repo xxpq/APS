@@ -737,6 +737,10 @@ func normalizeGatewayAddressList(addrs []string, primary string, limit int) []st
 	return out
 }
 
+func configuredGatewayAddresses(connCtx ImmutableConnectionContext) []string {
+	return normalizeEndpointGatewayAddresses(strings.TrimSpace(connCtx.GatewayAddress))
+}
+
 func probeGatewayRouteCandidate(connCtx ImmutableConnectionContext, now time.Time) (gatewayRouteProbeCandidate, error) {
 	type candidate struct {
 		addr   string
@@ -765,8 +769,9 @@ func probeGatewayRouteCandidate(connCtx ImmutableConnectionContext, now time.Tim
 		})
 	}
 
-	if addr := normalizeGatewayAddress(connCtx.GatewayAddress); addr != "" {
-		addCandidate(addr, "", "config", 0.10)
+	configGateways := configuredGatewayAddresses(connCtx)
+	for idx, addr := range configGateways {
+		addCandidate(addr, "", "config", 0.10+float64(idx)*0.01)
 	}
 
 	if connCtx.GatewayDiscovery && connCtx.GatewayDiscoverPort > 0 {

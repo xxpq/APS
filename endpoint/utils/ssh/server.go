@@ -219,7 +219,7 @@ func (s *SSH) run() {
 		s.conns[counter] = session
 		s.connsLock.Unlock()
 
-		go ssh.DiscardRequests(reqs)
+		go session.handleGlobalRequests(reqs)
 		go func() {
 			<-session.exitChan
 			// log.Echo().WithField("id", counter).Debug("Closing conn")
