@@ -29,6 +29,7 @@ type TCPTunnelServer struct {
 	listener      net.Listener
 	tunnelManager *TCPTunnelManager
 	endpoints     map[string]*TCPEndpoint // endpointID -> endpoint
+	portForwards  map[string]portForwardRouteState
 	config        *Config
 	statsDB       *StatsDB
 	running       bool
@@ -113,13 +114,26 @@ type tcpProxyConnection struct {
 	mu           sync.Mutex
 }
 
+type portForwardRouteState struct {
+	ConnectionID     string
+	TunnelName       string
+	SourceEndpointID string
+	SourceEndpoint   string
+	TargetEndpointID string
+	TargetEndpoint   string
+	RemoteTarget     string
+	LastActivity     time.Time
+	Established      bool
+}
+
 // NewTCPTunnelServer creates a new TCP tunnel server.
 func NewTCPTunnelServer(config *Config, statsDB *StatsDB) *TCPTunnelServer {
 	return &TCPTunnelServer{
-		config:     config,
-		statsDB:    statsDB,
-		endpoints:  make(map[string]*TCPEndpoint),
-		replaySeen: make(map[string]int64, 1024),
+		config:       config,
+		statsDB:      statsDB,
+		endpoints:    make(map[string]*TCPEndpoint),
+		portForwards: make(map[string]portForwardRouteState),
+		replaySeen:   make(map[string]int64, 1024),
 	}
 }
 
@@ -756,6 +770,11 @@ func (s *TCPTunnelServer) unregisterEndpoint(endpointID string) {
 	endpoint, exists := s.endpoints[endpointID]
 	if exists {
 		delete(s.endpoints, endpointID)
+		for connectionID, route := range s.portForwards {
+			if route.SourceEndpointID == endpointID || route.TargetEndpointID == endpointID {
+				delete(s.portForwards, connectionID)
+			}
+		}
 	}
 	s.mu.Unlock()
 
@@ -1166,6 +1185,8 @@ func (ep *TCPEndpoint) readLoop(server *TCPTunnelServer) {
 			ep.handleProxyClose(msg)
 		case MsgTypePortForwardRequest:
 			ep.handlePortForwardRequest(server, msg)
+		case MsgTypePortForwardResponse:
+			ep.handlePortForwardResponseRoute(server, msg)
 		case MsgTypePortForwardData:
 			ep.handlePortForwardDataRoute(server, msg)
 		case MsgTypePortForwardClose:
@@ -1799,6 +1820,19 @@ func (ep *TCPEndpoint) handlePortForwardRequest(server *TCPTunnelServer, msg *Tu
 		DebugLog("[TCP TUNNEL] Invalid port forward request: %v", err)
 		return
 	}
+	payload.ConnectionID = strings.TrimSpace(payload.ConnectionID)
+	payload.TargetEndpoint = strings.TrimSpace(payload.TargetEndpoint)
+	payload.RemoteTarget = strings.TrimSpace(payload.RemoteTarget)
+	if payload.ConnectionID == "" || payload.TargetEndpoint == "" || payload.RemoteTarget == "" {
+		DebugLog("[PORT-FWD] Invalid request payload from %s (conn=%q target=%q remote=%q)",
+			ep.EndpointName, payload.ConnectionID, payload.TargetEndpoint, payload.RemoteTarget)
+		_ = ep.SendJSON(MsgTypePortForwardResponse, PortForwardResponsePayload{
+			ConnectionID: payload.ConnectionID,
+			Success:      false,
+			Error:        "invalid port forward request",
+		})
+		return
+	}
 
 	DebugLog("[PORT-FWD] Request from %s to endpoint %s -> %s",
 		ep.EndpointName, payload.TargetEndpoint, payload.RemoteTarget)
@@ -1818,7 +1852,7 @@ func (ep *TCPEndpoint) handlePortForwardRequest(server *TCPTunnelServer, msg *Tu
 	if targetEp == nil {
 		DebugLog("[PORT-FWD] Target endpoint %s not found in tunnel %s",
 			payload.TargetEndpoint, ep.TunnelName)
-		ep.SendJSON(MsgTypePortForwardResponse, PortForwardResponsePayload{
+		_ = ep.SendJSON(MsgTypePortForwardResponse, PortForwardResponsePayload{
 			ConnectionID: payload.ConnectionID,
 			Success:      false,
 			Error:        "target endpoint not found",
@@ -1826,12 +1860,28 @@ func (ep *TCPEndpoint) handlePortForwardRequest(server *TCPTunnelServer, msg *Tu
 		return
 	}
 
+	server.mu.Lock()
+	server.portForwards[payload.ConnectionID] = portForwardRouteState{
+		ConnectionID:     payload.ConnectionID,
+		TunnelName:       ep.TunnelName,
+		SourceEndpointID: ep.ID,
+		SourceEndpoint:   ep.EndpointName,
+		TargetEndpointID: targetEp.ID,
+		TargetEndpoint:   targetEp.EndpointName,
+		RemoteTarget:     payload.RemoteTarget,
+		LastActivity:     time.Now(),
+	}
+	server.mu.Unlock()
+
 	// Forward the request to the target endpoint (msg type changes for target)
 	// Target endpoint will connect to RemoteTarget and send response
 	if err := targetEp.SendJSON(MsgTypePortForwardRequest, payload); err != nil {
 		DebugLog("[PORT-FWD] Failed to forward request to %s: %v",
 			payload.TargetEndpoint, err)
-		ep.SendJSON(MsgTypePortForwardResponse, PortForwardResponsePayload{
+		server.mu.Lock()
+		delete(server.portForwards, payload.ConnectionID)
+		server.mu.Unlock()
+		_ = ep.SendJSON(MsgTypePortForwardResponse, PortForwardResponsePayload{
 			ConnectionID: payload.ConnectionID,
 			Success:      false,
 			Error:        "failed to reach target endpoint",
@@ -1839,8 +1889,70 @@ func (ep *TCPEndpoint) handlePortForwardRequest(server *TCPTunnelServer, msg *Tu
 		return
 	}
 
-	DebugLog("[PORT-FWD] Request forwarded to %s for connection %s",
-		payload.TargetEndpoint, payload.ConnectionID)
+	DebugLog("[PORT-FWD] Request forwarded conn=%s route=%s -> APS -> %s -> %s",
+		payload.ConnectionID, ep.EndpointName, payload.TargetEndpoint, payload.RemoteTarget)
+}
+
+// handlePortForwardResponseRoute routes port-forward response to the other endpoint.
+func (ep *TCPEndpoint) handlePortForwardResponseRoute(server *TCPTunnelServer, msg *TunnelMessage) {
+	var payload PortForwardResponsePayload
+	if err := msg.ParseJSON(&payload); err != nil {
+		DebugLog("[TCP TUNNEL] Invalid port forward response: %v", err)
+		return
+	}
+	connectionID := strings.TrimSpace(payload.ConnectionID)
+	if connectionID == "" {
+		DebugLog("[PORT-FWD] Response missing connection id from %s", ep.EndpointName)
+		return
+	}
+
+	var (
+		peer *TCPEndpoint
+		ok   bool
+		rt   portForwardRouteState
+	)
+	server.mu.Lock()
+	rt, ok = server.portForwards[connectionID]
+	if ok {
+		switch ep.ID {
+		case rt.SourceEndpointID:
+			peer = server.endpoints[rt.TargetEndpointID]
+		case rt.TargetEndpointID:
+			peer = server.endpoints[rt.SourceEndpointID]
+		default:
+			ok = false
+		}
+		if ok {
+			rt.LastActivity = time.Now()
+			if payload.Success {
+				rt.Established = true
+			}
+			server.portForwards[connectionID] = rt
+		}
+	}
+	server.mu.Unlock()
+
+	if !ok || peer == nil {
+		DebugLog("[PORT-FWD] Response route missing conn=%s from=%s", connectionID, ep.EndpointName)
+		return
+	}
+
+	if err := peer.SendJSON(MsgTypePortForwardResponse, payload); err != nil {
+		DebugLog("[PORT-FWD] Failed routing response conn=%s to %s: %v", connectionID, peer.EndpointName, err)
+		server.mu.Lock()
+		delete(server.portForwards, connectionID)
+		server.mu.Unlock()
+		return
+	}
+
+	if !payload.Success {
+		server.mu.Lock()
+		delete(server.portForwards, connectionID)
+		server.mu.Unlock()
+	}
+
+	DebugLog("[PORT-FWD] Response routed conn=%s success=%t from=%s to=%s",
+		connectionID, payload.Success, ep.EndpointName, peer.EndpointName)
 }
 
 // handlePortForwardDataRoute routes port forward data between endpoints
@@ -1850,16 +1962,43 @@ func (ep *TCPEndpoint) handlePortForwardDataRoute(server *TCPTunnelServer, msg *
 		DebugLog("[TCP TUNNEL] Invalid port forward data: %v", err)
 		return
 	}
+	connectionID := strings.TrimSpace(payload.ConnectionID)
+	if connectionID == "" {
+		return
+	}
 
-	// Route data to the other endpoint in the connection
-	// For now, broadcast to all endpoints in the same tunnel (connection ID will filter)
-	server.mu.RLock()
-	for _, endpoint := range server.endpoints {
-		if endpoint.ID != ep.ID && endpoint.TunnelName == ep.TunnelName {
-			endpoint.SendJSON(MsgTypePortForwardData, payload)
+	var (
+		peer *TCPEndpoint
+		ok   bool
+		rt   portForwardRouteState
+	)
+	server.mu.Lock()
+	rt, ok = server.portForwards[connectionID]
+	if ok {
+		switch ep.ID {
+		case rt.SourceEndpointID:
+			peer = server.endpoints[rt.TargetEndpointID]
+		case rt.TargetEndpointID:
+			peer = server.endpoints[rt.SourceEndpointID]
+		default:
+			ok = false
+		}
+		if ok {
+			rt.LastActivity = time.Now()
+			server.portForwards[connectionID] = rt
 		}
 	}
-	server.mu.RUnlock()
+	server.mu.Unlock()
+
+	if !ok || peer == nil {
+		DebugLog("[PORT-FWD] Data route missing conn=%s from=%s", connectionID, ep.EndpointName)
+		return
+	}
+
+	if err := peer.SendJSON(MsgTypePortForwardData, payload); err != nil {
+		DebugLog("[PORT-FWD] Data route failed conn=%s from=%s to=%s: %v",
+			connectionID, ep.EndpointName, peer.EndpointName, err)
+	}
 }
 
 // handlePortForwardCloseRoute routes port forward close to the other endpoint
@@ -1872,14 +2011,36 @@ func (ep *TCPEndpoint) handlePortForwardCloseRoute(server *TCPTunnelServer, msg 
 
 	DebugLog("[PORT-FWD] Close for connection %s: %s", payload.ConnectionID, payload.Reason)
 
-	// Route close to other endpoints in the same tunnel
-	server.mu.RLock()
-	for _, endpoint := range server.endpoints {
-		if endpoint.ID != ep.ID && endpoint.TunnelName == ep.TunnelName {
-			endpoint.SendJSON(MsgTypePortForwardClose, payload)
+	connectionID := strings.TrimSpace(payload.ConnectionID)
+	var (
+		peer *TCPEndpoint
+		ok   bool
+		rt   portForwardRouteState
+	)
+	server.mu.Lock()
+	rt, ok = server.portForwards[connectionID]
+	if ok {
+		switch ep.ID {
+		case rt.SourceEndpointID:
+			peer = server.endpoints[rt.TargetEndpointID]
+		case rt.TargetEndpointID:
+			peer = server.endpoints[rt.SourceEndpointID]
+		default:
+			ok = false
 		}
+		delete(server.portForwards, connectionID)
 	}
-	server.mu.RUnlock()
+	server.mu.Unlock()
+
+	if !ok || peer == nil {
+		DebugLog("[PORT-FWD] Close route missing conn=%s from=%s", connectionID, ep.EndpointName)
+		return
+	}
+
+	if err := peer.SendJSON(MsgTypePortForwardClose, payload); err != nil {
+		DebugLog("[PORT-FWD] Close route failed conn=%s from=%s to=%s: %v",
+			connectionID, ep.EndpointName, peer.EndpointName, err)
+	}
 }
 
 // initiateKeyRotation initiates a new key rotation by sending a key request

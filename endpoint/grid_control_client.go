@@ -25,6 +25,8 @@ const (
 	endpointGridRouteAnnounceEvery = 45 * time.Second
 	endpointGridSessionRefreshLead = 120 * time.Second
 	endpointGridSessionRefreshGap  = 15 * time.Second
+	endpointGridGatewayClientTTL   = 100 * time.Second
+	endpointGridGatewayClientMax   = 16
 )
 
 type endpointGridICEPublishRequest struct {
@@ -92,6 +94,21 @@ var endpointGridRuntimeContextState = struct {
 	ctx    ImmutableConnectionContext
 	loaded bool
 }{}
+
+type endpointGridGatewayClientEntry struct {
+	client         *http.Client
+	serverAddress  string
+	gatewayAddress string
+	service        string
+	expiresAt      time.Time
+}
+
+var endpointGridGatewayClientCache = struct {
+	mu      sync.Mutex
+	entries map[string]endpointGridGatewayClientEntry
+}{
+	entries: make(map[string]endpointGridGatewayClientEntry),
+}
 
 func setEndpointGridRuntimeContext(connCtx ImmutableConnectionContext) {
 	endpointGridRuntimeContextState.mu.Lock()
@@ -840,7 +857,7 @@ func parseEndpointGridCandidateEnv(raw string) []string {
 	return out
 }
 
-func buildEndpointGridGatewayPinnedClient(pin *endpointTLSPin, serverAddress string) (*http.Client, string) {
+func buildEndpointGridGatewayPinnedClient(pin *endpointTLSPin, serverAddress string, requestPath string) (*http.Client, string) {
 	if pin == nil {
 		return nil, ""
 	}
@@ -867,6 +884,14 @@ func buildEndpointGridGatewayPinnedClient(pin *endpointTLSPin, serverAddress str
 		return nil, ""
 	}
 	originNode := strings.TrimSpace(connCtx.ConfigID)
+	service := ""
+	if strings.HasPrefix(strings.TrimSpace(requestPath), "/.grid/") {
+		service = gatewayServiceGrid
+	}
+	cacheKey := buildEndpointGridGatewayClientCacheKey(pin, targetAddress, gatewayAddress, service)
+	if cacheClient := getEndpointGridGatewayClientFromCache(cacheKey, targetAddress, gatewayAddress, service); cacheClient != nil {
+		return cacheClient, gatewayAddress
+	}
 	dialViaGateway := func(ctx context.Context, network, addr string) (net.Conn, error) {
 		type dialResult struct {
 			conn net.Conn
@@ -874,7 +899,15 @@ func buildEndpointGridGatewayPinnedClient(pin *endpointTLSPin, serverAddress str
 		}
 		done := make(chan dialResult, 1)
 		go func() {
-			conn, err := dialTunnelServerViaGateway(gatewayAddress, targetAddress, originNode)
+			meta := gatewayConnectMeta{
+				OriginNodeID: normalizeGatewayNodeID(originNode),
+				HopLimit:     defaultGatewayHopLimit,
+				Service:      service,
+			}
+			if meta.OriginNodeID != "" {
+				meta.Path = []string{meta.OriginNodeID}
+			}
+			conn, err := dialTunnelServerViaGatewayWithMeta(gatewayAddress, targetAddress, meta)
 			done <- dialResult{conn: conn, err: err}
 		}()
 		select {
@@ -884,7 +917,15 @@ func buildEndpointGridGatewayPinnedClient(pin *endpointTLSPin, serverAddress str
 			return result.conn, result.err
 		}
 	}
-	return newPinnedHTTPClientWithDialContext(pin, dialViaGateway), gatewayAddress
+	client := newPinnedHTTPClientWithDialContext(pin, dialViaGateway)
+	putEndpointGridGatewayClientToCache(cacheKey, endpointGridGatewayClientEntry{
+		client:         client,
+		serverAddress:  targetAddress,
+		gatewayAddress: gatewayAddress,
+		service:        service,
+		expiresAt:      time.Now().UTC().Add(endpointGridGatewayClientTTL),
+	})
+	return client, gatewayAddress
 }
 
 func doPinnedAPSJSONPost(serverAddress, requestPath string, reqBody any, respBody any) error {
@@ -913,19 +954,64 @@ func doPinnedAPSJSONPost(serverAddress, requestPath string, reqBody any, respBod
 		return client.Do(req)
 	}
 
-	trySendWithGatewayFallback := func(p *endpointTLSPin) (*http.Response, error) {
+	targetAddress := normalizeServerAddressForSession(serverAddress)
+	if targetAddress == "" {
+		targetAddress = normalizeServerAddressForSession(pin.serverAddress)
+	}
+
+	trySendDirect := func(p *endpointTLSPin) (*http.Response, error) {
 		resp, directErr := send(p.client, p)
 		if directErr == nil {
+			markGatewayDirectTargetReachable(targetAddress)
 			return resp, nil
 		}
-		gatewayClient, gatewayAddress := buildEndpointGridGatewayPinnedClient(p, serverAddress)
+		markGatewayDirectTargetUnreachable(targetAddress)
+		return nil, directErr
+	}
+
+	trySendGateway := func(p *endpointTLSPin) (*http.Response, error) {
+		gatewayClient, gatewayAddress := buildEndpointGridGatewayPinnedClient(p, serverAddress, requestPath)
 		if gatewayClient == nil {
-			return nil, directErr
+			return nil, errors.New("gateway unavailable")
 		}
 		gatewayResp, gatewayErr := send(gatewayClient, p)
 		if gatewayErr == nil {
+			if targetAddress != "" && gatewayAddress != "" {
+				promoteGatewayRouteCacheCandidate(targetAddress, gatewayAddress)
+			}
 			DebugLog("[GRID] control api %s via gateway=%s target=%s", strings.TrimSpace(requestPath), gatewayAddress, p.serverAddress)
 			return gatewayResp, nil
+		}
+		if targetAddress != "" && gatewayAddress != "" {
+			markGatewayRouteCacheCandidateFailure(targetAddress, gatewayAddress)
+		}
+		invalidateEndpointGridGatewayClientCache(p, targetAddress, gatewayAddress, requestPath)
+		DebugLog("[GRID] control api %s via gateway=%s target=%s failed: %v", strings.TrimSpace(requestPath), gatewayAddress, p.serverAddress, gatewayErr)
+		return nil, gatewayErr
+	}
+
+	trySendWithGatewayFallback := func(p *endpointTLSPin) (*http.Response, error) {
+		directPreferred := isGatewayDirectTargetReachable(targetAddress)
+		if directPreferred {
+			resp, directErr := trySendDirect(p)
+			if directErr == nil {
+				return resp, nil
+			}
+			resp, gatewayErr := trySendGateway(p)
+			if gatewayErr == nil {
+				return resp, nil
+			}
+			return nil, directErr
+		}
+
+		// Direct route is currently not marked reachable: use gateway first.
+		resp, gatewayErr := trySendGateway(p)
+		if gatewayErr == nil {
+			return resp, nil
+		}
+		resp, directErr := trySendDirect(p)
+		if directErr == nil {
+			return resp, nil
 		}
 		return nil, directErr
 	}
@@ -957,4 +1043,100 @@ func doPinnedAPSJSONPost(serverAddress, requestPath string, reqBody any, respBod
 		return err
 	}
 	return nil
+}
+
+func buildEndpointGridGatewayClientCacheKey(pin *endpointTLSPin, serverAddress, gatewayAddress, service string) string {
+	serverAddress = normalizeServerAddressForSession(serverAddress)
+	if serverAddress == "" && pin != nil {
+		serverAddress = normalizeServerAddressForSession(pin.serverAddress)
+	}
+	gatewayAddress = normalizeGatewayAddress(gatewayAddress)
+	service = strings.ToLower(strings.TrimSpace(service))
+	return serverAddress + "|" + gatewayAddress + "|" + service
+}
+
+func getEndpointGridGatewayClientFromCache(cacheKey, serverAddress, gatewayAddress, service string) *http.Client {
+	cacheKey = strings.TrimSpace(cacheKey)
+	if cacheKey == "" {
+		return nil
+	}
+	now := time.Now().UTC()
+	serverAddress = normalizeServerAddressForSession(serverAddress)
+	gatewayAddress = normalizeGatewayAddress(gatewayAddress)
+	service = strings.ToLower(strings.TrimSpace(service))
+
+	endpointGridGatewayClientCache.mu.Lock()
+	defer endpointGridGatewayClientCache.mu.Unlock()
+
+	for key, entry := range endpointGridGatewayClientCache.entries {
+		if entry.client == nil || now.After(entry.expiresAt) {
+			delete(endpointGridGatewayClientCache.entries, key)
+		}
+	}
+	entry, exists := endpointGridGatewayClientCache.entries[cacheKey]
+	if !exists {
+		return nil
+	}
+	if entry.client == nil || now.After(entry.expiresAt) {
+		delete(endpointGridGatewayClientCache.entries, cacheKey)
+		return nil
+	}
+	if !sameGatewayAddress(entry.gatewayAddress, gatewayAddress) || !strings.EqualFold(entry.serverAddress, serverAddress) || !strings.EqualFold(strings.TrimSpace(entry.service), service) {
+		delete(endpointGridGatewayClientCache.entries, cacheKey)
+		return nil
+	}
+	entry.expiresAt = now.Add(endpointGridGatewayClientTTL)
+	endpointGridGatewayClientCache.entries[cacheKey] = entry
+	return entry.client
+}
+
+func putEndpointGridGatewayClientToCache(cacheKey string, entry endpointGridGatewayClientEntry) {
+	cacheKey = strings.TrimSpace(cacheKey)
+	if cacheKey == "" || entry.client == nil {
+		return
+	}
+	now := time.Now().UTC()
+	if entry.expiresAt.IsZero() || now.After(entry.expiresAt) {
+		entry.expiresAt = now.Add(endpointGridGatewayClientTTL)
+	}
+	entry.serverAddress = normalizeServerAddressForSession(entry.serverAddress)
+	entry.gatewayAddress = normalizeGatewayAddress(entry.gatewayAddress)
+	entry.service = strings.ToLower(strings.TrimSpace(entry.service))
+
+	endpointGridGatewayClientCache.mu.Lock()
+	defer endpointGridGatewayClientCache.mu.Unlock()
+
+	for key, current := range endpointGridGatewayClientCache.entries {
+		if current.client == nil || now.After(current.expiresAt) {
+			delete(endpointGridGatewayClientCache.entries, key)
+		}
+	}
+	if len(endpointGridGatewayClientCache.entries) >= endpointGridGatewayClientMax {
+		var oldestKey string
+		var oldestExpiry time.Time
+		for key, current := range endpointGridGatewayClientCache.entries {
+			if oldestKey == "" || current.expiresAt.Before(oldestExpiry) {
+				oldestKey = key
+				oldestExpiry = current.expiresAt
+			}
+		}
+		if oldestKey != "" {
+			delete(endpointGridGatewayClientCache.entries, oldestKey)
+		}
+	}
+	endpointGridGatewayClientCache.entries[cacheKey] = entry
+}
+
+func invalidateEndpointGridGatewayClientCache(pin *endpointTLSPin, serverAddress, gatewayAddress, requestPath string) {
+	service := ""
+	if strings.HasPrefix(strings.TrimSpace(requestPath), "/.grid/") {
+		service = gatewayServiceGrid
+	}
+	cacheKey := buildEndpointGridGatewayClientCacheKey(pin, serverAddress, gatewayAddress, service)
+	if strings.TrimSpace(cacheKey) == "" {
+		return
+	}
+	endpointGridGatewayClientCache.mu.Lock()
+	delete(endpointGridGatewayClientCache.entries, cacheKey)
+	endpointGridGatewayClientCache.mu.Unlock()
 }

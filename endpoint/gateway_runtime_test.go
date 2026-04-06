@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"net"
 	"strings"
 	"testing"
 	"time"
@@ -126,7 +127,7 @@ func TestResolveGatewayAddressCandidatesSkipsDenied(t *testing.T) {
 }
 
 func TestParseGatewayConnectLineExtended(t *testing.T) {
-	line := "APS-GW/1 CONNECT 203.0.113.10:443 origin=node-a path=node-a,node-b hop=6\n"
+	line := "APS-GW/1 CONNECT 203.0.113.10:443 origin=node-a path=node-a,node-b hop=6 service=grid\n"
 	target, meta, err := parseGatewayConnectLine(line)
 	if err != nil {
 		t.Fatalf("parse failed: %v", err)
@@ -142,6 +143,9 @@ func TestParseGatewayConnectLineExtended(t *testing.T) {
 	}
 	if meta.HopLimit != 6 {
 		t.Fatalf("unexpected hop limit: %d", meta.HopLimit)
+	}
+	if meta.Service != gatewayServiceGrid {
+		t.Fatalf("unexpected service: %s", meta.Service)
 	}
 }
 
@@ -160,7 +164,7 @@ func TestParseGatewayConnectLineLegacyToken(t *testing.T) {
 }
 
 func TestParseGatewayGridLine(t *testing.T) {
-	line := "APS-GW/1 GRID origin=node-a path=node-a,node-b hop=5\n"
+	line := "APS-GW/1 GRID origin=node-a path=node-a,node-b hop=5 service=grid\n"
 	meta, err := parseGatewayGridLine(line)
 	if err != nil {
 		t.Fatalf("parse grid line failed: %v", err)
@@ -173,6 +177,76 @@ func TestParseGatewayGridLine(t *testing.T) {
 	}
 	if meta.HopLimit != 5 {
 		t.Fatalf("unexpected hop limit: %d", meta.HopLimit)
+	}
+	if meta.Service != gatewayServiceGrid {
+		t.Fatalf("unexpected service: %s", meta.Service)
+	}
+}
+
+func TestParseGatewayGridLineRequiresService(t *testing.T) {
+	line := "APS-GW/1 GRID origin=node-a hop=5\n"
+	_, err := parseGatewayGridLine(line)
+	if err == nil {
+		t.Fatal("expected parse to fail when service=grid is missing")
+	}
+}
+
+func TestShouldExemptInboundGridRateLimitForKnownPeer(t *testing.T) {
+	resetGatewayRuntimeStateForTest()
+	defer resetGatewayRuntimeStateForTest()
+
+	endpointGatewayRuntime.mu.Lock()
+	endpointGatewayRuntime.peers["node-peer"] = gatewayPeerInfo{
+		NodeID:   "node-peer",
+		Addr:     "10.1.105.22:37990",
+		LastSeen: time.Now(),
+	}
+	endpointGatewayRuntime.mu.Unlock()
+
+	meta := gatewayConnectMeta{
+		OriginNodeID: "node-peer",
+		HopLimit:     4,
+		Service:      gatewayServiceGrid,
+	}
+	remote := &net.TCPAddr{IP: net.ParseIP("10.1.105.22"), Port: 54000}
+	if !shouldExemptInboundGridRateLimit(remote, meta) {
+		t.Fatal("expected known peer GRID flow to be exempt from inbound rate limit")
+	}
+}
+
+func TestResolveGatewayAnnouncedPeerAddrRewritesLoopbackToRemote(t *testing.T) {
+	resetGatewayRuntimeStateForTest()
+	defer resetGatewayRuntimeStateForTest()
+
+	endpointGatewayRuntime.mu.Lock()
+	endpointGatewayRuntime.listenAddr = "0.0.0.0:37990"
+	endpointGatewayRuntime.mu.Unlock()
+
+	remote := &net.UDPAddr{IP: net.ParseIP("198.51.100.22"), Port: 55555}
+	got := resolveGatewayAnnouncedPeerAddr("127.0.0.1:37990", remote)
+	if got != "198.51.100.22:37990" {
+		t.Fatalf("expected remote-rewritten addr, got %s", got)
+	}
+}
+
+func TestSelectGatewayPeerDialCandidatesSkipsLocalAddr(t *testing.T) {
+	resetGatewayRuntimeStateForTest()
+	defer resetGatewayRuntimeStateForTest()
+
+	now := time.Now()
+	endpointGatewayRuntime.mu.Lock()
+	endpointGatewayRuntime.nodeID = "node-self"
+	endpointGatewayRuntime.listenAddr = "0.0.0.0:37990"
+	endpointGatewayRuntime.peers["node-local"] = gatewayPeerInfo{NodeID: "node-local", Addr: "127.0.0.1:37990", LastSeen: now}
+	endpointGatewayRuntime.peers["node-remote"] = gatewayPeerInfo{NodeID: "node-remote", Addr: "198.51.100.30:37990", LastSeen: now}
+	endpointGatewayRuntime.mu.Unlock()
+
+	candidates := selectGatewayPeerDialCandidates("node-local", nil, 3)
+	if len(candidates) == 0 {
+		t.Fatal("expected at least one non-local candidate")
+	}
+	if candidates[0] == "node-local" {
+		t.Fatalf("expected local candidate to be skipped, got=%v", candidates)
 	}
 }
 
@@ -227,16 +301,16 @@ func TestGatewayPeerRouteExchangeAndSelection(t *testing.T) {
 
 	endpointGatewayRuntime.mu.Lock()
 	endpointGatewayRuntime.nodeID = "node-self"
-	endpointGatewayRuntime.listenAddr = "127.0.0.1:3900"
+	endpointGatewayRuntime.listenAddr = "10.0.0.1:3900"
 	endpointGatewayRuntime.mu.Unlock()
 
-	msg := "APS-GW-PEER/1 node=node-peer addr=127.0.0.2:3900 targets=203.0.113.8:443@0"
+	msg := "APS-GW-PEER/1 node=node-peer addr=10.0.0.2:3900 targets=203.0.113.8:443@0"
 	if !applyGatewayPeerAnnounce(msg, nil) {
 		t.Fatal("expected peer announce to be accepted")
 	}
 
 	nextHopAddr, nextHopNode := selectGatewayRoute("203.0.113.8:443", nil, "node-self")
-	if nextHopAddr != "127.0.0.2:3900" || nextHopNode != "node-peer" {
+	if nextHopAddr != "10.0.0.2:3900" || nextHopNode != "node-peer" {
 		t.Fatalf("unexpected route selection addr=%s node=%s", nextHopAddr, nextHopNode)
 	}
 

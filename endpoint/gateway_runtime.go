@@ -28,6 +28,7 @@ const (
 	gatewayCommandGrid      = "GRID"
 	gatewayCommandAuth      = "AUTH"
 	gatewayCommandChallenge = "CHALLENGE"
+	gatewayServiceGrid      = "grid"
 	gatewayDiscoverMagic    = "APS-GW-DISCOVER/1"
 	gatewayAnnounceMagic    = "APS-GW-ANNOUNCE/1"
 	gatewayPeerMagic        = "APS-GW-PEER/1"
@@ -110,6 +111,7 @@ type gatewayConnectMeta struct {
 	OriginNodeID string
 	Path         []string
 	HopLimit     int
+	Service      string
 	KEXPublicKey string
 	KEXNonce     string
 }
@@ -457,6 +459,27 @@ func markGatewayDirectTargetReachable(target string) {
 	endpointGatewayRuntime.directTargets[target] = struct{}{}
 	delete(endpointGatewayRuntime.targetRoutes, target)
 	endpointGatewayRuntime.mu.Unlock()
+}
+
+func markGatewayDirectTargetUnreachable(target string) {
+	target = normalizeGatewayAddress(target)
+	if target == "" {
+		return
+	}
+	endpointGatewayRuntime.mu.Lock()
+	delete(endpointGatewayRuntime.directTargets, target)
+	endpointGatewayRuntime.mu.Unlock()
+}
+
+func isGatewayDirectTargetReachable(target string) bool {
+	target = normalizeGatewayAddress(target)
+	if target == "" {
+		return false
+	}
+	endpointGatewayRuntime.mu.Lock()
+	defer endpointGatewayRuntime.mu.Unlock()
+	_, ok := endpointGatewayRuntime.directTargets[target]
+	return ok
 }
 
 func promoteGatewayRouteCacheCandidate(target, successAddr string) {
@@ -830,15 +853,6 @@ func handleGatewayRelayConnection(clientConn net.Conn, listenAddr string) {
 	}
 	DebugLog("[GATEWAY] Inbound relay accepted remote=%s", remoteAddr)
 
-	session, sessionErr := acquireInboundConnectionSession(clientConn.RemoteAddr())
-	if sessionErr != nil {
-		DebugLog("[GATEWAY] Inbound relay rate limited remote=%s", remoteAddr)
-		_, _ = io.WriteString(clientConn, "ERR rate limited\n")
-		return
-	}
-	authenticated := false
-	defer releaseInboundConnectionSession(session.SessionID, authenticated)
-
 	_ = clientConn.SetDeadline(time.Now().Add(gatewayPreTLSGuardWindow))
 	reader := bufio.NewReader(clientConn)
 	line, err := readGatewayControlLine(reader)
@@ -848,7 +862,22 @@ func handleGatewayRelayConnection(clientConn net.Conn, listenAddr string) {
 
 	fields := strings.Fields(strings.TrimSpace(line))
 	if len(fields) >= 2 && fields[0] == gatewayProtocolVersion && strings.EqualFold(fields[1], gatewayCommandGrid) {
-		authenticated = handleGatewayGridConnection(clientConn, reader, line, session.SessionID)
+		meta, parseErr := parseGatewayGridLine(line)
+		if parseErr != nil {
+			_, _ = io.WriteString(clientConn, "ERR invalid request\n")
+			return
+		}
+		rateLimitExempt := shouldExemptInboundGridRateLimit(clientConn.RemoteAddr(), meta)
+		session, sessionErr := acquireInboundConnectionSessionWithExemption(clientConn.RemoteAddr(), rateLimitExempt)
+		if sessionErr != nil {
+			DebugLog("[GATEWAY] Inbound grid relay rate limited remote=%s origin=%s service=%s exempt=%t",
+				remoteAddr, meta.OriginNodeID, meta.Service, rateLimitExempt)
+			_, _ = io.WriteString(clientConn, "ERR rate limited\n")
+			return
+		}
+		authenticated := false
+		defer releaseInboundConnectionSession(session.SessionID, authenticated)
+		authenticated = handleGatewayGridConnection(clientConn, reader, meta, session.SessionID)
 		return
 	}
 
@@ -858,7 +887,7 @@ func handleGatewayRelayConnection(clientConn net.Conn, listenAddr string) {
 		_, _ = io.WriteString(clientConn, "ERR invalid request\n")
 		return
 	}
-	DebugLog("[GATEWAY] Inbound relay request remote=%s target=%s origin=%s hop=%d", remoteAddr, targetAddr, meta.OriginNodeID, meta.HopLimit)
+	DebugLog("[GATEWAY] Inbound relay request remote=%s target=%s origin=%s hop=%d service=%s", remoteAddr, targetAddr, meta.OriginNodeID, meta.HopLimit, meta.Service)
 
 	runtimeNodeID := currentGatewayNodeID()
 	if !isGatewayRelayAuthorized(targetAddr, meta) {
@@ -875,6 +904,17 @@ func handleGatewayRelayConnection(clientConn net.Conn, listenAddr string) {
 		_, _ = io.WriteString(clientConn, "ERR loop detected\n")
 		return
 	}
+
+	rateLimitExempt := normalizeGatewayService(meta.Service) == gatewayServiceGrid && isGatewayAllowedTarget(targetAddr)
+	session, sessionErr := acquireInboundConnectionSessionWithExemption(clientConn.RemoteAddr(), rateLimitExempt)
+	if sessionErr != nil {
+		DebugLog("[GATEWAY] Inbound relay rate limited remote=%s target=%s service=%s exempt=%t", remoteAddr, targetAddr, meta.Service, rateLimitExempt)
+		_, _ = io.WriteString(clientConn, "ERR rate limited\n")
+		return
+	}
+	authenticated := false
+	defer releaseInboundConnectionSession(session.SessionID, authenticated)
+
 	_ = clientConn.SetDeadline(time.Now().Add(gatewayHandshakeTimeout))
 	if _, err := completeGatewayKEXServer(clientConn, reader, gatewayCommandConnect, targetAddr, meta); err != nil {
 		DebugLog("[GATEWAY] Inbound relay KEX failed remote=%s target=%s err=%v", remoteAddr, targetAddr, err)
@@ -952,13 +992,7 @@ func handleGatewayRelayConnection(clientConn net.Conn, listenAddr string) {
 	wg.Wait()
 }
 
-func handleGatewayGridConnection(clientConn net.Conn, reader *bufio.Reader, line string, sessionID string) bool {
-	meta, parseErr := parseGatewayGridLine(line)
-	if parseErr != nil {
-		_, _ = io.WriteString(clientConn, "ERR invalid request\n")
-		return false
-	}
-
+func handleGatewayGridConnection(clientConn net.Conn, reader *bufio.Reader, meta gatewayConnectMeta, sessionID string) bool {
 	runtimeNodeID := currentGatewayNodeID()
 	if err := validateGatewayGridRequest(runtimeNodeID, meta); err != nil {
 		_, _ = io.WriteString(clientConn, "ERR loop detected\n")
@@ -1021,10 +1055,92 @@ func parseGatewayGridLine(line string) (gatewayConnectMeta, error) {
 		return gatewayConnectMeta{HopLimit: defaultGatewayHopLimit}, err
 	}
 	meta := parseGatewayMetaFields(fields[2:])
+	if normalizeGatewayService(meta.Service) != gatewayServiceGrid {
+		return meta, errors.New("grid service is required")
+	}
+	meta.Service = gatewayServiceGrid
 	if meta.HopLimit <= 0 {
 		return meta, errors.New("hop limit exceeded")
 	}
 	return meta, nil
+}
+
+func shouldExemptInboundGridRateLimit(remoteAddr net.Addr, meta gatewayConnectMeta) bool {
+	if normalizeGatewayService(meta.Service) != gatewayServiceGrid {
+		return false
+	}
+	remoteIP := parseRemoteIP(remoteAddr)
+	if remoteIP == "" {
+		return false
+	}
+
+	origin := normalizeGatewayNodeID(meta.OriginNodeID)
+	endpointGatewayRuntime.mu.Lock()
+	defer endpointGatewayRuntime.mu.Unlock()
+
+	if origin != "" {
+		if peer, ok := endpointGatewayRuntime.peers[origin]; ok && gatewayPeerAddressMatchesRemoteIP(peer.Addr, remoteIP) {
+			return true
+		}
+	}
+	for _, peer := range endpointGatewayRuntime.peers {
+		if gatewayPeerAddressMatchesRemoteIP(peer.Addr, remoteIP) {
+			return true
+		}
+	}
+	return false
+}
+
+func gatewayPeerAddressMatchesRemoteIP(peerAddr, remoteIP string) bool {
+	peerAddr = normalizeGatewayAddress(peerAddr)
+	if peerAddr == "" {
+		return false
+	}
+	host, _, err := net.SplitHostPort(peerAddr)
+	if err != nil {
+		return false
+	}
+	host = strings.Trim(strings.TrimSpace(host), "[]")
+	if host == "" {
+		return false
+	}
+	if strings.EqualFold(host, remoteIP) {
+		return true
+	}
+	hostIP := net.ParseIP(host)
+	remoteParsed := net.ParseIP(strings.TrimSpace(remoteIP))
+	if hostIP != nil && remoteParsed != nil {
+		return hostIP.Equal(remoteParsed)
+	}
+	return false
+}
+
+func resolveGatewayAnnouncedPeerAddr(announcedAddr string, remoteAddr *net.UDPAddr) string {
+	announcedAddr = normalizeGatewayAddress(announcedAddr)
+	if announcedAddr == "" {
+		return ""
+	}
+	host, port, err := net.SplitHostPort(announcedAddr)
+	if err != nil {
+		return ""
+	}
+	host = strings.Trim(strings.TrimSpace(host), "[]")
+	useRemote := false
+	if host == "" || strings.EqualFold(host, "localhost") {
+		useRemote = true
+	} else if ip := net.ParseIP(host); ip != nil && (ip.IsLoopback() || ip.IsUnspecified()) {
+		useRemote = true
+	}
+	if isLocalGatewayAddress(announcedAddr) {
+		useRemote = true
+	}
+	if !useRemote {
+		return announcedAddr
+	}
+	if remoteAddr == nil || remoteAddr.IP == nil || remoteAddr.IP.IsUnspecified() {
+		return announcedAddr
+	}
+	return net.JoinHostPort(remoteAddr.IP.String(), port)
 }
 
 func parseGatewayCommandFields(line string, command string, minFields int) ([]string, error) {
@@ -1065,6 +1181,8 @@ func parseGatewayMetaFields(fields []string) gatewayConnectMeta {
 			if hop, convErr := strconv.Atoi(strings.TrimSpace(value)); convErr == nil {
 				meta.HopLimit = hop
 			}
+		case "service":
+			meta.Service = normalizeGatewayService(value)
 		case "kex":
 			meta.KEXPublicKey = strings.TrimSpace(value)
 		case "nonce":
@@ -1079,6 +1197,7 @@ func parseGatewayMetaFields(fields []string) gatewayConnectMeta {
 	if meta.HopLimit > maxGatewayHopLimit {
 		meta.HopLimit = maxGatewayHopLimit
 	}
+	meta.Service = normalizeGatewayService(meta.Service)
 	return meta
 }
 
@@ -1257,10 +1376,16 @@ func selectGatewayPeerDialCandidates(primaryNodeID string, exclude []string, lim
 	now := time.Now()
 	endpointGatewayRuntime.mu.Lock()
 	pruneGatewayStateLocked(now)
+	localListenAddr := endpointGatewayRuntime.listenAddr
+	localNodeSet := make(map[string]struct{}, len(endpointGatewayRuntime.peers))
 	peerCandidates := make([]peerCandidate, 0, len(endpointGatewayRuntime.peers))
 	for nodeID, peer := range endpointGatewayRuntime.peers {
 		nodeID = normalizeGatewayNodeID(nodeID)
 		if nodeID == "" || strings.TrimSpace(peer.Addr) == "" {
+			continue
+		}
+		if isLocalGatewayAddressWithListenAddr(peer.Addr, localListenAddr) {
+			localNodeSet[nodeID] = struct{}{}
 			continue
 		}
 		if _, blocked := excludeSet[nodeID]; blocked {
@@ -1284,6 +1409,9 @@ func selectGatewayPeerDialCandidates(primaryNodeID string, exclude []string, lim
 	add := func(nodeID string) {
 		nodeID = normalizeGatewayNodeID(nodeID)
 		if nodeID == "" {
+			return
+		}
+		if _, isLocal := localNodeSet[nodeID]; isLocal {
 			return
 		}
 		if _, blocked := excludeSet[nodeID]; blocked {
@@ -1372,6 +1500,9 @@ func dialGatewayGridWithMeta(peerAddr string, meta gatewayConnectMeta) (net.Conn
 	if meta.HopLimit > maxGatewayHopLimit {
 		meta.HopLimit = maxGatewayHopLimit
 	}
+	if normalizeGatewayService(meta.Service) == "" {
+		meta.Service = gatewayServiceGrid
+	}
 	meta.Path = normalizeGatewayPath(meta.Path)
 	kexOffer, err := newGatewayKEXOffer()
 	if err != nil {
@@ -1443,6 +1574,9 @@ func buildGatewayConnectLine(targetAddr string, meta gatewayConnectMeta) string 
 		hop = defaultGatewayHopLimit
 	}
 	parts = append(parts, "hop="+strconv.Itoa(hop))
+	if service := normalizeGatewayService(meta.Service); service != "" {
+		parts = append(parts, "service="+encodeGatewayField(service))
+	}
 	if kex := strings.TrimSpace(meta.KEXPublicKey); kex != "" {
 		parts = append(parts, "kex="+encodeGatewayField(kex))
 	}
@@ -1468,6 +1602,9 @@ func buildGatewayGridLine(meta gatewayConnectMeta) string {
 		hop = defaultGatewayHopLimit
 	}
 	parts = append(parts, "hop="+strconv.Itoa(hop))
+	if service := normalizeGatewayService(meta.Service); service != "" {
+		parts = append(parts, "service="+encodeGatewayField(service))
+	}
 	if kex := strings.TrimSpace(meta.KEXPublicKey); kex != "" {
 		parts = append(parts, "kex="+encodeGatewayField(kex))
 	}
@@ -1549,6 +1686,7 @@ func deriveGatewayKEXAuthKey(shared []byte, command, targetAddr string, meta gat
 		hop = defaultGatewayHopLimit
 	}
 	writeField(strconv.Itoa(hop))
+	writeField(normalizeGatewayService(meta.Service))
 	writeField(clientPublicKey)
 	writeField(serverPublicKey)
 	writeField(clientNonce)
@@ -1892,12 +2030,7 @@ func applyGatewayPeerAnnounce(msg string, remoteAddr *net.UDPAddr) bool {
 
 	nodeID := normalizeGatewayNodeID(kv["node"])
 	announcedAddr := normalizeGatewayAddress(kv["addr"])
-	peerAddr := announcedAddr
-	if peerAddr == "" && remoteAddr != nil {
-		if _, port, err := net.SplitHostPort(strings.TrimSpace(kv["addr"])); err == nil {
-			peerAddr = net.JoinHostPort(remoteAddr.IP.String(), port)
-		}
-	}
+	peerAddr := resolveGatewayAnnouncedPeerAddr(announcedAddr, remoteAddr)
 	if peerAddr == "" || nodeID == "" {
 		return false
 	}
@@ -2034,7 +2167,8 @@ func selectGatewayRouteCandidates(targetAddr string, path []string, selfNodeID s
 	pruneGatewayStateLocked(now)
 	path = normalizeGatewayPath(path)
 	selfNodeID = normalizeGatewayNodeID(selfNodeID)
-	selfAddr := normalizeGatewayAddress(endpointGatewayRuntime.listenAddr)
+	localListenAddr := endpointGatewayRuntime.listenAddr
+	selfAddr := normalizeGatewayAddress(localListenAddr)
 
 	candidates := make([]gatewayRouteCandidate, 0, len(endpointGatewayRuntime.peers)+1)
 	seen := make(map[string]struct{}, len(endpointGatewayRuntime.peers)+1)
@@ -2042,6 +2176,9 @@ func selectGatewayRouteCandidates(targetAddr string, path []string, selfNodeID s
 		nodeID = normalizeGatewayNodeID(nodeID)
 		addr = normalizeGatewayAddress(addr)
 		if nodeID == "" || addr == "" {
+			return
+		}
+		if isLocalGatewayAddressWithListenAddr(addr, localListenAddr) {
 			return
 		}
 		if sameGatewayAddress(addr, selfAddr) {
@@ -2424,18 +2561,25 @@ func isLocalGatewayAddress(addr string) bool {
 	if addr == "" {
 		return false
 	}
-	targetHost, targetPort, err := net.SplitHostPort(addr)
-	if err != nil {
-		endpointGatewayRuntime.mu.Lock()
-		defer endpointGatewayRuntime.mu.Unlock()
-		return sameGatewayAddress(addr, endpointGatewayRuntime.listenAddr)
-	}
-	targetHost = strings.Trim(strings.TrimSpace(targetHost), "[]")
-
 	endpointGatewayRuntime.mu.Lock()
 	listenAddr := endpointGatewayRuntime.listenAddr
 	endpointGatewayRuntime.mu.Unlock()
+	return isLocalGatewayAddressWithListenAddr(addr, listenAddr)
+}
 
+func isLocalGatewayAddressWithListenAddr(addr, listenAddr string) bool {
+	addr = normalizeGatewayAddress(addr)
+	if addr == "" {
+		return false
+	}
+	targetHost, targetPort, err := net.SplitHostPort(addr)
+	if err != nil {
+		return sameGatewayAddress(addr, listenAddr)
+	}
+	targetHost = strings.Trim(strings.TrimSpace(targetHost), "[]")
+	if targetHost == "" {
+		return false
+	}
 	if sameGatewayAddress(addr, listenAddr) {
 		return true
 	}
@@ -2622,6 +2766,14 @@ func normalizeGatewayAddress(addr string) string {
 
 func normalizeGatewayNodeID(id string) string {
 	return strings.TrimSpace(id)
+}
+
+func normalizeGatewayService(service string) string {
+	service = strings.ToLower(strings.TrimSpace(service))
+	if service == gatewayServiceGrid {
+		return service
+	}
+	return ""
 }
 
 func parseGatewayPath(raw string) []string {

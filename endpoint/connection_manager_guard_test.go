@@ -83,3 +83,30 @@ func TestInboundConnectionGuardCooldownAfterAuthFailure(t *testing.T) {
 	}
 	releaseInboundConnectionSession(recovered.SessionID, true)
 }
+
+func TestInboundConnectionGuardRateLimitExemption(t *testing.T) {
+	resetInboundGuardForTest(t)
+
+	remote := &net.TCPAddr{IP: net.ParseIP("198.51.100.30"), Port: 43000}
+	for i := 0; i < endpointInboundMaxPerIPPerWindow; i++ {
+		session, err := acquireInboundConnectionSession(remote)
+		if err != nil {
+			t.Fatalf("acquire attempt %d failed early: %v", i, err)
+		}
+		releaseInboundConnectionSession(session.SessionID, true)
+	}
+
+	_, err := acquireInboundConnectionSession(remote)
+	if !errors.Is(err, errInboundSessionRateLimited) {
+		t.Fatalf("expected errInboundSessionRateLimited, got %v", err)
+	}
+
+	exemptSession, exemptErr := acquireInboundConnectionSessionWithExemption(remote, true)
+	if exemptErr != nil {
+		t.Fatalf("expected exempt acquire to succeed, got %v", exemptErr)
+	}
+	if !exemptSession.RateLimitExempt {
+		t.Fatal("expected exempt session flag to be true")
+	}
+	releaseInboundConnectionSession(exemptSession.SessionID, true)
+}

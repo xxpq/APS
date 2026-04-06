@@ -50,12 +50,13 @@ var (
 )
 
 type inboundConnectionSession struct {
-	SessionID      string
-	RemoteIP       string
-	RemoteAddr     string
-	OpenedAt       time.Time
-	LastSeenAt     time.Time
-	TLSEstablished bool
+	SessionID       string
+	RemoteIP        string
+	RemoteAddr      string
+	OpenedAt        time.Time
+	LastSeenAt      time.Time
+	TLSEstablished  bool
+	RateLimitExempt bool
 }
 
 type inboundConnectionRecord struct {
@@ -273,7 +274,11 @@ func (cm *ConnectionManager) CloseAll() {
 }
 
 func acquireInboundConnectionSession(remoteAddr net.Addr) (inboundConnectionSession, error) {
-	return endpointInboundGuard.acquire(remoteAddr)
+	return endpointInboundGuard.acquire(remoteAddr, false)
+}
+
+func acquireInboundConnectionSessionWithExemption(remoteAddr net.Addr, exempt bool) (inboundConnectionSession, error) {
+	return endpointInboundGuard.acquire(remoteAddr, exempt)
 }
 
 func markInboundConnectionTLSEstablished(sessionID string) {
@@ -326,7 +331,7 @@ func generateInboundSessionID() string {
 	return strconv.FormatInt(time.Now().UTC().UnixNano(), 16) + "-" + strconv.FormatUint(seq, 16)
 }
 
-func (g *inboundConnectionGuard) acquire(remoteAddr net.Addr) (inboundConnectionSession, error) {
+func (g *inboundConnectionGuard) acquire(remoteAddr net.Addr, rateLimitExempt bool) (inboundConnectionSession, error) {
 	ip := parseRemoteIP(remoteAddr)
 	if ip == "" {
 		return inboundConnectionSession{}, errors.New("missing remote ip")
@@ -340,30 +345,35 @@ func (g *inboundConnectionGuard) acquire(remoteAddr net.Addr) (inboundConnection
 	state := g.ensureIPStateLocked(ip)
 	g.pruneIPStateLocked(state, now)
 
-	if !state.BlockedUntil.IsZero() && now.Before(state.BlockedUntil) {
-		return inboundConnectionSession{}, errInboundSessionBlocked
-	}
-	if len(state.Attempts) >= endpointInboundMaxPerIPPerWindow {
-		state.BlockedUntil = now.Add(endpointInboundAuthCooldown)
-		return inboundConnectionSession{}, errInboundSessionRateLimited
-	}
-	if state.Active >= endpointInboundMaxConcurrentPerIP {
-		return inboundConnectionSession{}, errInboundSessionRateLimited
-	}
-	if state.PendingTLS >= endpointInboundMaxPendingTLSPerIP {
-		return inboundConnectionSession{}, errInboundSessionRateLimited
+	if !rateLimitExempt {
+		if !state.BlockedUntil.IsZero() && now.Before(state.BlockedUntil) {
+			return inboundConnectionSession{}, errInboundSessionBlocked
+		}
+		if len(state.Attempts) >= endpointInboundMaxPerIPPerWindow {
+			state.BlockedUntil = now.Add(endpointInboundAuthCooldown)
+			return inboundConnectionSession{}, errInboundSessionRateLimited
+		}
+		if state.Active >= endpointInboundMaxConcurrentPerIP {
+			return inboundConnectionSession{}, errInboundSessionRateLimited
+		}
+		if state.PendingTLS >= endpointInboundMaxPendingTLSPerIP {
+			return inboundConnectionSession{}, errInboundSessionRateLimited
+		}
 	}
 
 	sessionID := generateInboundSessionID()
 	session := inboundConnectionSession{
-		SessionID:  sessionID,
-		RemoteIP:   ip,
-		RemoteAddr: strings.TrimSpace(remoteAddr.String()),
-		OpenedAt:   now,
-		LastSeenAt: now,
+		SessionID:       sessionID,
+		RemoteIP:        ip,
+		RemoteAddr:      strings.TrimSpace(remoteAddr.String()),
+		OpenedAt:        now,
+		LastSeenAt:      now,
+		RateLimitExempt: rateLimitExempt,
 	}
 
-	state.Attempts = append(state.Attempts, now)
+	if !rateLimitExempt {
+		state.Attempts = append(state.Attempts, now)
+	}
 	state.Active++
 	state.PendingTLS++
 	g.sessions[sessionID] = session

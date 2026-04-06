@@ -52,7 +52,64 @@ var (
 	}{
 		seen: make(map[string]int64),
 	}
+	portMapperRuntime = struct {
+		mu     sync.Mutex
+		mapper *PortMapper
+		owner  *TunnelConn
+	}{}
 )
+
+func applyPortMappingsRuntime(mappings []PortMappingConfig, tc *TunnelConn) {
+	normalized := clonePortMappingsForContext(mappings)
+
+	portMapperRuntime.mu.Lock()
+	defer portMapperRuntime.mu.Unlock()
+
+	if len(normalized) == 0 {
+		if portMapperRuntime.mapper != nil {
+			portMapperRuntime.mapper.Stop()
+			portMapperRuntime.mapper = nil
+			portMapper = nil
+			log.Printf("[PORT-MAP] Disabled (no mappings)")
+		}
+		if portMapperRuntime.owner == tc {
+			portMapperRuntime.owner = nil
+		}
+		return
+	}
+
+	if portMapperRuntime.mapper == nil {
+		pm := NewPortMapper(normalized)
+		pm.SetTunnelConn(tc)
+		if err := pm.Start(); err != nil {
+			log.Printf("[PORT-MAP] Failed to apply mappings: %v", err)
+		}
+		portMapperRuntime.mapper = pm
+		portMapper = pm
+		portMapperRuntime.owner = tc
+		log.Printf("[PORT-MAP] Applied %d mapping(s)", len(normalized))
+		return
+	}
+
+	portMapperRuntime.mapper.UpdateMappings(normalized)
+	portMapperRuntime.mapper.SetTunnelConn(tc)
+	portMapperRuntime.owner = tc
+	portMapper = portMapperRuntime.mapper
+	log.Printf("[PORT-MAP] Updated %d mapping(s)", len(normalized))
+}
+
+func releasePortMappingsTunnel(tc *TunnelConn) {
+	portMapperRuntime.mu.Lock()
+	defer portMapperRuntime.mu.Unlock()
+
+	if portMapperRuntime.owner != tc {
+		return
+	}
+	if portMapperRuntime.mapper != nil {
+		portMapperRuntime.mapper.SetTunnelConn(nil)
+	}
+	portMapperRuntime.owner = nil
+}
 
 func GetMediumBuffer() []byte { return mediumBufPool.Get().([]byte) }
 func PutMediumBuffer(b []byte) {
@@ -1042,6 +1099,8 @@ func runTCPTunnelSession(ctx context.Context, connCtx ImmutableConnectionContext
 	if err := endpointSSHManager.Apply(connCtx.SSH); err != nil {
 		log.Printf("[SSH] Failed to apply runtime SSH config: %v", err)
 	}
+	applyPortMappingsRuntime(sessionState.PortMappings, tc)
+	defer releasePortMappingsTunnel(tc)
 	controlState := NewControlPlaneInboundState()
 
 	// Start message handling loop (on control stream)
@@ -1124,6 +1183,8 @@ func handleTCPMessage(tc *TunnelConn, msg *TunnelMessage, km *SessionKeyManager,
 		handleTCPProxyDataBinary(msg)
 	case MsgTypeProxyClose:
 		handleTCPProxyClose(msg)
+	case MsgTypePortForwardRequest:
+		handlePortForwardRequestMsg(tc, msg)
 	case MsgTypePortForwardResponse:
 		handlePortForwardResponse(tc, msg)
 	case MsgTypePortForwardData:
@@ -2136,6 +2197,9 @@ func handleConfigUpdate(tc *TunnelConn, msg *TunnelMessage, sessionState *Tunnel
 		return
 	}
 
+	updatedMappings := clonePortMappingsForContext(sessionState.PortMappings)
+	applyPortMappingsRuntime(updatedMappings, tc)
+
 	sshState := "disabled"
 	if payload.SSH != nil {
 		sshState = "configured"
@@ -2324,6 +2388,10 @@ func handleIncomingStream(stream net.Conn, controlTc *TunnelConn) {
 	if msg.Type != MsgTypeProxyConnect {
 		if msg.Type == MsgTypeRequestStart {
 			handleIncomingRequestStream(tc, stream, msg, controlTc == nil)
+			return
+		}
+		if msg.Type == MsgTypePortForwardRequest {
+			handleIncomingPortForwardStream(tc, stream, msg)
 			return
 		}
 		log.Printf("Unexpected message type on new stream: %d", msg.Type)
@@ -2517,6 +2585,219 @@ func handleIncomingStream(stream net.Conn, controlTc *TunnelConn) {
 
 	wg.Wait()
 	DebugLog("[PROXY %s] Stream copy finished", connID)
+}
+
+func handleIncomingPortForwardStream(tc *TunnelConn, stream net.Conn, bootstrap *TunnelMessage) {
+	var payload PortForwardRequestPayload
+	if err := bootstrap.ParseJSON(&payload); err != nil {
+		log.Printf("[PORT-MAP] Failed to parse inbound P2P request: %v", err)
+		return
+	}
+
+	connectionID := strings.TrimSpace(payload.ConnectionID)
+	remoteTarget := strings.TrimSpace(payload.RemoteTarget)
+	targetEndpoint := strings.TrimSpace(payload.TargetEndpoint)
+	nextHop := strings.TrimSpace(payload.GridNextHop)
+	payload.GridHops = normalizeGridHops(payload.GridHops)
+	sourceClient := strings.TrimSpace(payload.ClientIP)
+	if sourceClient == "" {
+		sourceClient = "unknown-source"
+	}
+	if targetEndpoint == "" {
+		targetEndpoint = GetEffectiveEndpointName()
+		payload.TargetEndpoint = targetEndpoint
+	}
+	if connectionID == "" || remoteTarget == "" {
+		_ = tc.SendJSON(MsgTypePortForwardResponse, PortForwardResponsePayload{
+			ConnectionID: connectionID,
+			Success:      false,
+			Error:        "invalid p2p port-forward request",
+		})
+		return
+	}
+	if payload.HopCount > endpointHopGuardMax {
+		_ = tc.SendJSON(MsgTypePortForwardResponse, PortForwardResponsePayload{
+			ConnectionID: connectionID,
+			Success:      false,
+			Error:        fmt.Sprintf("hop_guard rejected hop_count=%d max_hop=%d", payload.HopCount, endpointHopGuardMax),
+		})
+		return
+	}
+
+	DebugLog("[PORT-MAP] Inbound P2P request conn=%s from=%s target_endpoint=%s remote_target=%s",
+		connectionID, sourceClient, targetEndpoint, remoteTarget)
+
+	selfNode := normalizeGatewayNodeID(GetEffectiveEndpointName())
+	targetNode := normalizeGatewayNodeID(targetEndpoint)
+	nextHopNode := normalizeGatewayNodeID(nextHop)
+	if nextHopNode != "" && (selfNode == "" || !strings.EqualFold(nextHopNode, selfNode)) {
+		handleIncomingPortForwardTransit(tc, stream, payload, sourceClient)
+		return
+	}
+	if targetNode != "" && selfNode != "" && !strings.EqualFold(targetNode, selfNode) {
+		payload.GridNextHop = targetNode
+		handleIncomingPortForwardTransit(tc, stream, payload, sourceClient)
+		return
+	}
+
+	backendConn, err := net.DialTimeout("tcp", remoteTarget, 8*time.Second)
+	if err != nil {
+		log.Printf("[PORT-MAP] Inbound P2P connect failed conn=%s remote_target=%s: %v", connectionID, remoteTarget, err)
+		_ = tc.SendJSON(MsgTypePortForwardResponse, PortForwardResponsePayload{
+			ConnectionID: connectionID,
+			Success:      false,
+			Error:        err.Error(),
+		})
+		return
+	}
+	defer backendConn.Close()
+
+	if err := tc.SendJSON(MsgTypePortForwardResponse, PortForwardResponsePayload{
+		ConnectionID: connectionID,
+		Success:      true,
+	}); err != nil {
+		log.Printf("[PORT-MAP] Inbound P2P response send failed conn=%s: %v", connectionID, err)
+		return
+	}
+
+	DebugLog("[PORT-MAP] Inbound P2P established conn=%s target_endpoint=%s remote_target=%s",
+		connectionID, targetEndpoint, remoteTarget)
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		_, _ = io.Copy(backendConn, stream)
+		_ = backendConn.SetReadDeadline(time.Now())
+	}()
+	go func() {
+		defer wg.Done()
+		_, _ = io.Copy(stream, backendConn)
+		_ = stream.SetReadDeadline(time.Now())
+	}()
+	wg.Wait()
+}
+
+func handleIncomingPortForwardTransit(tc *TunnelConn, upstream net.Conn, payload PortForwardRequestPayload, sourceClient string) {
+	connectionID := strings.TrimSpace(payload.ConnectionID)
+	targetEndpoint := normalizeGatewayNodeID(strings.TrimSpace(payload.TargetEndpoint))
+	candidates := buildPortForwardTransitCandidates(payload)
+	if len(candidates) == 0 {
+		_ = tc.SendJSON(MsgTypePortForwardResponse, PortForwardResponsePayload{
+			ConnectionID: connectionID,
+			Success:      false,
+			Error:        "no p2p transit candidate available",
+		})
+		return
+	}
+
+	relayConn, selectedNode, err := dialPortForwardPeerCandidates(candidates)
+	if err != nil {
+		_ = tc.SendJSON(MsgTypePortForwardResponse, PortForwardResponsePayload{
+			ConnectionID: connectionID,
+			Success:      false,
+			Error:        err.Error(),
+		})
+		return
+	}
+	defer relayConn.Close()
+
+	relayPayload := payload
+	relayPayload.HopCount = payload.HopCount + 1
+	if relayPayload.HopCount > endpointHopGuardMax {
+		_ = tc.SendJSON(MsgTypePortForwardResponse, PortForwardResponsePayload{
+			ConnectionID: connectionID,
+			Success:      false,
+			Error:        fmt.Sprintf("hop_guard rejected hop_count=%d max_hop=%d", relayPayload.HopCount, endpointHopGuardMax),
+		})
+		return
+	}
+	if targetEndpoint != "" && strings.EqualFold(normalizeGatewayNodeID(selectedNode), targetEndpoint) {
+		relayPayload.GridNextHop = ""
+		relayPayload.GridHops = nil
+	} else {
+		relayPayload.GridNextHop = targetEndpoint
+		relayPayload.GridHops = buildPortForwardTransitBackups(targetEndpoint, candidates, selectedNode)
+	}
+
+	relayTC := NewTunnelConn(relayConn)
+	if err := relayTC.SendJSON(MsgTypePortForwardRequest, relayPayload); err != nil {
+		_ = tc.SendJSON(MsgTypePortForwardResponse, PortForwardResponsePayload{
+			ConnectionID: connectionID,
+			Success:      false,
+			Error:        fmt.Sprintf("send transit request failed: %v", err),
+		})
+		return
+	}
+
+	_ = relayConn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	respMsg, err := relayTC.ReadMessage()
+	_ = relayConn.SetReadDeadline(time.Time{})
+	if err != nil {
+		_ = tc.SendJSON(MsgTypePortForwardResponse, PortForwardResponsePayload{
+			ConnectionID: connectionID,
+			Success:      false,
+			Error:        fmt.Sprintf("read transit response failed: %v", err),
+		})
+		return
+	}
+	if respMsg.Type != MsgTypePortForwardResponse {
+		_ = tc.SendJSON(MsgTypePortForwardResponse, PortForwardResponsePayload{
+			ConnectionID: connectionID,
+			Success:      false,
+			Error:        fmt.Sprintf("unexpected transit response type %d", respMsg.Type),
+		})
+		return
+	}
+
+	var resp PortForwardResponsePayload
+	if err := respMsg.ParseJSON(&resp); err != nil {
+		_ = tc.SendJSON(MsgTypePortForwardResponse, PortForwardResponsePayload{
+			ConnectionID: connectionID,
+			Success:      false,
+			Error:        fmt.Sprintf("parse transit response failed: %v", err),
+		})
+		return
+	}
+
+	_ = tc.SendJSON(MsgTypePortForwardResponse, resp)
+	if !resp.Success {
+		return
+	}
+
+	DebugLog("[PORT-MAP] Transit relay established conn=%s from=%s via=%s next=%s backups=%v",
+		connectionID, sourceClient, selectedNode, strings.TrimSpace(relayPayload.GridNextHop), relayPayload.GridHops)
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		_, _ = io.Copy(relayConn, upstream)
+		_ = relayConn.SetReadDeadline(time.Now())
+	}()
+	go func() {
+		defer wg.Done()
+		_, _ = io.Copy(upstream, relayConn)
+		_ = upstream.SetReadDeadline(time.Now())
+	}()
+	wg.Wait()
+}
+
+func buildPortForwardTransitCandidates(payload PortForwardRequestPayload) []string {
+	target := normalizeGatewayNodeID(strings.TrimSpace(payload.TargetEndpoint))
+	explicit := make([]string, 0, len(payload.GridHops)+2)
+	if next := normalizeGatewayNodeID(strings.TrimSpace(payload.GridNextHop)); next != "" {
+		explicit = append(explicit, next)
+	}
+	for _, hop := range normalizeGridHops(payload.GridHops) {
+		if nodeID := normalizeGatewayNodeID(hop); nodeID != "" {
+			explicit = append(explicit, nodeID)
+		}
+	}
+	if target != "" {
+		explicit = append(explicit, target)
+	}
+	return buildPortForwardPeerCandidates(target, explicit)
 }
 
 func handleIncomingRequestStream(tc *TunnelConn, stream net.Conn, bootstrap *TunnelMessage, fromGatewayPeer bool) {
