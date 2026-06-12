@@ -26,6 +26,7 @@ import (
 
 	"aps/asn"
 	"aps/firewall"
+	"aps/logging"
 )
 
 // 对象池 - 用于高并发场景下复用对象，减少 GC 压力
@@ -214,11 +215,11 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 
 				logHeaders := ""
 				if logConfig.LogLevel >= 2 {
-					logHeaders = HeadersToJSON(r.Header)
+					logHeaders = logging.HeadersToJSON(r.Header)
 				}
 
 				go func() {
-					entry := &LogEntry{
+					entry := &logging.LogEntry{
 						Timestamp:    startTime,
 						Protocol:     logProto,
 						URL:          logURL,

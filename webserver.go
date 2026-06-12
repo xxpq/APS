@@ -22,6 +22,7 @@ import (
 	"time"
 	"aps/asn"
 	"aps/firewall"
+	"aps/logging"
 )
 
 const apsTLSPinTokenPrefix = "apspt1."
@@ -111,13 +112,13 @@ type AdminHandlers struct {
 	// dataStore      *DataStore // Removed, no longer needed
 	statsCollector *StatsCollector
 	statsDB        *StatsDB
-	loggingDB      *LoggingDB
-	logBroadcaster *LogBroadcaster
+	loggingDB      *logging.LoggingDB
+	logBroadcaster *logging.LogBroadcaster
 	rateLimiter    *RateLimitEngine
 }
 
 // NewAdminHandlers creates a new AdminHandlers instance.
-func NewAdminHandlers(config *Config, configPath string, serverName string, statsCollector *StatsCollector, statsDB *StatsDB, loggingDB *LoggingDB, logBroadcaster *LogBroadcaster, rateLimiter *RateLimitEngine) *AdminHandlers {
+func NewAdminHandlers(config *Config, configPath string, serverName string, statsCollector *StatsCollector, statsDB *StatsDB, loggingDB *logging.LoggingDB, logBroadcaster *logging.LogBroadcaster, rateLimiter *RateLimitEngine) *AdminHandlers {
 	return &AdminHandlers{
 		config:         config,
 		configPath:     configPath,
@@ -1611,7 +1612,7 @@ func (h *AdminHandlers) handleLogs(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		// Parsing query parameters
 		query := r.URL.Query()
-		filter := LogQueryFilter{
+		filter := logging.LogQueryFilter{
 			Page:     1,
 			PageSize: 50,
 		}
@@ -1669,7 +1670,7 @@ func (h *AdminHandlers) handleLogs(w http.ResponseWriter, r *http.Request) {
 		}
 
 		response := struct {
-			Logs  []LogEntry `json:"logs"`
+			Logs  []logging.LogEntry `json:"logs"`
 			Total int        `json:"total"`
 			Page  int        `json:"page"`
 			Size  int        `json:"pageSize"`

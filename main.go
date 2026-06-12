@@ -27,6 +27,7 @@ import (
 	_ "modernc.org/sqlite"
 	"aps/asn"
 	"aps/cache"
+	"aps/logging"
 )
 
 // ServerManager manages the lifecycle of multiple HTTP servers.
@@ -47,8 +48,8 @@ type ServerManager struct {
 	staticCache    *cache.StaticCacheManager
 	replayManager  *ReplayManager
 	statsDB        *StatsDB
-	loggingDB      *LoggingDB
-	logBroadcaster *LogBroadcaster
+	loggingDB      *logging.LoggingDB
+	logBroadcaster *logging.LogBroadcaster
 	rateLimiter    *RateLimitEngine
 }
 
@@ -61,7 +62,7 @@ func (c *tunnelInboundConn) TunnelServerName() string {
 	return c.serverName
 }
 
-func NewServerManager(config *Config, configFile string, tunnelManager TunnelManagerInterface, scriptRunner *ScriptRunner, trafficShaper *TrafficShaper, stats *StatsCollector, staticCache *cache.StaticCacheManager, replayManager *ReplayManager, statsDB *StatsDB, loggingDB *LoggingDB, logBroadcaster *LogBroadcaster) *ServerManager {
+func NewServerManager(config *Config, configFile string, tunnelManager TunnelManagerInterface, scriptRunner *ScriptRunner, trafficShaper *TrafficShaper, stats *StatsCollector, staticCache *cache.StaticCacheManager, replayManager *ReplayManager, statsDB *StatsDB, loggingDB *logging.LoggingDB, logBroadcaster *logging.LogBroadcaster) *ServerManager {
 	rateLimiter := NewRateLimitEngine(config.RateLimitRules)
 	// go rateLimiter.CleanupExpired() // RateLimitEngine handles cleanup internally or doesn't need explicit cleanup loop yet?
 	// The new engine uses sync.Map and doesn't have a cleanup loop yet.
@@ -437,7 +438,7 @@ func main() {
 	defer statsDB.Close()
 
 	// Initialize logging module with shared database
-	loggingDB, err := NewLoggingDB(db)
+	loggingDB, err := logging.NewLoggingDB(db)
 	if err != nil {
 		log.Fatalf("Failed to initialize logging DB: %v", err)
 	}
@@ -451,8 +452,8 @@ func main() {
 		asn.GlobalASNCache = asn.NewASNCacheWithoutDB(1000)
 	}
 
-	// Initialize LogBroadcaster to capture logs for SSE
-	logBroadcaster := NewLogBroadcaster(os.Stderr)
+	// Initialize logging.LogBroadcaster to capture logs for SSE
+	logBroadcaster := logging.NewLogBroadcaster(os.Stderr)
 	log.SetOutput(logBroadcaster)
 
 	// Load initial quota usage from DB
@@ -567,7 +568,7 @@ func (sm *ServerManager) StartAll() {
 	}
 }
 
-func createServerHandler(serverName string, mappings []*Mapping, serverConfig *ListenConfig, config *Config, configFile string, tunnelManager TunnelManagerInterface, scriptRunner *ScriptRunner, trafficShaper *TrafficShaper, stats *StatsCollector, staticCache *cache.StaticCacheManager, replayManager *ReplayManager, isACMEEnabled bool, statsDB *StatsDB, loggingDB *LoggingDB, logBroadcaster *LogBroadcaster, rateLimiter *RateLimitEngine) http.Handler {
+func createServerHandler(serverName string, mappings []*Mapping, serverConfig *ListenConfig, config *Config, configFile string, tunnelManager TunnelManagerInterface, scriptRunner *ScriptRunner, trafficShaper *TrafficShaper, stats *StatsCollector, staticCache *cache.StaticCacheManager, replayManager *ReplayManager, isACMEEnabled bool, statsDB *StatsDB, loggingDB *logging.LoggingDB, logBroadcaster *logging.LogBroadcaster, rateLimiter *RateLimitEngine) http.Handler {
 	mux := http.NewServeMux()
 	proxy := NewMapRemoteProxy(config, tunnelManager, scriptRunner, trafficShaper, stats, staticCache, loggingDB, serverName, rateLimiter)
 
@@ -1008,7 +1009,7 @@ func extractDimensionStats(m *Metrics) *DimensionStats {
 }
 
 // startLogCleanup starts a goroutine that periodically cleans up old logs
-func startLogCleanup(config *Config, loggingDB *LoggingDB) {
+func startLogCleanup(config *Config, loggingDB *logging.LoggingDB) {
 	ticker := time.NewTicker(1 * time.Hour)
 	go func() {
 		for range ticker.C {

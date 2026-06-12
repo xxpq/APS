@@ -16,6 +16,7 @@ import (
 
 	"aps/asn"
 	"aps/firewall"
+	"aps/logging"
 )
 
 // RawTCPServer manages a raw TCP server for forwarding connections
@@ -27,7 +28,7 @@ type RawTCPServer struct {
 	tunnelManager TunnelManagerInterface
 	trafficShaper *TrafficShaper
 	stats         *StatsCollector
-	loggingDB     *LoggingDB
+	loggingDB     *logging.LoggingDB
 	// dataStore     *DataStore // Removed, no longer needed
 	mappings []*Mapping
 	mu       sync.Mutex
@@ -62,7 +63,7 @@ func formatLocationTag(ipWithPort string) string {
 
 // NewRawTCPServer creates a new raw TCP server
 func NewRawTCPServer(name string, config *ListenConfig, appConfig *Config, mappings []*Mapping,
-	tunnelManager TunnelManagerInterface, trafficShaper *TrafficShaper, stats *StatsCollector, loggingDB *LoggingDB) *RawTCPServer {
+	tunnelManager TunnelManagerInterface, trafficShaper *TrafficShaper, stats *StatsCollector, loggingDB *logging.LoggingDB) *RawTCPServer {
 	return &RawTCPServer{
 		name:          name,
 		config:        config,
@@ -210,7 +211,7 @@ func (s *RawTCPServer) handleConnection(clientConn net.Conn) {
 			)
 
 			if logConfig.LogLevel > 0 {
-				logEntry := &LogEntry{
+				logEntry := &logging.LogEntry{
 					Timestamp:    startTime,
 					Protocol:     "rawtcp",
 					Destination:  ruleKey, // usually holds fromURL, maybe toURL is better? Requirements say "to address".
@@ -241,7 +242,7 @@ func (s *RawTCPServer) handleConnection(clientConn net.Conn) {
 					logEntry.FirewallName = s.config.Firewall
 				}
 
-				go func(entry *LogEntry) {
+				go func(entry *logging.LogEntry) {
 					if err := s.loggingDB.AddLog(entry); err != nil {
 						DebugLog("[LOGGING] Failed to record rawtcp log: %v", err)
 					}
