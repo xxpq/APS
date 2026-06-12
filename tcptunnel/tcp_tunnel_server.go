@@ -1,4 +1,4 @@
-package main
+package tcptunnel
 
 import (
 	"context"
@@ -24,6 +24,7 @@ import (
 	"aps/security"
 	"aps/stats"
 	tlsx "aps/tls"
+	"aps/util"
 )
 
 const responseRouteEnqueueTimeout = 10 * time.Second
@@ -40,6 +41,10 @@ type TCPTunnelServer struct {
 	running       bool
 	replayMu      sync.Mutex
 	replaySeen    map[string]int64
+	// WhitelistCheck returns true if the given host is in the ACME whitelist.
+	// It is supplied by the caller (main package) because the whitelist lives
+	// in the main package and this package cannot import it.
+	WhitelistCheck func(host string) bool
 }
 
 const secureRegistrationWindow = 90 * time.Second
@@ -263,7 +268,7 @@ func (s *TCPTunnelServer) Start(addr string) error {
 	s.listener = listener
 	s.running = true
 
-	DebugLog("[TCP TUNNEL] Server listening on %s", addr)
+	util.DebugLog("[TCP TUNNEL] Server listening on %s", addr)
 
 	go s.acceptLoop()
 
@@ -305,12 +310,18 @@ func (s *TCPTunnelServer) acceptLoop() {
 			if !running {
 				return
 			}
-			DebugLog("[TCP TUNNEL] Accept error: %v", err)
+			util.DebugLog("[TCP TUNNEL] Accept error: %v", err)
 			continue
 		}
 
 		go s.handleConnection(conn)
 	}
+}
+
+// HandleTunnelConn is an exported wrapper for handleConnection used by callers
+// outside this package (e.g., aps/tunnel).
+func (s *TCPTunnelServer) HandleTunnelConn(conn net.Conn) {
+	s.handleConnection(conn)
 }
 
 // handleConnection handles a new endpoint connection
@@ -330,7 +341,7 @@ func (s *TCPTunnelServer) handleConnection(conn net.Conn) {
 
 	tc := NewTunnelConn(conn)
 	remoteAddr := conn.RemoteAddr().String()
-	DebugLog("[TCP TUNNEL] New connection from %s", remoteAddr)
+	util.DebugLog("[TCP TUNNEL] New connection from %s", remoteAddr)
 
 	// Set read deadline for registration
 	conn.SetReadDeadline(time.Now().Add(30 * time.Second))
@@ -338,13 +349,13 @@ func (s *TCPTunnelServer) handleConnection(conn net.Conn) {
 	// Read first message - must be registration
 	msg, err := tc.ReadMessage()
 	if err != nil {
-		DebugLog("[TCP TUNNEL] Failed to read registration from %s: %v", remoteAddr, err)
+		util.DebugLog("[TCP TUNNEL] Failed to read registration from %s: %v", remoteAddr, err)
 		tc.Close()
 		return
 	}
 
 	if msg.Type != MsgTypeRegister {
-		DebugLog("[TCP TUNNEL] Expected registration message, got type %d from %s", msg.Type, remoteAddr)
+		util.DebugLog("[TCP TUNNEL] Expected registration message, got type %d from %s", msg.Type, remoteAddr)
 		tc.SendJSON(MsgTypeRegisterAck, RegisterAckPayload{
 			Success: false,
 			Error:   "first message must be registration",
@@ -356,7 +367,7 @@ func (s *TCPTunnelServer) handleConnection(conn net.Conn) {
 	// Parse registration
 	var reg RegisterPayload
 	if err := msg.ParseJSON(&reg); err != nil {
-		DebugLog("[TCP TUNNEL] Invalid registration payload from %s: %v", remoteAddr, err)
+		util.DebugLog("[TCP TUNNEL] Invalid registration payload from %s: %v", remoteAddr, err)
 		tc.SendJSON(MsgTypeRegisterAck, RegisterAckPayload{
 			Success: false,
 			Error:   "invalid registration payload",
@@ -372,7 +383,7 @@ func (s *TCPTunnelServer) handleConnection(conn net.Conn) {
 	s.mu.RUnlock()
 
 	if !tunnelExists {
-		DebugLog("[TCP TUNNEL] Tunnel '%s' not found from %s", reg.TunnelName, remoteAddr)
+		util.DebugLog("[TCP TUNNEL] Tunnel '%s' not found from %s", reg.TunnelName, remoteAddr)
 		tc.SendJSON(MsgTypeRegisterAck, RegisterAckPayload{
 			Success: false,
 			Error:   "tunnel not found",
@@ -381,7 +392,7 @@ func (s *TCPTunnelServer) handleConnection(conn net.Conn) {
 		return
 	}
 	if strings.TrimSpace(reg.ServerName) == "" {
-		DebugLog("[TCP TUNNEL] Missing server_name in registration from %s", remoteAddr)
+		util.DebugLog("[TCP TUNNEL] Missing server_name in registration from %s", remoteAddr)
 		tc.SendJSON(MsgTypeRegisterAck, RegisterAckPayload{
 			Success: false,
 			Error:   "missing server_name",
@@ -390,7 +401,7 @@ func (s *TCPTunnelServer) handleConnection(conn net.Conn) {
 		return
 	}
 	if listenerServerName == "" {
-		DebugLog("[TCP TUNNEL] Listener server name unavailable for registration from %s", remoteAddr)
+		util.DebugLog("[TCP TUNNEL] Listener server name unavailable for registration from %s", remoteAddr)
 		tc.SendJSON(MsgTypeRegisterAck, RegisterAckPayload{
 			Success: false,
 			Error:   "listener server context unavailable",
@@ -399,7 +410,7 @@ func (s *TCPTunnelServer) handleConnection(conn net.Conn) {
 		return
 	}
 	if !isTunnelBoundToServer(tunnelConfig, reg.ServerName) {
-		DebugLog("[TCP TUNNEL] tunnel '%s' is not bound to server '%s' for %s", reg.TunnelName, reg.ServerName, remoteAddr)
+		util.DebugLog("[TCP TUNNEL] tunnel '%s' is not bound to server '%s' for %s", reg.TunnelName, reg.ServerName, remoteAddr)
 		tc.SendJSON(MsgTypeRegisterAck, RegisterAckPayload{
 			Success: false,
 			Error:   "server_name not bound to tunnel",
@@ -408,7 +419,7 @@ func (s *TCPTunnelServer) handleConnection(conn net.Conn) {
 		return
 	}
 	if strings.TrimSpace(reg.ServerName) != listenerServerName {
-		DebugLog("[TCP TUNNEL] server_name mismatch reg='%s' listener='%s' from %s", reg.ServerName, listenerServerName, remoteAddr)
+		util.DebugLog("[TCP TUNNEL] server_name mismatch reg='%s' listener='%s' from %s", reg.ServerName, listenerServerName, remoteAddr)
 		tc.SendJSON(MsgTypeRegisterAck, RegisterAckPayload{
 			Success: false,
 			Error:   "server_name mismatch",
@@ -419,7 +430,7 @@ func (s *TCPTunnelServer) handleConnection(conn net.Conn) {
 
 	// Enforce secure handshake; no legacy compatibility mode.
 	if reg.CipherSuite != SecureCipherSuiteSPKITS {
-		DebugLog("[TCP TUNNEL] Unsupported cipher suite '%s' from %s", reg.CipherSuite, remoteAddr)
+		util.DebugLog("[TCP TUNNEL] Unsupported cipher suite '%s' from %s", reg.CipherSuite, remoteAddr)
 		tc.SendJSON(MsgTypeRegisterAck, RegisterAckPayload{
 			Success: false,
 			Error:   "unsupported cipher suite",
@@ -428,7 +439,7 @@ func (s *TCPTunnelServer) handleConnection(conn net.Conn) {
 		return
 	}
 	if reg.ServerHost == "" || reg.PinHash == "" || strings.TrimSpace(reg.ConfigID) == "" || strings.TrimSpace(reg.AuthProof) == "" || reg.Timestamp == 0 {
-		DebugLog("[TCP TUNNEL] Missing secure registration fields from %s", remoteAddr)
+		util.DebugLog("[TCP TUNNEL] Missing secure registration fields from %s", remoteAddr)
 		tc.SendJSON(MsgTypeRegisterAck, RegisterAckPayload{
 			Success: false,
 			Error:   "missing secure registration fields",
@@ -437,7 +448,7 @@ func (s *TCPTunnelServer) handleConnection(conn net.Conn) {
 		return
 	}
 	if !isRegistrationTimestampFresh(reg.Timestamp) {
-		DebugLog("[TCP TUNNEL] Registration timestamp out of window from %s", remoteAddr)
+		util.DebugLog("[TCP TUNNEL] Registration timestamp out of window from %s", remoteAddr)
 		tc.SendJSON(MsgTypeRegisterAck, RegisterAckPayload{
 			Success: false,
 			Error:   "registration timestamp out of window",
@@ -446,7 +457,7 @@ func (s *TCPTunnelServer) handleConnection(conn net.Conn) {
 		return
 	}
 	if !endpointExists || endpointConfig == nil {
-		DebugLog("[TCP TUNNEL] Config id '%s' not found from %s", reg.ConfigID, remoteAddr)
+		util.DebugLog("[TCP TUNNEL] Config id '%s' not found from %s", reg.ConfigID, remoteAddr)
 		tc.SendJSON(MsgTypeRegisterAck, RegisterAckPayload{
 			Success: false,
 			Error:   "config id not found",
@@ -455,7 +466,7 @@ func (s *TCPTunnelServer) handleConnection(conn net.Conn) {
 		return
 	}
 	if endpointConfig.TunnelName != reg.TunnelName || endpointConfig.EndpointName != reg.EndpointName {
-		DebugLog("[TCP TUNNEL] CID binding mismatch for cid '%s' from %s", reg.ConfigID, remoteAddr)
+		util.DebugLog("[TCP TUNNEL] CID binding mismatch for cid '%s' from %s", reg.ConfigID, remoteAddr)
 		tc.SendJSON(MsgTypeRegisterAck, RegisterAckPayload{
 			Success: false,
 			Error:   "cid binding mismatch",
@@ -477,7 +488,7 @@ func (s *TCPTunnelServer) handleConnection(conn net.Conn) {
 		}
 		s.mu.RUnlock()
 		if alreadyOnline {
-			DebugLog("[TCP TUNNEL] multi-node denied for tunnel='%s' endpoint='%s' from %s", reg.TunnelName, reg.EndpointName, remoteAddr)
+			util.DebugLog("[TCP TUNNEL] multi-node denied for tunnel='%s' endpoint='%s' from %s", reg.TunnelName, reg.EndpointName, remoteAddr)
 			tc.SendJSON(MsgTypeRegisterAck, RegisterAckPayload{
 				Success: false,
 				Error:   "multiple online nodes are not allowed",
@@ -489,7 +500,7 @@ func (s *TCPTunnelServer) handleConnection(conn net.Conn) {
 
 	effectiveCredential, credErr := security.PeekEndpointSessionCredential(reg.ConfigID, reg.TunnelName, reg.EndpointName)
 	if credErr != nil {
-		DebugLog("[TCP TUNNEL] Missing/invalid session credential for cid '%s' from %s: %v", reg.ConfigID, remoteAddr, credErr)
+		util.DebugLog("[TCP TUNNEL] Missing/invalid session credential for cid '%s' from %s: %v", reg.ConfigID, remoteAddr, credErr)
 		tc.SendJSON(MsgTypeRegisterAck, RegisterAckPayload{
 			Success: false,
 			Error:   "session credential missing or expired",
@@ -497,8 +508,8 @@ func (s *TCPTunnelServer) handleConnection(conn net.Conn) {
 		tc.Close()
 		return
 	}
-	if !isHostInACMEWhitelist(reg.ServerHost) {
-		DebugLog("[TCP TUNNEL] server_host '%s' is not in ACME whitelist from %s", reg.ServerHost, remoteAddr)
+	if s.WhitelistCheck == nil || !s.WhitelistCheck(reg.ServerHost) {
+		util.DebugLog("[TCP TUNNEL] server_host '%s' is not in ACME whitelist from %s", reg.ServerHost, remoteAddr)
 		tc.SendJSON(MsgTypeRegisterAck, RegisterAckPayload{
 			Success: false,
 			Error:   "server_host not in ACME whitelist",
@@ -508,7 +519,7 @@ func (s *TCPTunnelServer) handleConnection(conn net.Conn) {
 	}
 	expectedPinHash, ok := tlsx.LookupTLSPinHashForHost(reg.ServerHost)
 	if !ok {
-		DebugLog("[TCP TUNNEL] TLS pin hash unavailable for host '%s' from %s", reg.ServerHost, remoteAddr)
+		util.DebugLog("[TCP TUNNEL] TLS pin hash unavailable for host '%s' from %s", reg.ServerHost, remoteAddr)
 		tc.SendJSON(MsgTypeRegisterAck, RegisterAckPayload{
 			Success: false,
 			Error:   "tls pin not available for host",
@@ -527,7 +538,7 @@ func (s *TCPTunnelServer) handleConnection(conn net.Conn) {
 		if len(expectedHint) > 12 {
 			expectedHint = expectedHint[:12]
 		}
-		DebugLog("[TCP TUNNEL] TLS pin hash mismatch for host '%s' from %s provided=%s... expected=%s...", reg.ServerHost, remoteAddr, providedHint, expectedHint)
+		util.DebugLog("[TCP TUNNEL] TLS pin hash mismatch for host '%s' from %s provided=%s... expected=%s...", reg.ServerHost, remoteAddr, providedHint, expectedHint)
 		tc.SendJSON(MsgTypeRegisterAck, RegisterAckPayload{
 			Success: false,
 			Error:   "tls pin hash mismatch",
@@ -548,7 +559,7 @@ func (s *TCPTunnelServer) handleConnection(conn net.Conn) {
 		tunnelConfig.KDFSalt,
 	)
 	if proofErr != nil {
-		DebugLog("[TCP TUNNEL] Failed to derive registration proof key for cid '%s' from %s: %v", reg.ConfigID, remoteAddr, proofErr)
+		util.DebugLog("[TCP TUNNEL] Failed to derive registration proof key for cid '%s' from %s: %v", reg.ConfigID, remoteAddr, proofErr)
 		tc.SendJSON(MsgTypeRegisterAck, RegisterAckPayload{
 			Success: false,
 			Error:   "registration proof derivation failed",
@@ -558,7 +569,7 @@ func (s *TCPTunnelServer) handleConnection(conn net.Conn) {
 	}
 	providedProof, err := hex.DecodeString(strings.TrimSpace(reg.AuthProof))
 	if err != nil {
-		DebugLog("[TCP TUNNEL] Invalid auth proof encoding from %s", remoteAddr)
+		util.DebugLog("[TCP TUNNEL] Invalid auth proof encoding from %s", remoteAddr)
 		tc.SendJSON(MsgTypeRegisterAck, RegisterAckPayload{
 			Success: false,
 			Error:   "invalid auth proof encoding",
@@ -568,7 +579,7 @@ func (s *TCPTunnelServer) handleConnection(conn net.Conn) {
 	}
 	expectedProof, _ := hex.DecodeString(expectedProofHex)
 	if !hmac.Equal(providedProof, expectedProof) {
-		DebugLog("[TCP TUNNEL] Auth proof mismatch for cid '%s' from %s", reg.ConfigID, remoteAddr)
+		util.DebugLog("[TCP TUNNEL] Auth proof mismatch for cid '%s' from %s", reg.ConfigID, remoteAddr)
 		tc.SendJSON(MsgTypeRegisterAck, RegisterAckPayload{
 			Success: false,
 			Error:   "auth proof mismatch",
@@ -577,7 +588,7 @@ func (s *TCPTunnelServer) handleConnection(conn net.Conn) {
 		return
 	}
 	if err := s.registerSecureRegistrationReplayToken(reg.ConfigID, reg.Timestamp, strings.TrimSpace(reg.AuthProof)); err != nil {
-		DebugLog("[TCP TUNNEL] Replay rejected for cid '%s' from %s: %v", reg.ConfigID, remoteAddr, err)
+		util.DebugLog("[TCP TUNNEL] Replay rejected for cid '%s' from %s: %v", reg.ConfigID, remoteAddr, err)
 		tc.SendJSON(MsgTypeRegisterAck, RegisterAckPayload{
 			Success: false,
 			Error:   "registration replay detected",
@@ -586,7 +597,7 @@ func (s *TCPTunnelServer) handleConnection(conn net.Conn) {
 		return
 	}
 	if err := security.ConsumeEndpointSessionCredential(reg.ConfigID, reg.TunnelName, reg.EndpointName, effectiveCredential); err != nil {
-		DebugLog("[TCP TUNNEL] Session credential consume failed for cid '%s' from %s: %v", reg.ConfigID, remoteAddr, err)
+		util.DebugLog("[TCP TUNNEL] Session credential consume failed for cid '%s' from %s: %v", reg.ConfigID, remoteAddr, err)
 		tc.SendJSON(MsgTypeRegisterAck, RegisterAckPayload{
 			Success: false,
 			Error:   "session credential already used or invalid",
@@ -621,17 +632,17 @@ func (s *TCPTunnelServer) handleConnection(conn net.Conn) {
 	// Initialize per-connection session key manager
 	endpoint.KeyManager = security.NewSessionKeyManager(effectiveCredential, reg.EndpointName, s.statsDB)
 	if err := endpoint.KeyManager.SetKDFParams(tunnelConfig.KDFVersion, tunnelConfig.KDFSalt); err != nil {
-		DebugLog("[TCP TUNNEL] Failed to set KDF parameters for %s: %v", remoteAddr, err)
+		util.DebugLog("[TCP TUNNEL] Failed to set KDF parameters for %s: %v", remoteAddr, err)
 		tc.Close()
 		return
 	}
 	if err := endpoint.KeyManager.DeriveInitialKey(); err != nil {
-		DebugLog("[TCP TUNNEL] Failed to derive initial key for %s: %v", remoteAddr, err)
+		util.DebugLog("[TCP TUNNEL] Failed to derive initial key for %s: %v", remoteAddr, err)
 		tc.Close()
 		return
 	}
 	if err := endpoint.KeyManager.EnableSecureTransport(securePinHash, reg.ConfigID); err != nil {
-		DebugLog("[TCP TUNNEL] Failed to enable secure transport for %s: %v", remoteAddr, err)
+		util.DebugLog("[TCP TUNNEL] Failed to enable secure transport for %s: %v", remoteAddr, err)
 		tc.Close()
 		return
 	}
@@ -649,20 +660,20 @@ func (s *TCPTunnelServer) handleConnection(conn net.Conn) {
 		Success:            true,
 		CipherSuite:        negotiatedCipherSuite,
 	}); err != nil {
-		DebugLog("[TCP TUNNEL] Failed to send registration ack to %s: %v", remoteAddr, err)
+		util.DebugLog("[TCP TUNNEL] Failed to send registration ack to %s: %v", remoteAddr, err)
 		tc.Close()
 		s.unregisterEndpoint(endpoint.ID)
 		return
 	}
 
-	DebugLog("[TCP TUNNEL] Endpoint '%s' connected to tunnel '%s' (ID: %s)",
+	util.DebugLog("[TCP TUNNEL] Endpoint '%s' connected to tunnel '%s' (ID: %s)",
 		reg.EndpointName, reg.TunnelName, endpoint.ID)
 
 	// Upgrade to SMUX
 	// Server side acts as SMUX server
 	session, err := smux.Server(conn, nil)
 	if err != nil {
-		DebugLog("[TCP TUNNEL] Failed to create SMUX server for %s: %v", remoteAddr, err)
+		util.DebugLog("[TCP TUNNEL] Failed to create SMUX server for %s: %v", remoteAddr, err)
 		tc.Close()
 		s.unregisterEndpoint(endpoint.ID)
 		return
@@ -672,12 +683,12 @@ func (s *TCPTunnelServer) handleConnection(conn net.Conn) {
 	// Accept the first stream for control channel
 	controlStream, err := session.AcceptStream()
 	if err != nil {
-		DebugLog("[TCP TUNNEL] Failed to accept control stream from %s: %v", remoteAddr, err)
+		util.DebugLog("[TCP TUNNEL] Failed to accept control stream from %s: %v", remoteAddr, err)
 		session.Close()
 		s.unregisterEndpoint(endpoint.ID)
 		return
 	}
-	DebugLog("[TCP TUNNEL] Control stream established for %s", endpoint.ID)
+	util.DebugLog("[TCP TUNNEL] Control stream established for %s", endpoint.ID)
 
 	// Replace the connection in TunnelConn with the control stream
 	// Note: We need to create a new TunnelConn or update the existing one
@@ -720,7 +731,7 @@ func (s *TCPTunnelServer) handleConnection(conn net.Conn) {
 	// Wait for endpoint to disconnect
 	<-endpoint.done
 
-	DebugLog("[TCP TUNNEL] Endpoint '%s' disconnected (ID: %s)", reg.EndpointName, endpoint.ID)
+	util.DebugLog("[TCP TUNNEL] Endpoint '%s' disconnected (ID: %s)", reg.EndpointName, endpoint.ID)
 	s.unregisterEndpoint(endpoint.ID)
 }
 
@@ -773,7 +784,7 @@ func (ep *TCPEndpoint) Send(msg *TunnelMessage) error {
 			return errors.New("endpoint closed")
 		case <-time.After(5 * time.Second):
 			// Still full after timeout - this indicates serious congestion
-			DebugLog("[TCP TUNNEL] Send channel timeout for endpoint %s (possible congestion)", ep.ID)
+			util.DebugLog("[TCP TUNNEL] Send channel timeout for endpoint %s (possible congestion)", ep.ID)
 			return errors.New("send timeout - channel congestion")
 		}
 	}
@@ -1130,7 +1141,7 @@ func (ep *TCPEndpoint) readLoop(server *TCPTunnelServer) {
 		case MsgTypeKeyConfirm:
 			ep.handleKeyConfirm(msg)
 		default:
-			DebugLog("[TCP TUNNEL] Unknown message type %d from endpoint %s", msg.Type, ep.ID)
+			util.DebugLog("[TCP TUNNEL] Unknown message type %d from endpoint %s", msg.Type, ep.ID)
 		}
 	}
 }
@@ -1145,21 +1156,21 @@ func (ep *TCPEndpoint) handleResponseMessage(msg *TunnelMessage) {
 	case MsgTypeResponseHeader:
 		var payload ResponseHeaderPayloadTCP
 		if err := msg.ParseJSON(&payload); err != nil {
-			DebugLog("%s [TCP TUNNEL] Invalid response header: %v", basePrefix, err)
+			util.DebugLog("%s [TCP TUNNEL] Invalid response header: %v", basePrefix, err)
 			return
 		}
 		requestID = payload.ID
 	case MsgTypeResponseChunkBin:
 		scopeID, _, err := ParseScopedBinaryPayload(msg.Payload)
 		if err != nil {
-			DebugLog("%s [TCP TUNNEL] Invalid binary response chunk: %v", basePrefix, err)
+			util.DebugLog("%s [TCP TUNNEL] Invalid binary response chunk: %v", basePrefix, err)
 			return
 		}
 		requestID = scopeID
 	case MsgTypeResponseEnd:
 		var payload ResponseEndPayloadTCP
 		if err := msg.ParseJSON(&payload); err != nil {
-			DebugLog("%s [TCP TUNNEL] Invalid response end: %v", basePrefix, err)
+			util.DebugLog("%s [TCP TUNNEL] Invalid response end: %v", basePrefix, err)
 			return
 		}
 		requestID = payload.ID
@@ -1217,7 +1228,7 @@ func (ep *TCPEndpoint) handleResponseMessage(msg *TunnelMessage) {
 
 	defer func() {
 		if r := recover(); r != nil {
-			DebugLog("%s [TCP TUNNEL] Recovered from panic in handleResponseMessage (likely closed channel): %v", logPrefix, r)
+			util.DebugLog("%s [TCP TUNNEL] Recovered from panic in handleResponseMessage (likely closed channel): %v", logPrefix, r)
 		}
 	}()
 
@@ -1238,7 +1249,7 @@ func (ep *TCPEndpoint) handleResponseMessage(msg *TunnelMessage) {
 		return
 	case <-time.After(responseRouteEnqueueTimeout):
 		dropErr := fmt.Errorf("response routing timeout (type=%d): channel congested", msg.Type)
-		DebugLog("%s [TCP TUNNEL] %v for request %s", logPrefix, dropErr, requestID)
+		util.DebugLog("%s [TCP TUNNEL] %v for request %s", logPrefix, dropErr, requestID)
 		ep.failPendingRequest(requestID, pending, dropErr, logPrefix)
 	}
 }
@@ -1261,7 +1272,7 @@ func (ep *TCPEndpoint) failPendingRequest(requestID string, pending *tcpPendingR
 
 	defer func() {
 		if r := recover(); r != nil {
-			DebugLog("%s [TCP TUNNEL] Recovered closing pending response channel for %s: %v", logPrefix, requestID, r)
+			util.DebugLog("%s [TCP TUNNEL] Recovered closing pending response channel for %s: %v", logPrefix, requestID, r)
 		}
 	}()
 	close(pending.responseChan)
@@ -1271,7 +1282,7 @@ func (ep *TCPEndpoint) failPendingRequest(requestID string, pending *tcpPendingR
 func (ep *TCPEndpoint) handleProxyConnectAck(msg *TunnelMessage) {
 	var payload ProxyConnectAckPayload
 	if err := msg.ParseJSON(&payload); err != nil {
-		DebugLog("[TCP TUNNEL] Invalid proxy connect ack: %v", err)
+		util.DebugLog("[TCP TUNNEL] Invalid proxy connect ack: %v", err)
 		return
 	}
 
@@ -1280,18 +1291,18 @@ func (ep *TCPEndpoint) handleProxyConnectAck(msg *TunnelMessage) {
 	ep.mu.Unlock()
 
 	if !ok {
-		DebugLog("[TCP TUNNEL] Proxy connection %s not found for ack", payload.ConnectionID)
+		util.DebugLog("[TCP TUNNEL] Proxy connection %s not found for ack", payload.ConnectionID)
 		return
 	}
 
 	if payload.Success {
-		DebugLog("[TCP TUNNEL] Proxy connection %s established", payload.ConnectionID)
+		util.DebugLog("[TCP TUNNEL] Proxy connection %s established", payload.ConnectionID)
 		select {
 		case pc.connectAck <- nil:
 		default:
 		}
 	} else {
-		DebugLog("[TCP TUNNEL] Proxy connection %s failed: %s", payload.ConnectionID, payload.Error)
+		util.DebugLog("[TCP TUNNEL] Proxy connection %s failed: %s", payload.ConnectionID, payload.Error)
 		select {
 		case pc.connectAck <- errors.New(payload.Error):
 		default:
@@ -1305,11 +1316,11 @@ func (ep *TCPEndpoint) handleProxyConnectAck(msg *TunnelMessage) {
 func (ep *TCPEndpoint) handleProxyClose(msg *TunnelMessage) {
 	var payload ProxyClosePayload
 	if err := msg.ParseJSON(&payload); err != nil {
-		DebugLog("[TCP TUNNEL] Invalid proxy close: %v", err)
+		util.DebugLog("[TCP TUNNEL] Invalid proxy close: %v", err)
 		return
 	}
 
-	DebugLog("[TCP TUNNEL] Received proxy close for %s: %s", payload.ConnectionID, payload.Reason)
+	util.DebugLog("[TCP TUNNEL] Received proxy close for %s: %s", payload.ConnectionID, payload.Reason)
 	ep.closeProxyConnection(payload.ConnectionID, payload.Reason)
 }
 
@@ -1437,7 +1448,7 @@ func generateRequestID() string {
 // proxyClientReadLoop reads data from client and sends to endpoint
 func (ep *TCPEndpoint) proxyClientReadLoop(connectionID string, pc *tcpProxyConnection) {
 	defer func() {
-		DebugLog("[TCP TUNNEL] Proxy client read loop ended for %s", connectionID)
+		util.DebugLog("[TCP TUNNEL] Proxy client read loop ended for %s", connectionID)
 
 		// Send close to endpoint
 		ep.SendJSON(MsgTypeProxyClose, ProxyClosePayload{
@@ -1472,13 +1483,13 @@ func (ep *TCPEndpoint) proxyClientReadLoop(connectionID string, pc *tcpProxyConn
 				Type:    MsgTypeProxyDataBinary,
 				Payload: payload,
 			}); err != nil {
-				DebugLog("[TCP TUNNEL] Send to endpoint error for proxy %s: %v", connectionID, err)
+				util.DebugLog("[TCP TUNNEL] Send to endpoint error for proxy %s: %v", connectionID, err)
 				return
 			}
 		}
 		if err != nil {
 			if err != io.EOF {
-				DebugLog("[TCP TUNNEL] Client read error for proxy %s: %v", connectionID, err)
+				util.DebugLog("[TCP TUNNEL] Client read error for proxy %s: %v", connectionID, err)
 			}
 			return
 		}
@@ -1517,7 +1528,7 @@ func (ep *TCPEndpoint) handleTCPProxyDataBinary(msg *TunnelMessage) {
 
 	// Write data to client connection
 	if _, err := pc.clientConn.Write(data); err != nil {
-		DebugLog("[TCP TUNNEL] Write to client error for proxy %s: %v", connectionID, err)
+		util.DebugLog("[TCP TUNNEL] Write to client error for proxy %s: %v", connectionID, err)
 		ep.closeProxyConnection(connectionID, "write error")
 	}
 }
@@ -1551,14 +1562,14 @@ type PortForwardClosePayload struct {
 func (ep *TCPEndpoint) handlePortForwardRequest(server *TCPTunnelServer, msg *TunnelMessage) {
 	var payload PortForwardRequestPayload
 	if err := msg.ParseJSON(&payload); err != nil {
-		DebugLog("[TCP TUNNEL] Invalid port forward request: %v", err)
+		util.DebugLog("[TCP TUNNEL] Invalid port forward request: %v", err)
 		return
 	}
 	payload.ConnectionID = strings.TrimSpace(payload.ConnectionID)
 	payload.TargetEndpoint = strings.TrimSpace(payload.TargetEndpoint)
 	payload.RemoteTarget = strings.TrimSpace(payload.RemoteTarget)
 	if payload.ConnectionID == "" || payload.TargetEndpoint == "" || payload.RemoteTarget == "" {
-		DebugLog("[PORT-FWD] Invalid request payload from %s (conn=%q target=%q remote=%q)",
+		util.DebugLog("[PORT-FWD] Invalid request payload from %s (conn=%q target=%q remote=%q)",
 			ep.EndpointName, payload.ConnectionID, payload.TargetEndpoint, payload.RemoteTarget)
 		_ = ep.SendJSON(MsgTypePortForwardResponse, PortForwardResponsePayload{
 			ConnectionID: payload.ConnectionID,
@@ -1568,7 +1579,7 @@ func (ep *TCPEndpoint) handlePortForwardRequest(server *TCPTunnelServer, msg *Tu
 		return
 	}
 
-	DebugLog("[PORT-FWD] Request from %s to endpoint %s -> %s",
+	util.DebugLog("[PORT-FWD] Request from %s to endpoint %s -> %s",
 		ep.EndpointName, payload.TargetEndpoint, payload.RemoteTarget)
 
 	// Find the target endpoint in the same tunnel by endpointName or CID.
@@ -1584,7 +1595,7 @@ func (ep *TCPEndpoint) handlePortForwardRequest(server *TCPTunnelServer, msg *Tu
 	server.mu.RUnlock()
 
 	if targetEp == nil {
-		DebugLog("[PORT-FWD] Target endpoint %s not found in tunnel %s (online=%s)",
+		util.DebugLog("[PORT-FWD] Target endpoint %s not found in tunnel %s (online=%s)",
 			payload.TargetEndpoint, ep.TunnelName, onlineTarget)
 		_ = ep.SendJSON(MsgTypePortForwardResponse, PortForwardResponsePayload{
 			ConnectionID: payload.ConnectionID,
@@ -1610,7 +1621,7 @@ func (ep *TCPEndpoint) handlePortForwardRequest(server *TCPTunnelServer, msg *Tu
 	// Forward the request to the target endpoint (msg type changes for target)
 	// Target endpoint will connect to RemoteTarget and send response
 	if err := targetEp.SendJSON(MsgTypePortForwardRequest, payload); err != nil {
-		DebugLog("[PORT-FWD] Failed to forward request to %s: %v",
+		util.DebugLog("[PORT-FWD] Failed to forward request to %s: %v",
 			payload.TargetEndpoint, err)
 		server.mu.Lock()
 		delete(server.portForwards, payload.ConnectionID)
@@ -1623,7 +1634,7 @@ func (ep *TCPEndpoint) handlePortForwardRequest(server *TCPTunnelServer, msg *Tu
 		return
 	}
 
-	DebugLog("[PORT-FWD] Request forwarded conn=%s route=%s -> APS -> %s -> %s",
+	util.DebugLog("[PORT-FWD] Request forwarded conn=%s route=%s -> APS -> %s -> %s",
 		payload.ConnectionID, ep.EndpointName, payload.TargetEndpoint, payload.RemoteTarget)
 }
 
@@ -1688,12 +1699,12 @@ func (s *TCPTunnelServer) listOnlinePortForwardEndpointsLocked(tunnelName string
 func (ep *TCPEndpoint) handlePortForwardResponseRoute(server *TCPTunnelServer, msg *TunnelMessage) {
 	var payload PortForwardResponsePayload
 	if err := msg.ParseJSON(&payload); err != nil {
-		DebugLog("[TCP TUNNEL] Invalid port forward response: %v", err)
+		util.DebugLog("[TCP TUNNEL] Invalid port forward response: %v", err)
 		return
 	}
 	connectionID := strings.TrimSpace(payload.ConnectionID)
 	if connectionID == "" {
-		DebugLog("[PORT-FWD] Response missing connection id from %s", ep.EndpointName)
+		util.DebugLog("[PORT-FWD] Response missing connection id from %s", ep.EndpointName)
 		return
 	}
 
@@ -1724,12 +1735,12 @@ func (ep *TCPEndpoint) handlePortForwardResponseRoute(server *TCPTunnelServer, m
 	server.mu.Unlock()
 
 	if !ok || peer == nil {
-		DebugLog("[PORT-FWD] Response route missing conn=%s from=%s", connectionID, ep.EndpointName)
+		util.DebugLog("[PORT-FWD] Response route missing conn=%s from=%s", connectionID, ep.EndpointName)
 		return
 	}
 
 	if err := peer.SendJSON(MsgTypePortForwardResponse, payload); err != nil {
-		DebugLog("[PORT-FWD] Failed routing response conn=%s to %s: %v", connectionID, peer.EndpointName, err)
+		util.DebugLog("[PORT-FWD] Failed routing response conn=%s to %s: %v", connectionID, peer.EndpointName, err)
 		server.mu.Lock()
 		delete(server.portForwards, connectionID)
 		server.mu.Unlock()
@@ -1742,7 +1753,7 @@ func (ep *TCPEndpoint) handlePortForwardResponseRoute(server *TCPTunnelServer, m
 		server.mu.Unlock()
 	}
 
-	DebugLog("[PORT-FWD] Response routed conn=%s success=%t from=%s to=%s",
+	util.DebugLog("[PORT-FWD] Response routed conn=%s success=%t from=%s to=%s",
 		connectionID, payload.Success, ep.EndpointName, peer.EndpointName)
 }
 
@@ -1750,7 +1761,7 @@ func (ep *TCPEndpoint) handlePortForwardResponseRoute(server *TCPTunnelServer, m
 func (ep *TCPEndpoint) handlePortForwardDataRoute(server *TCPTunnelServer, msg *TunnelMessage) {
 	var payload PortForwardDataPayload
 	if err := msg.ParseJSON(&payload); err != nil {
-		DebugLog("[TCP TUNNEL] Invalid port forward data: %v", err)
+		util.DebugLog("[TCP TUNNEL] Invalid port forward data: %v", err)
 		return
 	}
 	connectionID := strings.TrimSpace(payload.ConnectionID)
@@ -1782,12 +1793,12 @@ func (ep *TCPEndpoint) handlePortForwardDataRoute(server *TCPTunnelServer, msg *
 	server.mu.Unlock()
 
 	if !ok || peer == nil {
-		DebugLog("[PORT-FWD] Data route missing conn=%s from=%s", connectionID, ep.EndpointName)
+		util.DebugLog("[PORT-FWD] Data route missing conn=%s from=%s", connectionID, ep.EndpointName)
 		return
 	}
 
 	if err := peer.SendJSON(MsgTypePortForwardData, payload); err != nil {
-		DebugLog("[PORT-FWD] Data route failed conn=%s from=%s to=%s: %v",
+		util.DebugLog("[PORT-FWD] Data route failed conn=%s from=%s to=%s: %v",
 			connectionID, ep.EndpointName, peer.EndpointName, err)
 	}
 }
@@ -1796,11 +1807,11 @@ func (ep *TCPEndpoint) handlePortForwardDataRoute(server *TCPTunnelServer, msg *
 func (ep *TCPEndpoint) handlePortForwardCloseRoute(server *TCPTunnelServer, msg *TunnelMessage) {
 	var payload PortForwardClosePayload
 	if err := msg.ParseJSON(&payload); err != nil {
-		DebugLog("[TCP TUNNEL] Invalid port forward close: %v", err)
+		util.DebugLog("[TCP TUNNEL] Invalid port forward close: %v", err)
 		return
 	}
 
-	DebugLog("[PORT-FWD] Close for connection %s: %s", payload.ConnectionID, payload.Reason)
+	util.DebugLog("[PORT-FWD] Close for connection %s: %s", payload.ConnectionID, payload.Reason)
 
 	connectionID := strings.TrimSpace(payload.ConnectionID)
 	var (
@@ -1824,12 +1835,12 @@ func (ep *TCPEndpoint) handlePortForwardCloseRoute(server *TCPTunnelServer, msg 
 	server.mu.Unlock()
 
 	if !ok || peer == nil {
-		DebugLog("[PORT-FWD] Close route missing conn=%s from=%s", connectionID, ep.EndpointName)
+		util.DebugLog("[PORT-FWD] Close route missing conn=%s from=%s", connectionID, ep.EndpointName)
 		return
 	}
 
 	if err := peer.SendJSON(MsgTypePortForwardClose, payload); err != nil {
-		DebugLog("[PORT-FWD] Close route failed conn=%s from=%s to=%s: %v",
+		util.DebugLog("[PORT-FWD] Close route failed conn=%s from=%s to=%s: %v",
 			connectionID, ep.EndpointName, peer.EndpointName, err)
 	}
 }
@@ -1854,22 +1865,22 @@ func (ep *TCPEndpoint) initiateKeyRotation() error {
 
 	req, err := ep.KeyManager.GenerateKeyRequest()
 	if err != nil {
-		DebugLog("[KEY] Failed to generate key request for %s: %v", ep.EndpointName, err)
+		util.DebugLog("[KEY] Failed to generate key request for %s: %v", ep.EndpointName, err)
 		return err
 	}
 
 	payload, err := security.MarshalKeyRequest(req)
 	if err != nil {
-		DebugLog("[KEY] Failed to marshal key request: %v", err)
+		util.DebugLog("[KEY] Failed to marshal key request: %v", err)
 		return err
 	}
 
 	if err := ep.Send(&TunnelMessage{Type: MsgTypeKeyRequest, Payload: payload}); err != nil {
-		DebugLog("[KEY] Failed to send key request to %s: %v", ep.EndpointName, err)
+		util.DebugLog("[KEY] Failed to send key request to %s: %v", ep.EndpointName, err)
 		return err
 	}
 
-	DebugLog("[KEY] Key rotation initiated for endpoint %s", ep.EndpointName)
+	util.DebugLog("[KEY] Key rotation initiated for endpoint %s", ep.EndpointName)
 	return nil
 }
 
@@ -1881,28 +1892,28 @@ func (ep *TCPEndpoint) handleKeyRequest(msg *TunnelMessage) {
 
 	req, err := security.UnmarshalKeyRequest(msg.Payload)
 	if err != nil {
-		DebugLog("[KEY] Failed to parse key request from %s: %v", ep.EndpointName, err)
+		util.DebugLog("[KEY] Failed to parse key request from %s: %v", ep.EndpointName, err)
 		return
 	}
 
 	resp, err := ep.KeyManager.HandleKeyRequest(req)
 	if err != nil {
-		DebugLog("[KEY] Failed to handle key request from %s: %v", ep.EndpointName, err)
+		util.DebugLog("[KEY] Failed to handle key request from %s: %v", ep.EndpointName, err)
 		return
 	}
 
 	payload, err := security.MarshalKeyResponse(resp)
 	if err != nil {
-		DebugLog("[KEY] Failed to marshal key response: %v", err)
+		util.DebugLog("[KEY] Failed to marshal key response: %v", err)
 		return
 	}
 
 	if err := ep.Conn.WriteMessage(&TunnelMessage{Type: MsgTypeKeyResponse, Payload: payload}); err != nil {
-		DebugLog("[KEY] Failed to send key response to %s: %v", ep.EndpointName, err)
+		util.DebugLog("[KEY] Failed to send key response to %s: %v", ep.EndpointName, err)
 		return
 	}
 
-	DebugLog("[KEY] Key response sent to endpoint %s", ep.EndpointName)
+	util.DebugLog("[KEY] Key response sent to endpoint %s", ep.EndpointName)
 }
 
 // handleKeyResponse handles a key response and sends confirmation
@@ -1913,34 +1924,34 @@ func (ep *TCPEndpoint) handleKeyResponse(msg *TunnelMessage) {
 
 	resp, err := security.UnmarshalKeyResponse(msg.Payload)
 	if err != nil {
-		DebugLog("[KEY] Failed to parse key response from %s: %v", ep.EndpointName, err)
+		util.DebugLog("[KEY] Failed to parse key response from %s: %v", ep.EndpointName, err)
 		return
 	}
 
 	confirm, err := ep.KeyManager.HandleKeyResponse(resp)
 	if err != nil {
-		DebugLog("[KEY] Failed to handle key response from %s: %v", ep.EndpointName, err)
+		util.DebugLog("[KEY] Failed to handle key response from %s: %v", ep.EndpointName, err)
 		return
 	}
 
 	payload, err := security.MarshalKeyConfirm(confirm)
 	if err != nil {
-		DebugLog("[KEY] Failed to marshal key confirm: %v", err)
+		util.DebugLog("[KEY] Failed to marshal key confirm: %v", err)
 		return
 	}
 
 	if err := ep.Conn.WriteMessage(&TunnelMessage{Type: MsgTypeKeyConfirm, Payload: payload}); err != nil {
-		DebugLog("[KEY] Failed to send key confirm to %s: %v", ep.EndpointName, err)
+		util.DebugLog("[KEY] Failed to send key confirm to %s: %v", ep.EndpointName, err)
 		return
 	}
 
 	// Activate key on initiator side after sending confirm
 	if err := ep.KeyManager.ActivateKey(); err != nil {
-		DebugLog("[KEY] Failed to activate key: %v", err)
+		util.DebugLog("[KEY] Failed to activate key: %v", err)
 		return
 	}
 
-	DebugLog("[KEY] Key rotation completed for endpoint %s (initiator)", ep.EndpointName)
+	util.DebugLog("[KEY] Key rotation completed for endpoint %s (initiator)", ep.EndpointName)
 }
 
 // handleKeyConfirm handles key confirmation and activates the new key
@@ -1951,16 +1962,16 @@ func (ep *TCPEndpoint) handleKeyConfirm(msg *TunnelMessage) {
 
 	confirm, err := security.UnmarshalKeyConfirm(msg.Payload)
 	if err != nil {
-		DebugLog("[KEY] Failed to parse key confirm from %s: %v", ep.EndpointName, err)
+		util.DebugLog("[KEY] Failed to parse key confirm from %s: %v", ep.EndpointName, err)
 		return
 	}
 
 	if err := ep.KeyManager.HandleKeyConfirm(confirm); err != nil {
-		DebugLog("[KEY] Failed to handle key confirm from %s: %v", ep.EndpointName, err)
+		util.DebugLog("[KEY] Failed to handle key confirm from %s: %v", ep.EndpointName, err)
 		return
 	}
 
-	DebugLog("[KEY] Key rotation completed for endpoint %s (responder)", ep.EndpointName)
+	util.DebugLog("[KEY] Key rotation completed for endpoint %s (responder)", ep.EndpointName)
 }
 
 // sendMirrorUpdate sends mirror APS addresses to an endpoint after registration
@@ -1981,7 +1992,7 @@ func sendMirrorUpdate(s *TCPTunnelServer, ep *TCPEndpoint) {
 	mirrorList, exists := mirrors[endpointConfig.Mirror]
 
 	if !exists || len(mirrorList) == 0 {
-		DebugLog("[MIRROR] Mirror group '%s' not found or empty for endpoint %s",
+		util.DebugLog("[MIRROR] Mirror group '%s' not found or empty for endpoint %s",
 			endpointConfig.Mirror, ep.EndpointName)
 		return
 	}
@@ -1993,7 +2004,7 @@ func sendMirrorUpdate(s *TCPTunnelServer, ep *TCPEndpoint) {
 
 	payloadBytes, err := json.Marshal(payload)
 	if err != nil {
-		DebugLog("[MIRROR] Failed to marshal mirror payload for %s: %v", ep.EndpointName, err)
+		util.DebugLog("[MIRROR] Failed to marshal mirror payload for %s: %v", ep.EndpointName, err)
 		return
 	}
 
@@ -2006,15 +2017,15 @@ func sendMirrorUpdate(s *TCPTunnelServer, ep *TCPEndpoint) {
 
 	protectedPayload, err := security.WrapControlPlanePayload(ep.KeyManager, MsgTypeMirrorUpdate, payloadBytes, configVersion, ep.ControlOut)
 	if err != nil {
-		DebugLog("[MIRROR] Failed to protect mirror update for %s: %v", ep.EndpointName, err)
+		util.DebugLog("[MIRROR] Failed to protect mirror update for %s: %v", ep.EndpointName, err)
 		return
 	}
 
 	if err := ep.Conn.WriteMessage(&TunnelMessage{Type: MsgTypeMirrorUpdate, Payload: protectedPayload}); err != nil {
-		DebugLog("[MIRROR] Failed to send mirror update to %s: %v", ep.EndpointName, err)
+		util.DebugLog("[MIRROR] Failed to send mirror update to %s: %v", ep.EndpointName, err)
 		return
 	}
 
-	DebugLog("[MIRROR] Sent %d mirror(s) from group '%s' to endpoint %s",
+	util.DebugLog("[MIRROR] Sent %d mirror(s) from group '%s' to endpoint %s",
 		len(mirrorList), endpointConfig.Mirror, ep.EndpointName)
 }

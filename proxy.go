@@ -13,13 +13,14 @@ import (
 	"aps/cache"
 	"aps/logging"
 	"aps/stats"
+	"aps/tunnel"
 	"aps/scripting"
 )
 
 type MapRemoteProxy struct {
 	config *Config
 	// dataStore          *DataStore // Removed, no longer needed
-	tunnelManager TunnelManagerInterface
+	tunnelManager tunnel.TunnelManagerInterface
 	scriptRunner  *scripting.ScriptRunner
 	trafficShaper *stats.TrafficShaper
 	stats         *stats.StatsCollector
@@ -33,7 +34,7 @@ type MapRemoteProxy struct {
 	endpointTunnelMap  map[string]string // endpointName -> tunnelName
 }
 
-func NewMapRemoteProxy(config *Config, tunnelManager TunnelManagerInterface, scriptRunner *scripting.ScriptRunner, trafficShaper *stats.TrafficShaper, stats *stats.StatsCollector, staticCache *cache.StaticCacheManager, loggingDB *logging.LoggingDB, serverName string, rateLimiter *stats.RateLimitEngine) *MapRemoteProxy {
+func NewMapRemoteProxy(config *Config, tunnelManager tunnel.TunnelManagerInterface, scriptRunner *scripting.ScriptRunner, trafficShaper *stats.TrafficShaper, stats *stats.StatsCollector, staticCache *cache.StaticCacheManager, loggingDB *logging.LoggingDB, serverName string, rateLimiter *stats.RateLimitEngine) *MapRemoteProxy {
 	// Default policies from the server config, if they exist
 	serverConfig := config.Servers[serverName]
 	policies := config.ResolvePolicies(serverConfig, &Mapping{}, nil, "") // Get server-level or default policies
@@ -50,7 +51,7 @@ func NewMapRemoteProxy(config *Config, tunnelManager TunnelManagerInterface, scr
 		ExpectContinueTimeout: 1 * time.Second,
 	}
 
-	tunnelTransport := NewTunnelRoundTripper(tunnelManager, transport)
+	tunnelTransport := tunnel.NewTunnelRoundTripper(tunnelManager, transport)
 
 	p := &MapRemoteProxy{
 		config:            config,
@@ -110,7 +111,7 @@ func NewMapRemoteProxy(config *Config, tunnelManager TunnelManagerInterface, scr
 	return p
 }
 
-func (p *MapRemoteProxy) sendRequestStreamViaDataPlane(ctx context.Context, tunnelName, endpointName string, reqPayload *RequestPayload) (io.ReadCloser, []byte, error) {
+func (p *MapRemoteProxy) sendRequestStreamViaDataPlane(ctx context.Context, tunnelName, endpointName string, reqPayload *tunnel.RequestPayload) (io.ReadCloser, []byte, error) {
 	return p.tunnelManager.SendRequestStream(ctx, tunnelName, endpointName, reqPayload)
 }
 
@@ -144,7 +145,7 @@ func (p *MapRemoteProxy) createProxyClient(proxyURL string) (*http.Client, error
 		ExpectContinueTimeout: 1 * time.Second,
 	}
 
-	tunnelTransport := NewTunnelRoundTripper(p.tunnelManager, transport)
+	tunnelTransport := tunnel.NewTunnelRoundTripper(p.tunnelManager, transport)
 
 	return &http.Client{
 		Transport: tunnelTransport,

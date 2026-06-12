@@ -14,6 +14,7 @@ import (
 	"aps/firewall"
 	"aps/logging"
 	"aps/stats"
+	"aps/tunnel"
 )
 
 // RawUDPServer manages a raw UDP server for forwarding packets
@@ -22,7 +23,7 @@ type RawUDPServer struct {
 	config        *ListenConfig
 	appConfig     *Config
 	conn          *net.UDPConn
-	tunnelManager TunnelManagerInterface
+	tunnelManager tunnel.TunnelManagerInterface
 	trafficShaper *stats.TrafficShaper
 	stats         *stats.StatsCollector
 	loggingDB     *logging.LoggingDB
@@ -44,7 +45,7 @@ type UDPSession struct {
 
 // NewRawUDPServer creates a new raw UDP server
 func NewRawUDPServer(name string, config *ListenConfig, appConfig *Config, mappings []*Mapping,
-	tunnelManager TunnelManagerInterface, trafficShaper *stats.TrafficShaper, stats *stats.StatsCollector, loggingDB *logging.LoggingDB) *RawUDPServer {
+	tunnelManager tunnel.TunnelManagerInterface, trafficShaper *stats.TrafficShaper, stats *stats.StatsCollector, loggingDB *logging.LoggingDB) *RawUDPServer {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &RawUDPServer{
 		name:          name,

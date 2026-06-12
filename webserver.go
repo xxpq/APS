@@ -27,6 +27,7 @@ import (
 	"aps/logging"
 	"aps/security"
 	"aps/stats"
+	"aps/tunnel"
 	tlsx "aps/tls"
 )
 
@@ -113,7 +114,7 @@ type AdminHandlers struct {
 	serverName    string
 	configMux     sync.RWMutex
 	sessions      *SessionStore
-	tunnelManager TunnelManagerInterface
+	tunnelManager tunnel.TunnelManagerInterface
 	// dataStore      *DataStore // Removed, no longer needed
 	statsCollector *stats.StatsCollector
 	statsDB        *stats.StatsDB
@@ -138,7 +139,7 @@ func NewAdminHandlers(config *Config, configPath string, serverName string, stat
 }
 
 // SetTunnelManager sets the tunnel manager reference for endpoint status queries
-func (h *AdminHandlers) SetTunnelManager(tm TunnelManagerInterface) {
+func (h *AdminHandlers) SetTunnelManager(tm tunnel.TunnelManagerInterface) {
 	h.tunnelManager = tm
 }
 

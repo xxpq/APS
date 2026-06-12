@@ -1,10 +1,12 @@
-package main
+package tcptunnel
 
 import (
 	"fmt"
 	"log"
 	"sync"
 	"time"
+
+	"aps/util"
 )
 
 const tcpTunnelLogThrottleWindow = 30 * time.Second
@@ -41,7 +43,7 @@ func (t *tcpTunnelLogThrottle) allow(key string, now time.Time) bool {
 }
 
 func debugLogTCPTunnelThrottled(sourceIP, endpointName, endpointID, targetAddr, eventKey, format string, args ...interface{}) {
-	if !IsDebugMode {
+	if !util.IsDebugMode {
 		return
 	}
 

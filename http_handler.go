@@ -29,6 +29,7 @@ import (
 	"aps/firewall"
 	"aps/logging"
 	"aps/stats"
+	"aps/tunnel"
 )
 
 // 对象池 - 用于高并发场景下复用对象，减少 GC 压力
@@ -938,7 +939,7 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 
 		DebugLog("[%s]%s[TUNNEL] Forwarding request for %s via tunnel '%s' to endpoint '%s'", clientIP, clientLocation, originalURL, tunnelName, endpointName)
 
-		reqPayload := &RequestPayload{
+		reqPayload := &tunnel.RequestPayload{
 			URL:        proxyReq.URL.String(),
 			SourceIP:   clientIP,
 			HeaderData: reqHeaderBytes,
@@ -978,9 +979,9 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 			// Clone the default transport and set the ServerName for SNI.
 			baseTransport, ok := p.client.Transport.(*http.Transport)
 			if !ok {
-				// If the transport is not a standard http.Transport (e.g., it's a TunnelRoundTripper),
+				// If the transport is not a standard http.Transport (e.g., it's a tunnel.TunnelRoundTripper),
 				// we need to get the underlying transport.
-				if trt, ok := p.client.Transport.(*TunnelRoundTripper); ok {
+				if trt, ok := p.client.Transport.(*tunnel.TunnelRoundTripper); ok {
 					baseTransport, _ = trt.GetInnerTransport().(*http.Transport)
 				}
 			}
@@ -1445,7 +1446,7 @@ func (p *MapRemoteProxy) createClientWithP12(p12Path, password string, policies 
 	if err != nil {
 		return nil, err
 	}
-	baseTransport := p.client.Transport.(*TunnelRoundTripper).GetInnerTransport().(*http.Transport)
+	baseTransport := p.client.Transport.(*tunnel.TunnelRoundTripper).GetInnerTransport().(*http.Transport)
 	transport := baseTransport.Clone()
 	transport.TLSClientConfig = &tls.Config{
 		InsecureSkipVerify: true,
@@ -1456,7 +1457,7 @@ func (p *MapRemoteProxy) createClientWithP12(p12Path, password string, policies 
 			},
 		},
 	}
-	tunnelTransport := NewTunnelRoundTripper(p.tunnelManager, transport)
+	tunnelTransport := tunnel.NewTunnelRoundTripper(p.tunnelManager, transport)
 	return &http.Client{
 		Transport: tunnelTransport,
 		Timeout:   policies.Timeout,

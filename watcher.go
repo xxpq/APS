@@ -78,7 +78,7 @@ func (w *ConfigWatcher) watch() {
 					// Update tunnel manager with new tunnel configurations
 					if w.serverManager != nil && w.serverManager.tunnelManager != nil {
 						DebugLog("Notifying TunnelManager of configuration changes...")
-						w.serverManager.tunnelManager.UpdateTunnels(w.config)
+						w.serverManager.tunnelManager.UpdateTunnels(buildTCPTunnelConfig(w.config))
 					}
 
 					// Re-initialize ACME with the new config

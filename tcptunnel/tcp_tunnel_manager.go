@@ -1,4 +1,4 @@
-package main
+package tcptunnel
 
 import (
 	"context"
@@ -14,8 +14,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"aps/stats"
 	"aps/security"
+	"aps/stats"
+	"aps/util"
 )
 
 // pendingRequestPool removed to prevent reusing closed channels
@@ -474,55 +475,55 @@ func (tm *TCPTunnelManager) SendRequestStream(ctx context.Context, tunnelName, e
 	}
 
 	// Wait for response header
-	DebugLog("%s [TCP TUNNEL] Waiting for response header for request %s", logPrefix, requestID)
+	util.DebugLog("%s [TCP TUNNEL] Waiting for response header for request %s", logPrefix, requestID)
 	var headerBytes []byte
 	select {
 	case msg, ok := <-pending.responseChan:
 		if !ok || msg == nil {
 			err := errors.New("endpoint disconnected while waiting for response header")
-			DebugLog("%s [TCP TUNNEL] %v for request %s", logPrefix, err, requestID)
+			util.DebugLog("%s [TCP TUNNEL] %v for request %s", logPrefix, err, requestID)
 			return fail(err)
 		}
-		DebugLog("%s [TCP TUNNEL] Received message type %d for request %s", logPrefix, msg.Type, requestID)
+		util.DebugLog("%s [TCP TUNNEL] Received message type %d for request %s", logPrefix, msg.Type, requestID)
 		if msg.Type == MsgTypeResponseHeader {
 			var header ResponseHeaderPayloadTCP
 			if err := msg.ParseJSON(&header); err != nil {
-				DebugLog("%s [TCP TUNNEL] Failed to parse response header for %s: %v", logPrefix, requestID, err)
+				util.DebugLog("%s [TCP TUNNEL] Failed to parse response header for %s: %v", logPrefix, requestID, err)
 				return fail(err)
 			}
 			headerBytes, err = ep.KeyManager.Decrypt(header.Header)
 			if err != nil {
-				DebugLog("%s [TCP TUNNEL] Failed to decrypt response header for %s: %v", logPrefix, requestID, err)
+				util.DebugLog("%s [TCP TUNNEL] Failed to decrypt response header for %s: %v", logPrefix, requestID, err)
 				return fail(err)
 			}
-			DebugLog("%s [TCP TUNNEL] Successfully received and decrypted response header for %s (%d bytes)", logPrefix, requestID, len(headerBytes))
+			util.DebugLog("%s [TCP TUNNEL] Successfully received and decrypted response header for %s (%d bytes)", logPrefix, requestID, len(headerBytes))
 		} else if msg.Type == MsgTypeResponseEnd {
 			var end ResponseEndPayloadTCP
 			if err := msg.ParseJSON(&end); err != nil {
-				DebugLog("%s [TCP TUNNEL] Failed to parse response end for %s: %v", logPrefix, requestID, err)
+				util.DebugLog("%s [TCP TUNNEL] Failed to parse response end for %s: %v", logPrefix, requestID, err)
 				return fail(err)
 			}
 			errMsg := "request failed at endpoint"
 			if end.Error != "" {
 				errMsg = end.Error
 			}
-			DebugLog("%s [TCP TUNNEL] Received response end for %s immediately: %s", logPrefix, requestID, errMsg)
+			util.DebugLog("%s [TCP TUNNEL] Received response end for %s immediately: %s", logPrefix, requestID, errMsg)
 			return fail(errors.New(errMsg))
 		} else {
-			DebugLog("%s [TCP TUNNEL] Unexpected response type %d for %s", logPrefix, msg.Type, requestID)
+			util.DebugLog("%s [TCP TUNNEL] Unexpected response type %d for %s", logPrefix, msg.Type, requestID)
 			return fail(errors.New("unexpected response type"))
 		}
 	case <-ctx.Done():
-		DebugLog("%s [TCP TUNNEL] Context cancelled while waiting for response header for %s", logPrefix, requestID)
+		util.DebugLog("%s [TCP TUNNEL] Context cancelled while waiting for response header for %s", logPrefix, requestID)
 		return fail(ctx.Err())
 	}
 
 	// Start goroutine to handle response chunks
-	DebugLog("%s [TCP TUNNEL] Starting response streaming goroutine for %s", logPrefix, requestID)
+	util.DebugLog("%s [TCP TUNNEL] Starting response streaming goroutine for %s", logPrefix, requestID)
 	go func() {
 		var streamErr error
 		defer func() {
-			DebugLog("%s [TCP TUNNEL] Response streaming goroutine finished for %s", logPrefix, requestID)
+			util.DebugLog("%s [TCP TUNNEL] Response streaming goroutine finished for %s", logPrefix, requestID)
 			// Clean up pending request after goroutine completes
 			ep.mu.Lock()
 			delete(ep.pendingRequests, requestID)
@@ -584,7 +585,7 @@ func (tm *TCPTunnelManager) SendRequestStream(ctx context.Context, tunnelName, e
 				return
 			}
 		}
-		DebugLog("%s [TCP TUNNEL] Response channel closed for %s", logPrefix, requestID)
+		util.DebugLog("%s [TCP TUNNEL] Response channel closed for %s", logPrefix, requestID)
 		streamErr = errors.New("response channel closed unexpectedly")
 	}()
 

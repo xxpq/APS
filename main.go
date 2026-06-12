@@ -30,6 +30,7 @@ import (
 	"aps/logging"
 	"aps/server"
 	"aps/stats"
+	"aps/tunnel"
 	"aps/security"
 	tlsx "aps/tls"
 	"aps/scripting"
@@ -46,7 +47,7 @@ type ServerManager struct {
 	config     *Config
 	configFile string
 	// dataStore     *DataStore // Removed, replaced by statsDB for persistence
-	tunnelManager  TunnelManagerInterface
+	tunnelManager  tunnel.TunnelManagerInterface
 	scriptRunner   *scripting.ScriptRunner
 	trafficShaper  *stats.TrafficShaper
 	stats          *stats.StatsCollector
@@ -67,7 +68,7 @@ func (c *tunnelInboundConn) TunnelServerName() string {
 	return c.serverName
 }
 
-func NewServerManager(config *Config, configFile string, tunnelManager TunnelManagerInterface, scriptRunner *scripting.ScriptRunner, trafficShaper *stats.TrafficShaper, statsCol *stats.StatsCollector, staticCache *cache.StaticCacheManager, replayManager *security.ReplayManager, statsDB *stats.StatsDB, loggingDB *logging.LoggingDB, logBroadcaster *logging.LogBroadcaster) *ServerManager {
+func NewServerManager(config *Config, configFile string, tunnelManager tunnel.TunnelManagerInterface, scriptRunner *scripting.ScriptRunner, trafficShaper *stats.TrafficShaper, statsCol *stats.StatsCollector, staticCache *cache.StaticCacheManager, replayManager *security.ReplayManager, statsDB *stats.StatsDB, loggingDB *logging.LoggingDB, logBroadcaster *logging.LogBroadcaster) *ServerManager {
 	rateLimiter := stats.NewRateLimitEngine(config.RateLimitRules)
 	// go rateLimiter.CleanupExpired() // stats.RateLimitEngine handles cleanup internally or doesn't need explicit cleanup loop yet?
 	// The new engine uses sync.Map and doesn't have a cleanup loop yet.
@@ -467,7 +468,7 @@ func main() {
 		log.Fatalf("Failed to load initial quota usage from DB: %v", err)
 	}
 
-	tunnelManager := NewHybridTunnelManager(config, nil, statsDB) // 娴ｈ法鏁ゅǎ宄版値闂呇囦壕缁狅紕鎮婇崳?
+	tunnelManager := tunnel.NewHybridTunnelManager(buildTCPTunnelConfig(config), nil, statsDB) // 娴ｈ法鏁ゅǎ宄版値闂呇囦壕缁狅紕鎮婇崳?
 	var scriptingConfig *scripting.ScriptConfig
 	if config.Scripting != nil {
 		scriptingConfig = &scripting.ScriptConfig{
@@ -584,7 +585,7 @@ func (sm *ServerManager) StartAll() {
 	}
 }
 
-func createServerHandler(serverName string, mappings []*Mapping, serverConfig *ListenConfig, config *Config, configFile string, tunnelManager TunnelManagerInterface, scriptRunner *scripting.ScriptRunner, trafficShaper *stats.TrafficShaper, statsCol *stats.StatsCollector, staticCache *cache.StaticCacheManager, replayManager *security.ReplayManager, isACMEEnabled bool, statsDB *stats.StatsDB, loggingDB *logging.LoggingDB, logBroadcaster *logging.LogBroadcaster, rateLimiter *stats.RateLimitEngine) http.Handler {
+func createServerHandler(serverName string, mappings []*Mapping, serverConfig *ListenConfig, config *Config, configFile string, tunnelManager tunnel.TunnelManagerInterface, scriptRunner *scripting.ScriptRunner, trafficShaper *stats.TrafficShaper, statsCol *stats.StatsCollector, staticCache *cache.StaticCacheManager, replayManager *security.ReplayManager, isACMEEnabled bool, statsDB *stats.StatsDB, loggingDB *logging.LoggingDB, logBroadcaster *logging.LogBroadcaster, rateLimiter *stats.RateLimitEngine) http.Handler {
 	mux := http.NewServeMux()
 	proxy := NewMapRemoteProxy(config, tunnelManager, scriptRunner, trafficShaper, statsCol, staticCache, loggingDB, serverName, rateLimiter)
 

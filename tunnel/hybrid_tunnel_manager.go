@@ -1,4 +1,4 @@
-package main
+package tunnel
 
 import (
 	"context"
@@ -9,20 +9,22 @@ import (
 	"time"
 
 	"aps/stats"
+	"aps/tcptunnel"
+	"aps/util"
 )
 
 // HybridTunnelManager 绠＄悊TCP闅ч亾鐨勭鐞嗗櫒
 type HybridTunnelManager struct {
 	mu             sync.RWMutex
-	tcpManager     *TCPTunnelManager
-	tcpServer      *TCPTunnelServer
-	config         *Config
+	tcpManager     *tcptunnel.TCPTunnelManager
+	tcpServer      *tcptunnel.TCPTunnelServer
+	config         *tcptunnel.Config
 	statsCollector *stats.StatsCollector
 	statsDB        *stats.StatsDB
 }
 
 // NewHybridTunnelManager creates a hybrid tunnel manager.
-func NewHybridTunnelManager(config *Config, statsCollector *stats.StatsCollector, statsDB *stats.StatsDB) *HybridTunnelManager {
+func NewHybridTunnelManager(config *tcptunnel.Config, statsCollector *stats.StatsCollector, statsDB *stats.StatsDB) *HybridTunnelManager {
 	htm := &HybridTunnelManager{
 		config:         config,
 		statsCollector: statsCollector,
@@ -30,13 +32,13 @@ func NewHybridTunnelManager(config *Config, statsCollector *stats.StatsCollector
 	}
 
 	// Initialize TCP tunnel server and manager.
-	htm.tcpServer = NewTCPTunnelServer(config, statsDB)
-	htm.tcpManager = NewTCPTunnelManager(config, htm.tcpServer)
+	htm.tcpServer = tcptunnel.NewTCPTunnelServer(config, statsDB)
+	htm.tcpManager = tcptunnel.NewTCPTunnelManager(config, htm.tcpServer)
 
 	return htm
 }
 
-// StartTCPServer 鍚姩TCP闅ч亾鏈嶅姟鍣紙鍙寚瀹氱鍙ｆ垨浣跨敤杩炴帴澶嶇敤鍣級
+// StartTCPServer 鍚姩TCP闅ч亾鏈嶅姟鍣?
 func (htm *HybridTunnelManager) StartTCPServer(addr string) error {
 	if htm.tcpServer == nil {
 		return errors.New("TCP tunnel server not initialized")
@@ -47,7 +49,7 @@ func (htm *HybridTunnelManager) StartTCPServer(addr string) error {
 // HandleTunnelConnection 澶勭悊鏉ヨ嚜杩炴帴澶嶇敤鍣ㄧ殑闅ч亾杩炴帴
 func (htm *HybridTunnelManager) HandleTunnelConnection(conn net.Conn) {
 	if htm.tcpServer != nil {
-		htm.tcpServer.handleConnection(conn)
+		htm.tcpServer.HandleTunnelConn(conn)
 	}
 }
 
@@ -59,16 +61,16 @@ func (htm *HybridTunnelManager) SetStatsCollector(statsCollector *stats.StatsCol
 }
 
 // UpdateTunnels updates tunnel config reference.
-func (htm *HybridTunnelManager) UpdateTunnels(newConfig *Config) {
+func (htm *HybridTunnelManager) UpdateTunnels(newConfig *tcptunnel.Config) {
 	htm.mu.Lock()
 	defer htm.mu.Unlock()
 
-	DebugLog("[TUNNEL] Updating tunnels...")
+	util.DebugLog("[TUNNEL] Updating tunnels...")
 	htm.config = newConfig
 }
 
 // SendRequestStream sends a request and returns a stream for the response.
-func (htm *HybridTunnelManager) SendRequestStream(ctx context.Context, tunnelName, endpointName string, reqPayload *RequestPayload) (io.ReadCloser, []byte, error) {
+func (htm *HybridTunnelManager) SendRequestStream(ctx context.Context, tunnelName, endpointName string, reqPayload *tcptunnel.RequestPayload) (io.ReadCloser, []byte, error) {
 	if htm.tcpManager != nil {
 		return htm.tcpManager.SendRequestStream(ctx, tunnelName, endpointName, reqPayload)
 	}
@@ -100,7 +102,7 @@ func (htm *HybridTunnelManager) FindTunnelForEndpoint(endpointName string) (stri
 }
 
 // GetEndpointsInfo 鑾峰彇绔偣淇℃伅
-func (htm *HybridTunnelManager) GetEndpointsInfo(tunnelName string, stats *stats.StatsCollector) map[string]*EndpointInfo {
+func (htm *HybridTunnelManager) GetEndpointsInfo(tunnelName string, stats *stats.StatsCollector) map[string]*tcptunnel.EndpointInfo {
 	if htm.tcpManager == nil {
 		return nil
 	}
@@ -131,7 +133,7 @@ func (htm *HybridTunnelManager) GetPoolStats() map[string]interface{} {
 
 // Cleanup 娓呯悊璧勬簮
 func (htm *HybridTunnelManager) Cleanup() {
-	DebugLog("[TUNNEL] Cleaning up tunnel manager")
+	util.DebugLog("[TUNNEL] Cleaning up tunnel manager")
 
 	if htm.tcpManager != nil {
 		htm.tcpManager.Stop()
@@ -147,7 +149,7 @@ func (htm *HybridTunnelManager) SendConfigUpdate(tunnelName, endpointName string
 }
 
 // GetAllOnlineEndpoints returns all online endpoints
-func (htm *HybridTunnelManager) GetAllOnlineEndpoints() []EndpointInfo {
+func (htm *HybridTunnelManager) GetAllOnlineEndpoints() []tcptunnel.EndpointInfo {
 	if htm.tcpManager != nil {
 		return htm.tcpManager.GetAllOnlineEndpoints()
 	}

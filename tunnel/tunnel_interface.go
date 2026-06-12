@@ -1,4 +1,4 @@
-package main
+package tunnel
 
 import (
 	"context"
@@ -7,32 +7,15 @@ import (
 	"time"
 
 	"aps/stats"
+	"aps/tcptunnel"
 )
 
-// RequestPayload represents an HTTP request payload
-type RequestPayload struct {
-	ID         string
-	Method     string
-	URL        string
-	SourceIP   string
-	Header     map[string][]string
-	Data       []byte
-	HeaderData []byte
-	Body       io.ReadCloser
-	Timeout    time.Duration
-}
+// RequestPayload is re-exported for callers that want to use the tunnel
+// manager interface without importing aps/tcptunnel directly.
+type RequestPayload = tcptunnel.RequestPayload
 
-// EndpointInfo contains information about a connected endpoint
-type EndpointInfo struct {
-	ID               string      `json:"id"`
-	Name             string      `json:"name"`
-	TunnelName       string      `json:"tunnel_name"`
-	RemoteAddr       string      `json:"remote_addr"`
-	OnlineTime       time.Time   `json:"online_time"`
-	LastActivityTime time.Time   `json:"last_activity_time"`
-	Status           string      `json:"status"`
-	Stats            interface{} `json:"stats,omitempty"` // Statistics for this endpoint (tunnel-level)
-}
+// EndpointInfo is re-exported for the same reason.
+type EndpointInfo = tcptunnel.EndpointInfo
 
 // TunnelManagerInterface 定义隧道管理器的统一接口
 type TunnelManagerInterface interface {
@@ -52,7 +35,7 @@ type TunnelManagerInterface interface {
 	SetStatsCollector(statsCollector *stats.StatsCollector)
 	GetPoolStats() map[string]interface{}
 	Cleanup()
-	UpdateTunnels(newConfig *Config)
+	UpdateTunnels(newConfig *tcptunnel.Config)
 
 	// Config hot reload
 	SendConfigUpdate(tunnelName, endpointName string, payload []byte) error

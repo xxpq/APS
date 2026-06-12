@@ -18,6 +18,7 @@ import (
 	"aps/firewall"
 	"aps/logging"
 	"aps/stats"
+	"aps/tunnel"
 )
 
 // RawTCPServer manages a raw TCP server for forwarding connections
@@ -26,7 +27,7 @@ type RawTCPServer struct {
 	config        *ListenConfig
 	appConfig     *Config
 	listener      net.Listener
-	tunnelManager TunnelManagerInterface
+	tunnelManager tunnel.TunnelManagerInterface
 	trafficShaper *stats.TrafficShaper
 	stats         *stats.StatsCollector
 	loggingDB     *logging.LoggingDB
@@ -64,7 +65,7 @@ func formatLocationTag(ipWithPort string) string {
 
 // NewRawTCPServer creates a new raw TCP server
 func NewRawTCPServer(name string, config *ListenConfig, appConfig *Config, mappings []*Mapping,
-	tunnelManager TunnelManagerInterface, trafficShaper *stats.TrafficShaper, stats *stats.StatsCollector, loggingDB *logging.LoggingDB) *RawTCPServer {
+	tunnelManager tunnel.TunnelManagerInterface, trafficShaper *stats.TrafficShaper, stats *stats.StatsCollector, loggingDB *logging.LoggingDB) *RawTCPServer {
 	return &RawTCPServer{
 		name:          name,
 		config:        config,
