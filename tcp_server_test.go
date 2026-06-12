@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"aps/firewall"
+	"aps/stats"
 )
 
 // Mock connection to simulate client
@@ -53,7 +54,7 @@ func TestRawTCPServer_FirewallBlock(t *testing.T) {
 		name:      "test_server",
 		config:    serverConfig,
 		appConfig: appConfig,
-		stats:     NewStatsCollector(),
+		stats:     stats.NewStatsCollector(),
 	}
 
 	// Add a mapping that would match if firewall didn't block

@@ -1,4 +1,4 @@
-package main
+package firewall
 
 import (
 	"fmt"
@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"aps/asn"
+	"aps/util"
 )
 
 // FirewallRule defines a firewall rule with allow and block lists
@@ -200,11 +201,11 @@ func CheckFirewall(clientIP string, rule *FirewallRule) bool {
 	if len(rule.allowRules) > 0 {
 		for _, allowRule := range rule.allowRules {
 			if matchIPRule(parsedIP, allowRule) {
-				DebugLog("[FIREWALL] IP %s allowed by IP whitelist rule", ip)
+				util.DebugLog("[FIREWALL] IP %s allowed by IP whitelist rule", ip)
 				return true
 			}
 		}
-		DebugLog("[FIREWALL] IP %s blocked by IP whitelist (not in allow list)", ip)
+		util.DebugLog("[FIREWALL] IP %s blocked by IP whitelist (not in allow list)", ip)
 		return false
 	}
 
@@ -212,7 +213,7 @@ func CheckFirewall(clientIP string, rule *FirewallRule) bool {
 	if len(rule.blockRules) > 0 {
 		for _, blockRule := range rule.blockRules {
 			if matchIPRule(parsedIP, blockRule) {
-				DebugLog("[FIREWALL] IP %s blocked by IP blacklist rule", ip)
+				util.DebugLog("[FIREWALL] IP %s blocked by IP blacklist rule", ip)
 				return false
 			}
 		}
@@ -225,7 +226,7 @@ func CheckFirewall(clientIP string, rule *FirewallRule) bool {
 		location, err := asn.GetIPLocation(ip)
 		if err != nil {
 			// If geolocation lookup fails, allow by default (fail open)
-			DebugLog("[FIREWALL] Geolocation lookup failed for %s: %v, allowing by default", ip, err)
+			util.DebugLog("[FIREWALL] Geolocation lookup failed for %s: %v, allowing by default", ip, err)
 		} else if location != nil {
 			// Region whitelist: if set, only allow specified regions
 			if rule.Allow != nil && len(rule.Allow.Regions) > 0 {
@@ -238,7 +239,7 @@ func CheckFirewall(clientIP string, rule *FirewallRule) bool {
 					}
 				}
 				if !allowed {
-					DebugLog("[FIREWALL] IP %s (%s-%s) blocked by region whitelist", ip, location.Country, location.State)
+					util.DebugLog("[FIREWALL] IP %s (%s-%s) blocked by region whitelist", ip, location.Country, location.State)
 					return false
 				}
 			}
@@ -248,7 +249,7 @@ func CheckFirewall(clientIP string, rule *FirewallRule) bool {
 				for _, region := range rule.Block.Regions {
 					// Parse region format: "CC" or "CC-Region"
 					if matchesRegion(region, location.CountryCode, location.Country, location.State) {
-						DebugLog("[FIREWALL] IP %s (%s-%s) blocked by region blacklist", ip, location.Country, location.State)
+						util.DebugLog("[FIREWALL] IP %s (%s-%s) blocked by region blacklist", ip, location.Country, location.State)
 						return false
 					}
 				}
@@ -257,7 +258,7 @@ func CheckFirewall(clientIP string, rule *FirewallRule) bool {
 	}
 
 	// No blocking rules matched, allow by default
-	DebugLog("[FIREWALL] IP %s allowed (no blocking rules matched)", ip)
+	util.DebugLog("[FIREWALL] IP %s allowed (no blocking rules matched)", ip)
 	return true
 }
 
@@ -335,16 +336,13 @@ func compareIP(a, b net.IP) int {
 	return 0
 }
 
-// GetFirewallRule retrieves a firewall rule by name from the config
-func GetFirewallRule(config *Config, ruleName string) *FirewallRule {
-	if config == nil || config.Firewalls == nil {
+// GetFirewallRule retrieves a firewall rule by name from the firewalls map
+func GetFirewallRule(firewalls map[string]*FirewallRule, ruleName string) *FirewallRule {
+	if firewalls == nil {
 		return nil
 	}
 
-	config.mu.RLock()
-	defer config.mu.RUnlock()
-
-	rule, exists := config.Firewalls[ruleName]
+	rule, exists := firewalls[ruleName]
 	if !exists {
 		return nil
 	}

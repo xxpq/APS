@@ -79,14 +79,7 @@ func (t *TunnelRoundTripper) roundTripViaTunnel(req *http.Request, mapping *Mapp
 	DebugLog("[TUNNEL] Sending request for %s via tunnel '%s' to endpoint '%s'", req.URL.String(), tunnelName, endpointName)
 	var bodyStream io.ReadCloser
 	var headerBytes []byte
-	if runtime := GetGlobalGridRuntime(); runtime != nil {
-		if engine := NewGridExecutionEngine(runtime, t.tunnelManager, "http-roundtripper"); engine != nil {
-			bodyStream, headerBytes, err = engine.SendRequestStream(req.Context(), tunnelName, endpointName, reqPayload)
-		}
-	}
-	if bodyStream == nil && err == nil {
-		bodyStream, headerBytes, err = t.tunnelManager.SendRequestStream(req.Context(), tunnelName, endpointName, reqPayload)
-	}
+	bodyStream, headerBytes, err = t.tunnelManager.SendRequestStream(req.Context(), tunnelName, endpointName, reqPayload)
 	if err != nil {
 		if bodyForTunnel != nil && bodyForTunnel != req.Body {
 			bodyForTunnel.Close()
