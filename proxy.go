@@ -13,13 +13,14 @@ import (
 	"aps/cache"
 	"aps/logging"
 	"aps/stats"
+	"aps/scripting"
 )
 
 type MapRemoteProxy struct {
 	config *Config
 	// dataStore          *DataStore // Removed, no longer needed
 	tunnelManager TunnelManagerInterface
-	scriptRunner  *ScriptRunner
+	scriptRunner  *scripting.ScriptRunner
 	trafficShaper *stats.TrafficShaper
 	stats         *stats.StatsCollector
 	staticCache   *cache.StaticCacheManager // 静态文件缓存管理器
@@ -32,7 +33,7 @@ type MapRemoteProxy struct {
 	endpointTunnelMap  map[string]string // endpointName -> tunnelName
 }
 
-func NewMapRemoteProxy(config *Config, tunnelManager TunnelManagerInterface, scriptRunner *ScriptRunner, trafficShaper *stats.TrafficShaper, stats *stats.StatsCollector, staticCache *cache.StaticCacheManager, loggingDB *logging.LoggingDB, serverName string, rateLimiter *stats.RateLimitEngine) *MapRemoteProxy {
+func NewMapRemoteProxy(config *Config, tunnelManager TunnelManagerInterface, scriptRunner *scripting.ScriptRunner, trafficShaper *stats.TrafficShaper, stats *stats.StatsCollector, staticCache *cache.StaticCacheManager, loggingDB *logging.LoggingDB, serverName string, rateLimiter *stats.RateLimitEngine) *MapRemoteProxy {
 	// Default policies from the server config, if they exist
 	serverConfig := config.Servers[serverName]
 	policies := config.ResolvePolicies(serverConfig, &Mapping{}, nil, "") // Get server-level or default policies

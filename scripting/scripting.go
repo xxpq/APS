@@ -1,4 +1,4 @@
-package main
+package scripting
 
 import (
 	"bytes"
@@ -14,7 +14,13 @@ import (
 
 // ScriptRunner manages the execution of external scripts.
 type ScriptRunner struct {
-	config *ScriptingConfig
+	config *ScriptConfig
+}
+
+// ScriptConfig 描述 script 执行所需的最小化配置（解耦 scripting 包对 config 包的依赖）
+type ScriptConfig struct {
+	PythonPath string
+	NodePath   string
 }
 
 // ScriptData is the structure sent to and received from the script.
@@ -28,9 +34,9 @@ type ScriptData struct {
 	Status     string      `json:"status,omitempty"`
 }
 
-func NewScriptRunner(config *ScriptingConfig) *ScriptRunner {
+func NewScriptRunner(config *ScriptConfig) *ScriptRunner {
 	if config == nil {
-		return &ScriptRunner{config: &ScriptingConfig{}}
+		return &ScriptRunner{config: &ScriptConfig{}}
 	}
 	return &ScriptRunner{config: config}
 }

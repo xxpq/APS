@@ -31,6 +31,7 @@ import (
 	"aps/stats"
 	"aps/security"
 	tlsx "aps/tls"
+	"aps/scripting"
 )
 
 // ServerManager manages the lifecycle of multiple HTTP servers.
@@ -45,7 +46,7 @@ type ServerManager struct {
 	configFile string
 	// dataStore     *DataStore // Removed, replaced by statsDB for persistence
 	tunnelManager  TunnelManagerInterface
-	scriptRunner   *ScriptRunner
+	scriptRunner   *scripting.ScriptRunner
 	trafficShaper  *stats.TrafficShaper
 	stats          *stats.StatsCollector
 	staticCache    *cache.StaticCacheManager
@@ -65,7 +66,7 @@ func (c *tunnelInboundConn) TunnelServerName() string {
 	return c.serverName
 }
 
-func NewServerManager(config *Config, configFile string, tunnelManager TunnelManagerInterface, scriptRunner *ScriptRunner, trafficShaper *stats.TrafficShaper, statsCol *stats.StatsCollector, staticCache *cache.StaticCacheManager, replayManager *security.ReplayManager, statsDB *stats.StatsDB, loggingDB *logging.LoggingDB, logBroadcaster *logging.LogBroadcaster) *ServerManager {
+func NewServerManager(config *Config, configFile string, tunnelManager TunnelManagerInterface, scriptRunner *scripting.ScriptRunner, trafficShaper *stats.TrafficShaper, statsCol *stats.StatsCollector, staticCache *cache.StaticCacheManager, replayManager *security.ReplayManager, statsDB *stats.StatsDB, loggingDB *logging.LoggingDB, logBroadcaster *logging.LogBroadcaster) *ServerManager {
 	rateLimiter := stats.NewRateLimitEngine(config.RateLimitRules)
 	// go rateLimiter.CleanupExpired() // stats.RateLimitEngine handles cleanup internally or doesn't need explicit cleanup loop yet?
 	// The new engine uses sync.Map and doesn't have a cleanup loop yet.
@@ -466,7 +467,14 @@ func main() {
 	}
 
 	tunnelManager := NewHybridTunnelManager(config, nil, statsDB) // 娴ｈ法鏁ゅǎ宄版値闂呇囦壕缁狅紕鎮婇崳?
-	scriptRunner := NewScriptRunner(config.Scripting)
+	var scriptingConfig *scripting.ScriptConfig
+	if config.Scripting != nil {
+		scriptingConfig = &scripting.ScriptConfig{
+			PythonPath: config.Scripting.PythonPath,
+			NodePath:   config.Scripting.NodePath,
+		}
+	}
+	scriptRunner := scripting.NewScriptRunner(scriptingConfig)
 	trafficShaper := stats.NewTrafficShaper(initialQuotaUsage)
 	statsCollector := stats.NewStatsCollector()
 	// 设置 stats endpoint 的 admin 鉴权（适配 stats 包解耦后的 AdminAuthFunc 字段）
@@ -575,7 +583,7 @@ func (sm *ServerManager) StartAll() {
 	}
 }
 
-func createServerHandler(serverName string, mappings []*Mapping, serverConfig *ListenConfig, config *Config, configFile string, tunnelManager TunnelManagerInterface, scriptRunner *ScriptRunner, trafficShaper *stats.TrafficShaper, statsCol *stats.StatsCollector, staticCache *cache.StaticCacheManager, replayManager *security.ReplayManager, isACMEEnabled bool, statsDB *stats.StatsDB, loggingDB *logging.LoggingDB, logBroadcaster *logging.LogBroadcaster, rateLimiter *stats.RateLimitEngine) http.Handler {
+func createServerHandler(serverName string, mappings []*Mapping, serverConfig *ListenConfig, config *Config, configFile string, tunnelManager TunnelManagerInterface, scriptRunner *scripting.ScriptRunner, trafficShaper *stats.TrafficShaper, statsCol *stats.StatsCollector, staticCache *cache.StaticCacheManager, replayManager *security.ReplayManager, isACMEEnabled bool, statsDB *stats.StatsDB, loggingDB *logging.LoggingDB, logBroadcaster *logging.LogBroadcaster, rateLimiter *stats.RateLimitEngine) http.Handler {
 	mux := http.NewServeMux()
 	proxy := NewMapRemoteProxy(config, tunnelManager, scriptRunner, trafficShaper, statsCol, staticCache, loggingDB, serverName, rateLimiter)
 
