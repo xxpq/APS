@@ -2,6 +2,7 @@ package main
 
 import (
 	"log"
+	"mime"
 	"net/http"
 	"net/url"
 	"os"
@@ -40,7 +41,10 @@ func (p *MapRemoteProxy) serveFile(w http.ResponseWriter, r *http.Request, mappi
 		return
 	}
 
-	contentType := getMimeType(localPath)
+	contentType := mime.TypeByExtension(filepath.Ext(localPath))
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
 	w.Header().Set("Content-Type", contentType)
 	setCorsHeaders(w.Header())
 	w.WriteHeader(http.StatusOK)
