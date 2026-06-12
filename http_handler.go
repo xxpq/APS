@@ -23,6 +23,8 @@ import (
 	"time"
 
 	"golang.org/x/crypto/pkcs12"
+
+	"aps/asn"
 )
 
 // 对象池 - 用于高并发场景下复用对象，减少 GC 压力
@@ -66,7 +68,7 @@ func putBuffer(buf *bytes.Buffer) {
 
 // formatLocationTagHTTP formats IP location information for HTTP log output
 func formatLocationTagHTTP(ip string) string {
-	location, err := GetIPLocation(ip)
+	location, err := asn.GetIPLocation(ip)
 	if err != nil || location == nil {
 		return ""
 	}

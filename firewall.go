@@ -6,6 +6,8 @@ import (
 	"net"
 	"strconv"
 	"strings"
+
+	"aps/asn"
 )
 
 // FirewallRule defines a firewall rule with allow and block lists
@@ -220,7 +222,7 @@ func CheckFirewall(clientIP string, rule *FirewallRule) bool {
 	hasRegionRules := (rule.Allow != nil && len(rule.Allow.Regions) > 0) || (rule.Block != nil && len(rule.Block.Regions) > 0)
 
 	if hasRegionRules {
-		location, err := GetIPLocation(ip)
+		location, err := asn.GetIPLocation(ip)
 		if err != nil {
 			// If geolocation lookup fails, allow by default (fail open)
 			DebugLog("[FIREWALL] Geolocation lookup failed for %s: %v, allowing by default", ip, err)

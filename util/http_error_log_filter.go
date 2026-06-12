@@ -1,4 +1,4 @@
-package main
+package util
 
 import (
 	"io"
@@ -18,6 +18,6 @@ func (w *httpServerErrorFilter) Write(p []byte) (n int, err error) {
 	return w.out.Write(p)
 }
 
-func newHTTPServerErrorLogger(out io.Writer) *log.Logger {
+func NewHTTPServerErrorLogger(out io.Writer) *log.Logger {
 	return log.New(&httpServerErrorFilter{out: out}, "", log.LstdFlags)
 }

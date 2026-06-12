@@ -1,6 +1,7 @@
-package main
+package cache
 
 import (
+	"bytes"
 	"crypto/md5"
 	"encoding/hex"
 	"encoding/json"
@@ -13,6 +14,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"aps/util"
 
 	"github.com/andybalholm/brotli"
 )
@@ -54,7 +57,7 @@ type memCacheEntry struct {
 }
 
 // 支持缓存的静态文件扩展名
-var defaultCacheExtensions = []string{
+var DefaultCacheExtensions = []string{
 	".css", ".js", ".jpg", ".jpeg", ".gif", ".ico", ".png", ".bmp", ".pict", ".csv",
 	".doc", ".pdf", ".pls", ".ppt", ".tif", ".tiff", ".eps", ".ejs", ".swf", ".midi",
 	".mida", ".ttf", ".eot", ".woff", ".otf", ".svg", ".svgz", ".webp", ".docx", ".xlsx",
@@ -63,8 +66,35 @@ var defaultCacheExtensions = []string{
 	".m4v", ".apk", ".woff2",
 }
 
+// cacheBufferPool is the bytes.Buffer pool used inside cache package.
+// Local copy because http_handler.go's getBuffer/putBuffer are in package main.
+var cacheBufferPool = sync.Pool{
+	New: func() any { return new(bytes.Buffer) },
+}
+
+func getCacheBuffer() *bytes.Buffer {
+	buf := cacheBufferPool.Get().(*bytes.Buffer)
+	buf.Reset()
+	return buf
+}
+
+func putCacheBuffer(buf *bytes.Buffer) {
+	if buf.Cap() <= 1024*1024 {
+		cacheBufferPool.Put(buf)
+	}
+}
+
+// CacheConfig 是 cache 包独立使用的最小化配置。
+// 完整配置在 config.StaticCacheConfig（Stage 2 移入 config/ 后），
+// 调用方在 Stage 1/2 期间将 config.StaticCacheConfig 投影到本结构。
+type CacheConfig struct {
+	Enabled  bool
+	CacheDir string
+	FileType []string
+}
+
 // NewStaticCacheManager 创建新的静态缓存管理器
-func NewStaticCacheManager(config *StaticCacheConfig) *StaticCacheManager {
+func NewStaticCacheManager(config *CacheConfig) *StaticCacheManager {
 	if config == nil || !config.Enabled {
 		return &StaticCacheManager{enabled: false}
 	}
@@ -88,7 +118,7 @@ func NewStaticCacheManager(config *StaticCacheConfig) *StaticCacheManager {
 		extList = config.FileType
 		log.Printf("[CACHE] Using custom file types from config: %v", extList)
 	} else {
-		extList = defaultCacheExtensions
+		extList = DefaultCacheExtensions
 		log.Printf("[CACHE] Using default file types (%d extensions)", len(extList))
 	}
 	for _, ext := range extList {
@@ -274,7 +304,7 @@ func (m *StaticCacheManager) Set(fullURL string, headers http.Header, statusCode
 			diskBody = body
 			compressionType = originalEncoding
 			isCompressed = true
-			DebugLog("[CACHE] Preserving original %s compression: %s (%d bytes)",
+			util.DebugLog("[CACHE] Preserving original %s compression: %s (%d bytes)",
 				originalEncoding, fullURL, len(body))
 		} else {
 			// 没有原始压缩，尝试Brotli压缩
@@ -294,7 +324,7 @@ func (m *StaticCacheManager) Set(fullURL string, headers http.Header, statusCode
 				diskBody = compressedBody
 				compressionType = "br"
 				isCompressed = true
-				DebugLog("[CACHE] Compressed with br: %s (%d -> %d bytes, %.1f%%)",
+				util.DebugLog("[CACHE] Compressed with br: %s (%d -> %d bytes, %.1f%%)",
 					fullURL, originalSize, len(compressedBody),
 					float64(len(compressedBody))/float64(originalSize)*100)
 			} else {
@@ -353,7 +383,7 @@ func (m *StaticCacheManager) Set(fullURL string, headers http.Header, statusCode
 			return
 		}
 
-		DebugLog("[CACHE] STORED: %s (%d bytes, compressed=%v, type=%s)", fullURL, len(diskBody), isCompressed, compressionType)
+		util.DebugLog("[CACHE] STORED: %s (%d bytes, compressed=%v, type=%s)", fullURL, len(diskBody), isCompressed, compressionType)
 	}()
 
 	return nil
@@ -361,8 +391,8 @@ func (m *StaticCacheManager) Set(fullURL string, headers http.Header, statusCode
 
 // compressWithBrotli 使用Brotli压缩数据
 func compressWithBrotli(data []byte) ([]byte, error) {
-	buf := getBuffer()
-	defer putBuffer(buf)
+	buf := getCacheBuffer()
+	defer putCacheBuffer(buf)
 
 	writer := brotli.NewWriterLevel(buf, brotli.DefaultCompression)
 	if _, err := writer.Write(data); err != nil {
@@ -460,13 +490,13 @@ func (m *StaticCacheManager) cleanupExpiredFiles() {
 			binPath := strings.TrimSuffix(metaPath, ".meta") + ".bin"
 			if err := os.Remove(binPath); err != nil {
 				// bin文件可能已经不存在，不记录错误
-				DebugLog("[CACHE] Failed to delete corresponding bin file %s: %v", binPath, err)
+				util.DebugLog("[CACHE] Failed to delete corresponding bin file %s: %v", binPath, err)
 			}
 		}
 	}
 
 	if deletedCount > 0 {
-		DebugLog("[CACHE] Cleanup completed: deleted %d expired cache entries", deletedCount)
+		util.DebugLog("[CACHE] Cleanup completed: deleted %d expired cache entries", deletedCount)
 	}
 }
 

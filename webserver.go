@@ -20,6 +20,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"aps/asn"
 )
 
 const apsTLSPinTokenPrefix = "apspt1."
@@ -183,7 +184,7 @@ func (h *AdminHandlers) RegisterHandlers(mux *http.ServeMux) {
 		// Enrich stats with location and rate limiter status
 		for i := range stats {
 			// Get location from ASN cache
-			location, err := GetIPLocation(stats[i].IP)
+			location, err := asn.GetIPLocation(stats[i].IP)
 			if err == nil && location != nil {
 				stats[i].Location = location
 			}

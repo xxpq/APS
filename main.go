@@ -1,7 +1,6 @@
 package main
 
 import (
-	"container/list"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -23,7 +22,11 @@ import (
 
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/h2c"
+
+	"aps/util"
 	_ "modernc.org/sqlite"
+	"aps/asn"
+	"aps/cache"
 )
 
 // ServerManager manages the lifecycle of multiple HTTP servers.
@@ -41,7 +44,7 @@ type ServerManager struct {
 	scriptRunner   *ScriptRunner
 	trafficShaper  *TrafficShaper
 	stats          *StatsCollector
-	staticCache    *StaticCacheManager
+	staticCache    *cache.StaticCacheManager
 	replayManager  *ReplayManager
 	statsDB        *StatsDB
 	loggingDB      *LoggingDB
@@ -58,7 +61,7 @@ func (c *tunnelInboundConn) TunnelServerName() string {
 	return c.serverName
 }
 
-func NewServerManager(config *Config, configFile string, tunnelManager TunnelManagerInterface, scriptRunner *ScriptRunner, trafficShaper *TrafficShaper, stats *StatsCollector, staticCache *StaticCacheManager, replayManager *ReplayManager, statsDB *StatsDB, loggingDB *LoggingDB, logBroadcaster *LogBroadcaster) *ServerManager {
+func NewServerManager(config *Config, configFile string, tunnelManager TunnelManagerInterface, scriptRunner *ScriptRunner, trafficShaper *TrafficShaper, stats *StatsCollector, staticCache *cache.StaticCacheManager, replayManager *ReplayManager, statsDB *StatsDB, loggingDB *LoggingDB, logBroadcaster *LogBroadcaster) *ServerManager {
 	rateLimiter := NewRateLimitEngine(config.RateLimitRules)
 	// go rateLimiter.CleanupExpired() // RateLimitEngine handles cleanup internally or doesn't need explicit cleanup loop yet?
 	// The new engine uses sync.Map and doesn't have a cleanup loop yet.
@@ -441,19 +444,11 @@ func main() {
 	defer loggingDB.Close()
 
 	//Initialize ASN cache with shared database
-	globalASNCache, err = NewASNCache(db, 1000)
+	asn.GlobalASNCache, err = asn.NewASNCache(db, 1000)
 	if err != nil {
 		log.Printf("[ASN] Failed to initialize ASN cache: %v (continuing without database caching)", err)
 		// Create minimal cache without database
-		globalASNCache = &ASNCache{
-			memoryCache: make(map[string]*cacheEntry),
-			lruList:     list.New(),
-			maxEntries:  1000,
-			httpClient: &http.Client{
-				Timeout: 10 * time.Second,
-			},
-			apiURL: "https://api.ipapi.is/",
-		}
+		asn.GlobalASNCache = asn.NewASNCacheWithoutDB(1000)
 	}
 
 	// Initialize LogBroadcaster to capture logs for SSE
@@ -473,7 +468,16 @@ func main() {
 	defer statsCollector.Close() // Ensure graceful shutdown of async stats workers
 
 	// 閸掓繂顫愰崠鏍饯閹焦鏋冩禒鍓佺处鐎涙顓搁悶鍡楁珤
-	staticCache := NewStaticCacheManager(config.StaticCache)
+	// 閸掓繂顫愰崠鏍饯閹焦鏋冩禒鍓佺处鐎涙顓搁悶鍡楁珤
+	var cacheConfig *cache.CacheConfig
+	if config.StaticCache != nil {
+		cacheConfig = &cache.CacheConfig{
+			Enabled:  config.StaticCache.Enabled,
+			CacheDir: config.StaticCache.CacheDir,
+			FileType: config.StaticCache.FileType,
+		}
+	}
+	staticCache := cache.NewStaticCacheManager(cacheConfig)
 	defer staticCache.Stop()
 
 	// 鐠佸墽鐤唗unnelManager閻ㄥ墕tatsCollector閿涘苯鐤勯悳鎵伂閻愬湱绮虹拋锛勬畱闂嗗棔鑵戝蹇曨吀閻?
@@ -563,7 +567,7 @@ func (sm *ServerManager) StartAll() {
 	}
 }
 
-func createServerHandler(serverName string, mappings []*Mapping, serverConfig *ListenConfig, config *Config, configFile string, tunnelManager TunnelManagerInterface, scriptRunner *ScriptRunner, trafficShaper *TrafficShaper, stats *StatsCollector, staticCache *StaticCacheManager, replayManager *ReplayManager, isACMEEnabled bool, statsDB *StatsDB, loggingDB *LoggingDB, logBroadcaster *LogBroadcaster, rateLimiter *RateLimitEngine) http.Handler {
+func createServerHandler(serverName string, mappings []*Mapping, serverConfig *ListenConfig, config *Config, configFile string, tunnelManager TunnelManagerInterface, scriptRunner *ScriptRunner, trafficShaper *TrafficShaper, stats *StatsCollector, staticCache *cache.StaticCacheManager, replayManager *ReplayManager, isACMEEnabled bool, statsDB *StatsDB, loggingDB *LoggingDB, logBroadcaster *LogBroadcaster, rateLimiter *RateLimitEngine) http.Handler {
 	mux := http.NewServeMux()
 	proxy := NewMapRemoteProxy(config, tunnelManager, scriptRunner, trafficShaper, stats, staticCache, loggingDB, serverName, rateLimiter)
 
@@ -786,7 +790,7 @@ func startServer(name string, config *ListenConfig, handler http.Handler, rateLi
 		// WriteTimeout:      30 * time.Second, // Kill stuck writes after 30s
 		ReadHeaderTimeout: 100 * time.Second, // Already set elsewhere, consolidating here
 		IdleTimeout:       100 * time.Second, // Close idle connections
-		ErrorLog:          newHTTPServerErrorLogger(log.Writer()),
+		ErrorLog:          util.NewHTTPServerErrorLogger(log.Writer()),
 	}
 
 	log.Printf("Starting server '%s' on %s", name, addr)

@@ -7,6 +7,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"aps/asn"
 )
 
 // NumericMetric holds aggregated values for a numeric metric like response time or bytes sent.
@@ -408,7 +410,7 @@ type IPRequestStats struct {
 	RawUDPBytesRecv uint64        `json:"rawUdpBytesRecv"`
 	FirstSeen       time.Time     `json:"firstSeen"`
 	LastSeen        time.Time     `json:"lastSeen"`
-	Location        *LocationInfo `json:"location,omitempty"`
+	Location        *asn.LocationInfo `json:"location,omitempty"`
 	Status          bool          `json:"status"`
 }
 

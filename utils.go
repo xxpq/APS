@@ -22,6 +22,8 @@ import (
 
 	"github.com/andybalholm/brotli"
 	"github.com/gorilla/websocket"
+
+	"aps/cache"
 )
 
 var (
@@ -402,7 +404,7 @@ func isMediaContent(r *http.Request) bool {
 		strings.Contains(lowerType, "zip") ||
 		strings.Contains(lowerType, "compressed") ||
 		strings.Contains(lowerType, "pdf") ||
-		strings.Contains(lowerType, "octet-stream") || containsString(defaultCacheExtensions, strings.ToLower(r.URL.Path))
+		strings.Contains(lowerType, "octet-stream") || containsString(cache.DefaultCacheExtensions, strings.ToLower(r.URL.Path))
 }
 
 // isTextContentType checks if the content type indicates a text-based format

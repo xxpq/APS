@@ -1,4 +1,4 @@
-package main
+package asn
 
 import (
 	"container/list"
@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"aps/util"
 	_ "modernc.org/sqlite"
 )
 
@@ -49,8 +50,8 @@ type LocationInfo struct {
 	Longitude   float64 `json:"longitude"`
 }
 
-// cacheEntry represents an entry in the LRU cache
-type cacheEntry struct {
+// CacheEntry represents an entry in the LRU cache
+type CacheEntry struct {
 	ip      string
 	data    *IPGeolocation
 	element *list.Element
@@ -59,7 +60,7 @@ type cacheEntry struct {
 // ASNCache manages IP geolocation data with three-tier caching
 type ASNCache struct {
 	// Memory cache (LRU, max 1000 entries)
-	memoryCache map[string]*cacheEntry
+	memoryCache map[string]*CacheEntry
 	lruList     *list.List
 	maxEntries  int
 	mu          sync.RWMutex
@@ -81,20 +82,20 @@ type ASNCache struct {
 }
 
 var (
-	globalASNCache *ASNCache
+	GlobalASNCache *ASNCache
 	cacheOnce      sync.Once
 )
 
 // GetASNCache returns the globally initialized ASN cache instance
 // The cache is initialized in main() with the shared database connection
 func GetASNCache() *ASNCache {
-	return globalASNCache
+	return GlobalASNCache
 }
 
 // NewASNCache creates a new ASN cache with the provided database connection
 func NewASNCache(db *sql.DB, maxEntries int) (*ASNCache, error) {
 	cache := &ASNCache{
-		memoryCache: make(map[string]*cacheEntry),
+		memoryCache: make(map[string]*CacheEntry),
 		lruList:     list.New(),
 		maxEntries:  maxEntries,
 		db:          db,
@@ -114,6 +115,33 @@ func NewASNCache(db *sql.DB, maxEntries int) (*ASNCache, error) {
 
 	log.Printf("[ASN] Initialized ASN cache (max %d entries)", maxEntries)
 	return cache, nil
+}
+
+// NewASNCacheWithoutDB creates an ASN cache without database persistence.
+// Used as a fallback when DB initialization fails.
+func NewASNCacheWithoutDB(maxEntries int) *ASNCache {
+	return &ASNCache{
+		memoryCache: make(map[string]*CacheEntry),
+		lruList:     list.New(),
+		maxEntries:  maxEntries,
+		httpClient: &http.Client{
+			Timeout: 10 * time.Second,
+		},
+		apiURL:      "https://api.ipapi.is/",
+		lookupQueue: make(chan string, 1000),
+	}
+}
+
+// NewASNCacheForTest creates an ASN cache suitable for unit tests.
+// It exposes direct memory injection to bypass the lookup pipeline.
+func NewASNCacheForTest(maxEntries int) *ASNCache {
+	return NewASNCacheWithoutDB(maxEntries)
+}
+
+// InjectMemoryForTest inserts an entry directly into the in-memory cache.
+// Exported for tests in other packages (e.g. firewall_test).
+func (c *ASNCache) InjectMemoryForTest(ip string, geo *IPGeolocation) {
+	c.addToMemory(ip, geo)
 }
 
 func (c *ASNCache) initSchema() error {
@@ -171,7 +199,7 @@ func GetIPLocation(ip string) (*LocationInfo, error) {
 func (c *ASNCache) lookup(ip string) (*IPGeolocation, error) {
 	// 1. Check memory cache
 	if geo := c.getFromMemory(ip); geo != nil {
-		DebugLogThrottled(
+		util.DebugLogThrottled(
 			"asn_memory_cache_hit|"+ip,
 			30*time.Second,
 			"[ASN] Memory cache hit for %s",
@@ -182,7 +210,7 @@ func (c *ASNCache) lookup(ip string) (*IPGeolocation, error) {
 
 	// 2. Check database cache
 	if geo := c.getFromDatabase(ip); geo != nil {
-		DebugLogThrottled(
+		util.DebugLogThrottled(
 			"asn_database_cache_hit|"+ip,
 			30*time.Second,
 			"[ASN] Database cache hit for %s",
@@ -199,10 +227,10 @@ func (c *ASNCache) lookup(ip string) (*IPGeolocation, error) {
 		c.pendingLookups.Store(ip, true)
 		select {
 		case c.lookupQueue <- ip:
-			DebugLog("[ASN] Triggered background lookup for %s", ip)
+			util.DebugLog("[ASN] Triggered background lookup for %s", ip)
 		default:
 			c.pendingLookups.Delete(ip)
-			DebugLog("[ASN] Lookup queue full, skipping %s", ip)
+			util.DebugLog("[ASN] Lookup queue full, skipping %s", ip)
 		}
 	}
 
@@ -227,12 +255,12 @@ func (c *ASNCache) processIP(ip string) {
 			// Success: Cache and return
 			c.addToMemory(ip, geo)
 			c.addToDatabase(ip, geo)
-			DebugLog("[ASN] Background lookup success for %s", ip)
+			util.DebugLog("[ASN] Background lookup success for %s", ip)
 			return
 		}
 
 		// Failure: Log and retry after delay
-		DebugLog("[ASN] Background lookup failed for %s: %v. Retrying in 1s...", ip, err)
+		util.DebugLog("[ASN] Background lookup failed for %s: %v. Retrying in 1s...", ip, err)
 		time.Sleep(1 * time.Second)
 	}
 }
@@ -267,15 +295,15 @@ func (c *ASNCache) addToMemory(ip string, geo *IPGeolocation) {
 	if c.lruList.Len() >= c.maxEntries {
 		oldest := c.lruList.Back()
 		if oldest != nil {
-			oldEntry := oldest.Value.(*cacheEntry)
+			oldEntry := oldest.Value.(*CacheEntry)
 			delete(c.memoryCache, oldEntry.ip)
 			c.lruList.Remove(oldest)
-			DebugLog("[ASN] Evicted %s from memory cache (LRU)", oldEntry.ip)
+			util.DebugLog("[ASN] Evicted %s from memory cache (LRU)", oldEntry.ip)
 		}
 	}
 
 	// Add new entry
-	entry := &cacheEntry{
+	entry := &CacheEntry{
 		ip:   ip,
 		data: geo,
 	}
@@ -295,7 +323,7 @@ func (c *ASNCache) getFromDatabase(ip string) *IPGeolocation {
 	err := c.db.QueryRow("SELECT data, timestamp FROM ip_geolocation WHERE ip = ?", ip).Scan(&dataJSON, &timestamp)
 	if err != nil {
 		if err != sql.ErrNoRows {
-			DebugLog("[ASN] Database query error for %s: %v", ip, err)
+			util.DebugLog("[ASN] Database query error for %s: %v", ip, err)
 		}
 		return nil
 	}
@@ -386,7 +414,7 @@ func (c *ASNCache) queryAPI(ip string) (*IPGeolocation, error) {
 		},
 	}
 
-	DebugLog("[ASN] Retrieved geolocation for %s: %s-%s-%s (%.6f, %.6f)",
+	util.DebugLog("[ASN] Retrieved geolocation for %s: %s-%s-%s (%.6f, %.6f)",
 		ip, apiResp.Country, apiResp.RegionName, apiResp.City, apiResp.Lat, apiResp.Lon)
 	return geo, nil
 }

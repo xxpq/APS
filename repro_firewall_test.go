@@ -1,20 +1,15 @@
 package main
 
 import (
-	"container/list"
-	"net/http"
 	"testing"
+
+	"aps/asn"
 )
 
 func TestFirewallBypassRepro(t *testing.T) {
 	// 1. Setup Mock ASN Cache
-	cache := &ASNCache{
-		memoryCache: make(map[string]*cacheEntry),
-		lruList:     list.New(),
-		maxEntries:  1000,
-		httpClient:  &http.Client{},
-	}
-	globalASNCache = cache
+	cache := asn.NewASNCacheForTest(1000)
+	asn.GlobalASNCache = cache
 
 	// 2. Populate Cache with the problematic IP data
 	// Log: [80.75.212.125][DE-Hesse-Frankfurt]
@@ -24,9 +19,9 @@ func TestFirewallBypassRepro(t *testing.T) {
 	// State = province (Hesse)
 	// City = Frankfurt
 	ip := "80.75.212.125"
-	geo := &IPGeolocation{
+	geo := &asn.IPGeolocation{
 		IP: ip,
-		Location: &LocationInfo{
+		Location: &asn.LocationInfo{
 			Country:     "Hesse",
 			CountryCode: "DE",
 			State:       "Hesse",
@@ -35,7 +30,7 @@ func TestFirewallBypassRepro(t *testing.T) {
 			Longitude:   0,
 		},
 	}
-	cache.addToMemory(ip, geo)
+	cache.InjectMemoryForTest(ip, geo)
 
 	// 3. Define Firewall Rule (china_only)
 	rule := &FirewallRule{

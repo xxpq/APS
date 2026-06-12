@@ -13,6 +13,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"aps/asn"
 )
 
 // RawTCPServer manages a raw TCP server for forwarding connections
@@ -39,7 +41,7 @@ func formatLocationTag(ipWithPort string) string {
 		ip = host
 	}
 
-	location, err := GetIPLocation(ip)
+	location, err := asn.GetIPLocation(ip)
 	if err != nil || location == nil {
 		return fmt.Sprintf("[%s]", ip)
 	}
