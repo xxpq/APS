@@ -707,7 +707,6 @@ func (h *AdminHandlers) handleUsers(w http.ResponseWriter, r *http.Request) {
 					"admin":              u.Admin,
 					"token":              u.Token,
 					"groups":             u.Groups,
-					"dump":               u.Dump,
 					"endpoint":           u.Endpoint,
 					"tunnel":             u.Tunnel,
 					"connectionPolicies": u.ConnectionPolicies,

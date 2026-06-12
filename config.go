@@ -522,7 +522,6 @@ type User struct {
 	Admin             bool        `json:"admin,omitempty"`
 	Token             string      `json:"token,omitempty"`
 	Groups            []string    `json:"groups,omitempty"`
-	Dump              string      `json:"dump,omitempty"`
 	LogLevel          *int        `json:"logLevel,omitempty"`          // 日志等级: 0=不记录, 1=基本请求, 2=完整请求
 	LogRetentionHours *int        `json:"logRetentionHours,omitempty"` // 日志保留时长(小时)
 	Endpoint          interface{} `json:"endpoint,omitempty"`          // string or []string
@@ -534,7 +533,6 @@ type User struct {
 
 type Group struct {
 	Users             []string    `json:"users,omitempty"`
-	Dump              string      `json:"dump,omitempty"`
 	LogLevel          *int        `json:"logLevel,omitempty"`          // 日志等级: 0=不记录, 1=基本请求, 2=完整请求
 	LogRetentionHours *int        `json:"logRetentionHours,omitempty"` // 日志保留时长(小时)
 	Endpoint          interface{} `json:"endpoint,omitempty"`          // string or []string
@@ -761,7 +759,6 @@ type Mapping struct {
 	Cc                []string    `json:"cc,omitempty"`
 	P12               string      `json:"p12,omitempty"` // 引用 p12s 的 key
 	Auth              *RuleAuth   `json:"auth,omitempty"`
-	Dump              string      `json:"dump,omitempty"`
 	LogLevel          *int        `json:"logLevel,omitempty"`          // 日志等级: 0=不记录, 1=基本请求, 2=完整请求
 	LogRetentionHours *int        `json:"logRetentionHours,omitempty"` // 日志保留时长(小时)
 	Firewall          string      `json:"firewall,omitempty"`          // 引用 firewalls 的 key
@@ -794,7 +791,6 @@ type ListenConfig struct {
 	Cert              interface{} `json:"cert,omitempty"`  // string ("auto") or CertFiles
 	Key               string      `json:"key,omitempty"`
 	Auth              *ServerAuth `json:"auth,omitempty"`
-	Dump              string      `json:"dump,omitempty"`
 	LogLevel          *int        `json:"logLevel,omitempty"`          // 日志等级: 0=不记录, 1=基本请求, 2=完整请求
 	LogRetentionHours *int        `json:"logRetentionHours,omitempty"` // 日志保留时长(小时)
 	Endpoints         interface{} `json:"endpoints,omitempty"`         // string or []string
@@ -1219,7 +1215,6 @@ func (c *Config) Reload(filename string) (map[string]*ListenConfig, error) {
 			Type:               cfg.Type,
 			Key:                cfg.Key,
 			Cert:               cfg.Cert,
-			Dump:               cfg.Dump,
 			Endpoints:          cfg.Endpoints,
 			Tunnels:            cfg.Tunnels,
 			Firewall:           cfg.Firewall,

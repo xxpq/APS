@@ -75,7 +75,6 @@ go build .
 - `auth`: (可选) `object`。为此服务器启用代理认证。
   - `users`: `array` of `string`。允许访问的用户列表。
   - `groups`: `array` of `string`。允许访问的用户组列表。
-- `dump`: (可选) `string`。HAR 文件路径，用于记录通过此服务器的所有流量。
 - `public`: (可选) `boolean`。默认 `true`。为 `true` 时监听 `0.0.0.0:port`，为 `false` 时仅监听 `127.0.0.1:port`。
 - `panel`: (可选) `boolean`。默认 `false`。为 `true` 时注册管理端路由 `/.api/*` 与 `/.admin/`；为 `false` 时不注册这些路由（`/.replay` 始终可用）。
 - `endpoint`: (可选) `string` 或 `array` of `string`。服务级端点配置，用于请求转发。当请求未命中mapping规则时，如果server配置了endpoints，请求将被转发到这些端点。
@@ -166,7 +165,6 @@ go run ./endpoint/main.go -server 127.0.0.1:3000 -tunnel my-secure-tunnel -name 
   - 优先级：`from.proxy`（在 `from` 的 EndpointConfig 中声明）优先于 `via.proxies`，合并与选择逻辑见 [processConfig()](config.go:576)。
 - `cc`: (可选) `array` of `string`。将请求“抄送”(Carbon Copy) 到一个或多个额外的目标 URL。抄送请求会复制原请求的 Method/URL/Headers/Body，异步发送，不影响主请求响应，且忽略抄送响应（仅记录日志）。
 - `auth`: (可选) `object`。为此规则覆盖服务器级别的认证，或为无认证的服务器添加认证。
-- `dump`: (可选) `string`。HAR 文件路径，仅记录匹配此规则的流量。
 - `p12`: (可选) `string`。指定一个在 `p12s` 中定义的 P12 客户端证书，用于与目标服务器进行 mTLS 通信。
 - `ConnectionPolicies` & `TrafficPolicies`: (可选) 为此规则设置特定的策略。
 
@@ -756,8 +754,7 @@ if __name__ == "__main__":
       },
       "auth": {
         "groups": ["internal_users"]
-      },
-      "dump": "./logs/all_traffic.har"
+      }
     }
   },
   "auth": {

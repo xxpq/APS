@@ -14,7 +14,6 @@ import (
 type MapRemoteProxy struct {
 	config *Config
 	// dataStore          *DataStore // Removed, no longer needed
-	harManager    *HarLoggerManager
 	tunnelManager TunnelManagerInterface
 	scriptRunner  *ScriptRunner
 	trafficShaper *TrafficShaper
@@ -29,7 +28,7 @@ type MapRemoteProxy struct {
 	endpointTunnelMap  map[string]string // endpointName -> tunnelName
 }
 
-func NewMapRemoteProxy(config *Config, harManager *HarLoggerManager, tunnelManager TunnelManagerInterface, scriptRunner *ScriptRunner, trafficShaper *TrafficShaper, stats *StatsCollector, staticCache *StaticCacheManager, loggingDB *LoggingDB, serverName string, rateLimiter *RateLimitEngine) *MapRemoteProxy {
+func NewMapRemoteProxy(config *Config, tunnelManager TunnelManagerInterface, scriptRunner *ScriptRunner, trafficShaper *TrafficShaper, stats *StatsCollector, staticCache *StaticCacheManager, loggingDB *LoggingDB, serverName string, rateLimiter *RateLimitEngine) *MapRemoteProxy {
 	// Default policies from the server config, if they exist
 	serverConfig := config.Servers[serverName]
 	policies := config.ResolvePolicies(serverConfig, &Mapping{}, nil, "") // Get server-level or default policies
@@ -50,7 +49,6 @@ func NewMapRemoteProxy(config *Config, harManager *HarLoggerManager, tunnelManag
 
 	p := &MapRemoteProxy{
 		config:            config,
-		harManager:        harManager,
 		tunnelManager:     tunnelManager,
 		scriptRunner:      scriptRunner,
 		trafficShaper:     trafficShaper,

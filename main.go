@@ -37,7 +37,6 @@ type ServerManager struct {
 	config     *Config
 	configFile string
 	// dataStore     *DataStore // Removed, replaced by statsDB for persistence
-	harManager     *HarLoggerManager
 	tunnelManager  TunnelManagerInterface
 	scriptRunner   *ScriptRunner
 	trafficShaper  *TrafficShaper
@@ -59,7 +58,7 @@ func (c *tunnelInboundConn) TunnelServerName() string {
 	return c.serverName
 }
 
-func NewServerManager(config *Config, configFile string, harManager *HarLoggerManager, tunnelManager TunnelManagerInterface, scriptRunner *ScriptRunner, trafficShaper *TrafficShaper, stats *StatsCollector, staticCache *StaticCacheManager, replayManager *ReplayManager, statsDB *StatsDB, loggingDB *LoggingDB, logBroadcaster *LogBroadcaster) *ServerManager {
+func NewServerManager(config *Config, configFile string, tunnelManager TunnelManagerInterface, scriptRunner *ScriptRunner, trafficShaper *TrafficShaper, stats *StatsCollector, staticCache *StaticCacheManager, replayManager *ReplayManager, statsDB *StatsDB, loggingDB *LoggingDB, logBroadcaster *LogBroadcaster) *ServerManager {
 	rateLimiter := NewRateLimitEngine(config.RateLimitRules)
 	// go rateLimiter.CleanupExpired() // RateLimitEngine handles cleanup internally or doesn't need explicit cleanup loop yet?
 	// The new engine uses sync.Map and doesn't have a cleanup loop yet.
@@ -75,7 +74,6 @@ func NewServerManager(config *Config, configFile string, harManager *HarLoggerMa
 		muxes:          make(map[string]*ConnectionMux),
 		config:         config,
 		configFile:     configFile,
-		harManager:     harManager,
 		tunnelManager:  tunnelManager,
 		scriptRunner:   scriptRunner,
 		trafficShaper:  trafficShaper,
@@ -191,7 +189,7 @@ func (sm *ServerManager) Start(name string, serverConfig *ListenConfig, isACMEEn
 	// Start HTTP Server if enabled (Type 2 or 5)
 	// Note: Type 0 defaults to HTTP in config processing, but here we check explicitly
 	if serverConfig.Type == ServerTypeHTTP || serverConfig.Type == ServerTypeHTTPUDP {
-		handler := createServerHandler(name, serverMappings[name], serverConfig, sm.config, sm.configFile, sm.harManager, sm.tunnelManager, sm.scriptRunner, sm.trafficShaper, sm.stats, sm.staticCache, sm.replayManager, isACMEEnabled, sm.statsDB, sm.loggingDB, sm.logBroadcaster, sm.rateLimiter)
+		handler := createServerHandler(name, serverMappings[name], serverConfig, sm.config, sm.configFile, sm.tunnelManager, sm.scriptRunner, sm.trafficShaper, sm.stats, sm.staticCache, sm.replayManager, isACMEEnabled, sm.statsDB, sm.loggingDB, sm.logBroadcaster, sm.rateLimiter)
 		server, mux := startServer(name, serverConfig, handler, sm.rateLimiter)
 		if server != nil {
 			sm.servers[name] = server
@@ -468,9 +466,6 @@ func main() {
 		log.Fatalf("Failed to load initial quota usage from DB: %v", err)
 	}
 
-	harManager := NewHarLoggerManager(config)
-	defer harManager.Shutdown()
-
 	tunnelManager := NewHybridTunnelManager(config, nil, statsDB) // 娴ｈ法鏁ゅǎ宄版値闂呇囦壕缁狅紕鎮婇崳?
 	scriptRunner := NewScriptRunner(config.Scripting)
 	trafficShaper := NewTrafficShaper(initialQuotaUsage)
@@ -485,7 +480,7 @@ func main() {
 	tunnelManager.SetStatsCollector(statsCollector)
 	replayManager := NewReplayManager(config)
 
-	serverManager := NewServerManager(config, *configFile, harManager, tunnelManager, scriptRunner, trafficShaper, statsCollector, staticCache, replayManager, statsDB, loggingDB, logBroadcaster)
+	serverManager := NewServerManager(config, *configFile, tunnelManager, scriptRunner, trafficShaper, statsCollector, staticCache, replayManager, statsDB, loggingDB, logBroadcaster)
 
 	watcher, err := NewConfigWatcher(*configFile, config, serverManager)
 	if err != nil {
@@ -568,9 +563,9 @@ func (sm *ServerManager) StartAll() {
 	}
 }
 
-func createServerHandler(serverName string, mappings []*Mapping, serverConfig *ListenConfig, config *Config, configFile string, harManager *HarLoggerManager, tunnelManager TunnelManagerInterface, scriptRunner *ScriptRunner, trafficShaper *TrafficShaper, stats *StatsCollector, staticCache *StaticCacheManager, replayManager *ReplayManager, isACMEEnabled bool, statsDB *StatsDB, loggingDB *LoggingDB, logBroadcaster *LogBroadcaster, rateLimiter *RateLimitEngine) http.Handler {
+func createServerHandler(serverName string, mappings []*Mapping, serverConfig *ListenConfig, config *Config, configFile string, tunnelManager TunnelManagerInterface, scriptRunner *ScriptRunner, trafficShaper *TrafficShaper, stats *StatsCollector, staticCache *StaticCacheManager, replayManager *ReplayManager, isACMEEnabled bool, statsDB *StatsDB, loggingDB *LoggingDB, logBroadcaster *LogBroadcaster, rateLimiter *RateLimitEngine) http.Handler {
 	mux := http.NewServeMux()
-	proxy := NewMapRemoteProxy(config, harManager, tunnelManager, scriptRunner, trafficShaper, stats, staticCache, loggingDB, serverName, rateLimiter)
+	proxy := NewMapRemoteProxy(config, tunnelManager, scriptRunner, trafficShaper, stats, staticCache, loggingDB, serverName, rateLimiter)
 
 	authHandlers := &AuthHandlers{}
 	authHandlers.RegisterHandlers(mux)

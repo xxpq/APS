@@ -1020,7 +1020,6 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 
 		if err != nil {
 			isError = true
-			p.logHarEntry(r, nil, startTime, mapping, user)
 			http.Error(w, "Failed to proxy request", http.StatusBadGateway)
 			log.Printf("Error proxying request: %v", err)
 			statusCode = http.StatusBadGateway // Capture error status code
@@ -1041,8 +1040,6 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-
-	p.logHarEntry(r, resp, startTime, mapping, user)
 
 	copyHeaders(w.Header(), resp.Header)
 	setCorsHeaders(w.Header())
