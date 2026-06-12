@@ -1,4 +1,4 @@
-package main
+package security
 
 import (
 	"crypto/aes"
@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"sync"
 	"time"
+
 )
 
 const (

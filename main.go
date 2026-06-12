@@ -29,6 +29,7 @@ import (
 	"aps/cache"
 	"aps/logging"
 	"aps/stats"
+	"aps/security"
 )
 
 // ServerManager manages the lifecycle of multiple HTTP servers.
@@ -47,7 +48,7 @@ type ServerManager struct {
 	trafficShaper  *stats.TrafficShaper
 	stats          *stats.StatsCollector
 	staticCache    *cache.StaticCacheManager
-	replayManager  *ReplayManager
+	replayManager  *security.ReplayManager
 	statsDB        *stats.StatsDB
 	loggingDB      *logging.LoggingDB
 	logBroadcaster *logging.LogBroadcaster
@@ -63,7 +64,7 @@ func (c *tunnelInboundConn) TunnelServerName() string {
 	return c.serverName
 }
 
-func NewServerManager(config *Config, configFile string, tunnelManager TunnelManagerInterface, scriptRunner *ScriptRunner, trafficShaper *stats.TrafficShaper, statsCol *stats.StatsCollector, staticCache *cache.StaticCacheManager, replayManager *ReplayManager, statsDB *stats.StatsDB, loggingDB *logging.LoggingDB, logBroadcaster *logging.LogBroadcaster) *ServerManager {
+func NewServerManager(config *Config, configFile string, tunnelManager TunnelManagerInterface, scriptRunner *ScriptRunner, trafficShaper *stats.TrafficShaper, statsCol *stats.StatsCollector, staticCache *cache.StaticCacheManager, replayManager *security.ReplayManager, statsDB *stats.StatsDB, loggingDB *logging.LoggingDB, logBroadcaster *logging.LogBroadcaster) *ServerManager {
 	rateLimiter := stats.NewRateLimitEngine(config.RateLimitRules)
 	// go rateLimiter.CleanupExpired() // stats.RateLimitEngine handles cleanup internally or doesn't need explicit cleanup loop yet?
 	// The new engine uses sync.Map and doesn't have a cleanup loop yet.
@@ -488,7 +489,7 @@ func main() {
 
 	// 鐠佸墽鐤唗unnelManager閻ㄥ墕tatsCollector閿涘苯鐤勯悳鎵伂閻愬湱绮虹拋锛勬畱闂嗗棔鑵戝蹇曨吀閻?
 	tunnelManager.SetStatsCollector(statsCollector)
-	replayManager := NewReplayManager(config)
+	replayManager := security.NewReplayManager()
 
 	serverManager := NewServerManager(config, *configFile, tunnelManager, scriptRunner, trafficShaper, statsCollector, staticCache, replayManager, statsDB, loggingDB, logBroadcaster)
 
@@ -573,7 +574,7 @@ func (sm *ServerManager) StartAll() {
 	}
 }
 
-func createServerHandler(serverName string, mappings []*Mapping, serverConfig *ListenConfig, config *Config, configFile string, tunnelManager TunnelManagerInterface, scriptRunner *ScriptRunner, trafficShaper *stats.TrafficShaper, statsCol *stats.StatsCollector, staticCache *cache.StaticCacheManager, replayManager *ReplayManager, isACMEEnabled bool, statsDB *stats.StatsDB, loggingDB *logging.LoggingDB, logBroadcaster *logging.LogBroadcaster, rateLimiter *stats.RateLimitEngine) http.Handler {
+func createServerHandler(serverName string, mappings []*Mapping, serverConfig *ListenConfig, config *Config, configFile string, tunnelManager TunnelManagerInterface, scriptRunner *ScriptRunner, trafficShaper *stats.TrafficShaper, statsCol *stats.StatsCollector, staticCache *cache.StaticCacheManager, replayManager *security.ReplayManager, isACMEEnabled bool, statsDB *stats.StatsDB, loggingDB *logging.LoggingDB, logBroadcaster *logging.LogBroadcaster, rateLimiter *stats.RateLimitEngine) http.Handler {
 	mux := http.NewServeMux()
 	proxy := NewMapRemoteProxy(config, tunnelManager, scriptRunner, trafficShaper, statsCol, staticCache, loggingDB, serverName, rateLimiter)
 

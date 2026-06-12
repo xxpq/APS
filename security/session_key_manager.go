@@ -1,4 +1,4 @@
-package main
+package security
 
 import (
 	"crypto/aes"
@@ -105,7 +105,7 @@ func NewSessionKeyManager(masterPassword string, endpointName string, statsDB *s
 }
 
 func (skm *SessionKeyManager) SetKDFParams(version, salt string) error {
-	normalizedVersion, err := normalizeKDFVersion(version)
+	normalizedVersion, err := NormalizeKDFVersion(version)
 	if err != nil {
 		return err
 	}
@@ -122,8 +122,8 @@ func (skm *SessionKeyManager) SetKDFParams(version, salt string) error {
 	return nil
 }
 
-func deriveInitialKeyWithKDF(masterPassword, version, salt string) ([]byte, error) {
-	normalizedVersion, err := normalizeKDFVersion(version)
+func DeriveInitialKeyWithKDF(masterPassword, version, salt string) ([]byte, error) {
+	normalizedVersion, err := NormalizeKDFVersion(version)
 	if err != nil {
 		return nil, err
 	}
@@ -159,7 +159,7 @@ func (skm *SessionKeyManager) DeriveInitialKey() error {
 	if kdfVersion == "" {
 		kdfVersion = DefaultTunnelKDFVersion
 	}
-	derivedKey, err := deriveInitialKeyWithKDF(skm.masterPassword, kdfVersion, skm.kdfSalt)
+	derivedKey, err := DeriveInitialKeyWithKDF(skm.masterPassword, kdfVersion, skm.kdfSalt)
 	if err != nil {
 		return err
 	}

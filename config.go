@@ -18,6 +18,7 @@ import (
 	"aps/util"
 	"aps/firewall"
 	"aps/stats"
+	"aps/security"
 )
 
 // IsDebugMode 全局debug模式标志（re-export 自 aps/util，Stage 8 清理）。
@@ -1161,9 +1162,18 @@ func processConfig(config *Config) error {
 		}
 	}
 
-	if err := ensureTunnelKDFSettings(config); err != nil {
+	kdfTunnels := make(map[string]*security.TunnelKDFConfig)
+	for name, t := range config.Tunnels {
+		if t == nil { continue }
+		kdfTunnels[name] = &security.TunnelKDFConfig{
+			KDFVersion: t.KDFVersion,
+			KDFSalt:    stringPtr(t.KDFSalt),
+		}
+	}
+	if err := security.EnsureTunnelKDFSettings(kdfTunnels); err != nil {
 		return err
 	}
+
 
 	return nil
 }
@@ -1481,3 +1491,6 @@ func minRate(rates []string) (string, error) {
 	}
 	return minRateStr, nil
 }
+
+// stringPtr returns a pointer to the given string value.
+func stringPtr(s string) *string { return &s }

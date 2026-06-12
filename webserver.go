@@ -563,9 +563,18 @@ func (h *AdminHandlers) setConfig(w http.ResponseWriter, r *http.Request) {
 
 // ===== 辅助：保存当前内存配置到文件（需持有写锁）=====
 func (h *AdminHandlers) saveConfigLocked() error {
-	if err := ensureTunnelKDFSettings(h.config); err != nil {
+	kdfTunnels := make(map[string]*security.TunnelKDFConfig)
+	for name, t := range h.config.Tunnels {
+		if t == nil { continue }
+		kdfTunnels[name] = &security.TunnelKDFConfig{
+			KDFVersion: t.KDFVersion,
+			KDFSalt:    stringPtr(t.KDFSalt),
+		}
+	}
+	if err := security.EnsureTunnelKDFSettings(kdfTunnels); err != nil {
 		return err
 	}
+
 
 	// Increment version for concurrent editing detection
 	h.config.Version++
@@ -590,7 +599,7 @@ func (h *AdminHandlers) getTunnelKDFParamsLocked(tunnelName string) (string, str
 		return "", "", fmt.Errorf("tunnel '%s' not found", tunnelName)
 	}
 
-	kdfVersion, err := normalizeKDFVersion(tunnel.KDFVersion)
+	kdfVersion, err := security.NormalizeKDFVersion(tunnel.KDFVersion)
 	if err != nil {
 		return "", "", err
 	}

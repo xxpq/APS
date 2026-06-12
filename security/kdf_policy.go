@@ -1,4 +1,4 @@
-package main
+package security
 
 import (
 	"crypto/rand"
@@ -14,7 +14,7 @@ const (
 	tunnelKDFSaltBytes       = 16
 )
 
-func normalizeKDFVersion(version string) (string, error) {
+func NormalizeKDFVersion(version string) (string, error) {
 	version = strings.ToLower(strings.TrimSpace(version))
 	if version == "" {
 		return DefaultTunnelKDFVersion, nil
@@ -27,7 +27,7 @@ func normalizeKDFVersion(version string) (string, error) {
 	}
 }
 
-func generateTunnelKDFSalt() (string, error) {
+func GenerateTunnelKDFSalt() (string, error) {
 	salt := make([]byte, tunnelKDFSaltBytes)
 	if _, err := rand.Read(salt); err != nil {
 		return "", err
@@ -35,30 +35,39 @@ func generateTunnelKDFSalt() (string, error) {
 	return hex.EncodeToString(salt), nil
 }
 
-func ensureTunnelKDFSettings(config *Config) error {
-	if config == nil || config.Tunnels == nil {
+// ensureTunnelKDFSettings 在调用方传入的 tunnels map 上设置 KDF 默认值。
+// 接受 map[string]*TunnelKDFConfig 而不是 *Config 以解耦 security 包对 config 包的依赖。
+func EnsureTunnelKDFSettings(tunnels map[string]*TunnelKDFConfig) error {
+	if tunnels == nil {
 		return nil
 	}
 
-	for tunnelName, tunnel := range config.Tunnels {
+	for tunnelName, tunnel := range tunnels {
 		if tunnel == nil {
 			continue
 		}
 
-		normalizedVersion, err := normalizeKDFVersion(tunnel.KDFVersion)
+		normalizedVersion, err := NormalizeKDFVersion(tunnel.KDFVersion)
 		if err != nil {
 			return fmt.Errorf("tunnel %s: %w", tunnelName, err)
 		}
 		tunnel.KDFVersion = normalizedVersion
 
-		if strings.TrimSpace(tunnel.KDFSalt) == "" {
-			salt, genErr := generateTunnelKDFSalt()
+		if tunnel.KDFSalt == nil || strings.TrimSpace(*tunnel.KDFSalt) == "" {
+			salt, genErr := GenerateTunnelKDFSalt()
 			if genErr != nil {
 				return fmt.Errorf("tunnel %s: failed to generate kdfSalt: %w", tunnelName, genErr)
 			}
-			tunnel.KDFSalt = salt
+			tunnel.KDFSalt = &salt
 		}
 	}
 
 	return nil
+}
+
+// TunnelKDFConfig 描述 KDF 策略所需的最小配置结构。
+// 解耦 security 包对 config 包的依赖。
+type TunnelKDFConfig struct {
+	KDFVersion string
+	KDFSalt    *string
 }

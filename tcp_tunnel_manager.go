@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"aps/stats"
+	"aps/security"
 )
 
 // pendingRequestPool removed to prevent reusing closed channels
@@ -660,7 +661,7 @@ func (tm *TCPTunnelManager) SendConfigUpdate(tunnelName, endpointName string, pa
 	}
 	tm.mu.RUnlock()
 
-	protectedPayload, err := WrapControlPlanePayload(ep.KeyManager, MsgTypeConfigUpdate, payload, configVersion, ep.ControlOut)
+	protectedPayload, err := security.WrapControlPlanePayload(ep.KeyManager, MsgTypeConfigUpdate, payload, configVersion, ep.ControlOut)
 	if err != nil {
 		return err
 	}

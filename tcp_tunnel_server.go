@@ -67,8 +67,8 @@ type TCPEndpoint struct {
 	Stats            EndpointStats
 
 	// Session key manager for dynamic encryption
-	KeyManager *SessionKeyManager
-	ControlOut *ControlPlaneOutboundState
+	KeyManager *security.SessionKeyManager
+	ControlOut *security.ControlPlaneOutboundState
 
 	// Pending requests and proxy connections
 	mu              sync.Mutex
@@ -147,7 +147,7 @@ func (s *TCPTunnelServer) SetTunnelManager(tm *TCPTunnelManager) {
 }
 
 func deriveRegistrationProofKey(password, cid string, pinHash []byte, kdfVersion, kdfSalt string) ([]byte, error) {
-	baseKey, err := deriveInitialKeyWithKDF(password, kdfVersion, kdfSalt)
+	baseKey, err := security.DeriveInitialKeyWithKDF(password, kdfVersion, kdfSalt)
 	if err != nil {
 		return nil, err
 	}
@@ -220,8 +220,8 @@ func (s *TCPTunnelServer) registerSecureRegistrationReplayToken(cid string, ts i
 		return errors.New("registration replay detected")
 	}
 	s.replaySeen[token] = expiry
-	if len(s.replaySeen) > SecureReplayMaxEntries {
-		toDelete := len(s.replaySeen) - SecureReplayMaxEntries
+	if len(s.replaySeen) > security.SecureReplayMaxEntries {
+		toDelete := len(s.replaySeen) - security.SecureReplayMaxEntries
 		for k := range s.replaySeen {
 			delete(s.replaySeen, k)
 			toDelete--
@@ -618,7 +618,7 @@ func (s *TCPTunnelServer) handleConnection(conn net.Conn) {
 	}
 
 	// Initialize per-connection session key manager
-	endpoint.KeyManager = NewSessionKeyManager(effectiveCredential, reg.EndpointName, s.statsDB)
+	endpoint.KeyManager = security.NewSessionKeyManager(effectiveCredential, reg.EndpointName, s.statsDB)
 	if err := endpoint.KeyManager.SetKDFParams(tunnelConfig.KDFVersion, tunnelConfig.KDFSalt); err != nil {
 		DebugLog("[TCP TUNNEL] Failed to set KDF parameters for %s: %v", remoteAddr, err)
 		tc.Close()
@@ -634,7 +634,7 @@ func (s *TCPTunnelServer) handleConnection(conn net.Conn) {
 		tc.Close()
 		return
 	}
-	endpoint.ControlOut = NewControlPlaneOutboundState()
+	endpoint.ControlOut = security.NewControlPlaneOutboundState()
 
 	// Register endpoint
 	s.mu.Lock()
@@ -1857,7 +1857,7 @@ func (ep *TCPEndpoint) initiateKeyRotation() error {
 		return err
 	}
 
-	payload, err := MarshalKeyRequest(req)
+	payload, err := security.MarshalKeyRequest(req)
 	if err != nil {
 		DebugLog("[KEY] Failed to marshal key request: %v", err)
 		return err
@@ -1878,7 +1878,7 @@ func (ep *TCPEndpoint) handleKeyRequest(msg *TunnelMessage) {
 		return
 	}
 
-	req, err := UnmarshalKeyRequest(msg.Payload)
+	req, err := security.UnmarshalKeyRequest(msg.Payload)
 	if err != nil {
 		DebugLog("[KEY] Failed to parse key request from %s: %v", ep.EndpointName, err)
 		return
@@ -1890,7 +1890,7 @@ func (ep *TCPEndpoint) handleKeyRequest(msg *TunnelMessage) {
 		return
 	}
 
-	payload, err := MarshalKeyResponse(resp)
+	payload, err := security.MarshalKeyResponse(resp)
 	if err != nil {
 		DebugLog("[KEY] Failed to marshal key response: %v", err)
 		return
@@ -1910,7 +1910,7 @@ func (ep *TCPEndpoint) handleKeyResponse(msg *TunnelMessage) {
 		return
 	}
 
-	resp, err := UnmarshalKeyResponse(msg.Payload)
+	resp, err := security.UnmarshalKeyResponse(msg.Payload)
 	if err != nil {
 		DebugLog("[KEY] Failed to parse key response from %s: %v", ep.EndpointName, err)
 		return
@@ -1922,7 +1922,7 @@ func (ep *TCPEndpoint) handleKeyResponse(msg *TunnelMessage) {
 		return
 	}
 
-	payload, err := MarshalKeyConfirm(confirm)
+	payload, err := security.MarshalKeyConfirm(confirm)
 	if err != nil {
 		DebugLog("[KEY] Failed to marshal key confirm: %v", err)
 		return
@@ -1948,7 +1948,7 @@ func (ep *TCPEndpoint) handleKeyConfirm(msg *TunnelMessage) {
 		return
 	}
 
-	confirm, err := UnmarshalKeyConfirm(msg.Payload)
+	confirm, err := security.UnmarshalKeyConfirm(msg.Payload)
 	if err != nil {
 		DebugLog("[KEY] Failed to parse key confirm from %s: %v", ep.EndpointName, err)
 		return
@@ -2003,7 +2003,7 @@ func sendMirrorUpdate(s *TCPTunnelServer, ep *TCPEndpoint) {
 	}
 	s.mu.RUnlock()
 
-	protectedPayload, err := WrapControlPlanePayload(ep.KeyManager, MsgTypeMirrorUpdate, payloadBytes, configVersion, ep.ControlOut)
+	protectedPayload, err := security.WrapControlPlanePayload(ep.KeyManager, MsgTypeMirrorUpdate, payloadBytes, configVersion, ep.ControlOut)
 	if err != nil {
 		DebugLog("[MIRROR] Failed to protect mirror update for %s: %v", ep.EndpointName, err)
 		return

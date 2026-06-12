@@ -1,4 +1,4 @@
-package main
+package security
 
 import (
 	"encoding/json"
@@ -10,18 +10,18 @@ import (
 	"time"
 
 	"github.com/chromedp/cdproto/har"
+
+	"bytes"
 )
 
 // ReplayManager handles the logic for replaying HAR entries.
 type ReplayManager struct {
-	config *Config
 	client *http.Client
 }
 
 // NewReplayManager creates a new ReplayManager.
-func NewReplayManager(config *Config) *ReplayManager {
+func NewReplayManager() *ReplayManager {
 	return &ReplayManager{
-		config: config,
 		client: &http.Client{
 			// We might want a more sophisticated transport later,
 			// e.g., one that can handle insecure certs or specific proxies.
@@ -40,8 +40,7 @@ func (rm *ReplayManager) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	buf := GetBytesBuffer()
-	defer PutBytesBuffer(buf)
+	buf := &bytes.Buffer{}
 	_, err := buf.ReadFrom(r.Body)
 	if err != nil {
 		http.Error(w, "Failed to read request body", http.StatusInternalServerError)
@@ -91,8 +90,7 @@ func (rm *ReplayManager) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Copy body
 	// Copy body
-	respBuf := GetBytesBuffer()
-	defer PutBytesBuffer(respBuf)
+	respBuf := &bytes.Buffer{}
 	respBuf.ReadFrom(resp.Body)
 	w.Write(respBuf.Bytes())
 }
