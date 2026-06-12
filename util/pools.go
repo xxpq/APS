@@ -1,4 +1,4 @@
-package main
+package util
 
 import (
 	"bufio"
@@ -61,13 +61,13 @@ var doneChannelPool = sync.Pool{
 }
 
 // ============================================================================
-// Regex Cache - Use compileRegex from utils.go
+// Regex Cache - Use util.CompileRegex (defined in regex.go)
 // ============================================================================
 
-// GetOrCompileRegex is an alias for the existing compileRegex function in utils.go
-// for API consistency with the pools module
+// GetOrCompileRegex is an alias for util.CompileRegex for API consistency
+// with the pools module
 func GetOrCompileRegex(pattern string) (*regexp.Regexp, error) {
-	return compileRegex(pattern)
+	return CompileRegex(pattern)
 }
 
 // ============================================================================

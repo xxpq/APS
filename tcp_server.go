@@ -18,6 +18,7 @@ import (
 	"aps/firewall"
 	"aps/logging"
 	"aps/stats"
+"aps/util"
 	"aps/tunnel"
 )
 
@@ -513,8 +514,8 @@ func (s *RawTCPServer) forwardViaProxy(clientConn net.Conn, mapping *Mapping, ta
 	}
 
 	// Read response (simple check for 200)
-	buf := GetSmallBuffer()
-	defer PutSmallBuffer(buf)
+	buf := util.GetSmallBuffer()
+	defer util.PutSmallBuffer(buf)
 	n, err := proxyConn.Read(buf)
 	if err != nil {
 		log.Printf("[RAW TCP] Failed to read CONNECT response: %v", err)
@@ -641,8 +642,8 @@ func (s *RawTCPServer) bidirectionalCopy(conn1, conn2 net.Conn, bytesSent, bytes
 	// conn1 -> conn2 (upload from client perspective)
 	go func() {
 		defer wg.Done()
-		buf := GetMediumBuffer()
-		defer PutMediumBuffer(buf)
+		buf := util.GetMediumBuffer()
+		defer util.PutMediumBuffer(buf)
 		n, err := io.CopyBuffer(conn2, conn1, buf)
 		*bytesRecv = uint64(n)
 		if err != nil && !isClosedConnError(err) {
@@ -654,8 +655,8 @@ func (s *RawTCPServer) bidirectionalCopy(conn1, conn2 net.Conn, bytesSent, bytes
 	// conn2 -> conn1 (download from client perspective)
 	go func() {
 		defer wg.Done()
-		buf := GetMediumBuffer()
-		defer PutMediumBuffer(buf)
+		buf := util.GetMediumBuffer()
+		defer util.PutMediumBuffer(buf)
 		n, err := io.CopyBuffer(conn1, conn2, buf)
 		*bytesSent = uint64(n)
 		if err != nil && !isClosedConnError(err) {
