@@ -28,6 +28,7 @@ import (
 	"aps/asn"
 	"aps/cache"
 	"aps/logging"
+	"aps/server"
 	"aps/stats"
 	"aps/security"
 	tlsx "aps/tls"
@@ -39,7 +40,7 @@ type ServerManager struct {
 	servers    map[string]*http.Server
 	tcpServers map[string]*RawTCPServer  // Raw TCP servers
 	udpServers map[string]*RawUDPServer  // Raw UDP servers
-	muxes      map[string]*ConnectionMux // Connection multiplexers
+	muxes      map[string]*server.ConnectionMux // Connection multiplexers
 	mu         sync.Mutex
 	wg         sync.WaitGroup
 	config     *Config
@@ -79,7 +80,7 @@ func NewServerManager(config *Config, configFile string, tunnelManager TunnelMan
 		servers:        make(map[string]*http.Server),
 		tcpServers:     make(map[string]*RawTCPServer),
 		udpServers:     make(map[string]*RawUDPServer),
-		muxes:          make(map[string]*ConnectionMux),
+		muxes:          make(map[string]*server.ConnectionMux),
 		config:         config,
 		configFile:     configFile,
 		tunnelManager:  tunnelManager,
@@ -794,14 +795,14 @@ func configureTunnelMTLSForServer(name string, serverConfig *ListenConfig, tlsCo
 	return nil
 }
 
-func startServer(name string, config *ListenConfig, handler http.Handler, rateLimiter *stats.RateLimitEngine) (*http.Server, *ConnectionMux) {
+func startServer(name string, config *ListenConfig, handler http.Handler, rateLimiter *stats.RateLimitEngine) (*http.Server, *server.ConnectionMux) {
 	// Determine bind address based on 'public' (default: true)
 	host := "127.0.0.1"
 	if config.Public == nil || *config.Public {
 		host = "0.0.0.0"
 	}
 	addr := fmt.Sprintf("%s:%d", host, config.Port)
-	server := &http.Server{
+	httpsrv := &http.Server{
 		Handler: handler,
 		// WriteTimeout:      30 * time.Second, // Kill stuck writes after 30s
 		ReadHeaderTimeout: 100 * time.Second, // Already set elsewhere, consolidating here
@@ -819,11 +820,11 @@ func startServer(name string, config *ListenConfig, handler http.Handler, rateLi
 	}
 
 	// Create ConnectionMux
-	mux := NewConnectionMux(listener)
+	mux := server.NewConnectionMux(listener)
 	mux.SetRateLimiter(rateLimiter, name, config.RateLimitRules)
 
 	// Setup HTTP Handler
-	httpListener := NewChannelListener(listener.Addr())
+	httpListener := server.NewChannelListener(listener.Addr())
 	mux.SetHTTPHandler(func(conn net.Conn) {
 		httpListener.Push(conn)
 	})
@@ -880,19 +881,19 @@ func startServer(name string, config *ListenConfig, handler http.Handler, rateLi
 			}
 
 			tlsListener := tlsx.NewTlsListener(httpListener, tlsConfig)
-			if err := server.Serve(tlsListener); err != nil && err != http.ErrServerClosed {
+			if err := httpsrv.Serve(tlsListener); err != nil && err != http.ErrServerClosed {
 				log.Printf("Server '%s' (HTTPS) failed: %v", name, err)
 			}
 		}()
 	} else {
 		// HTTP server
 		go func() {
-			if err := server.Serve(httpListener); err != nil && err != http.ErrServerClosed {
+			if err := httpsrv.Serve(httpListener); err != nil && err != http.ErrServerClosed {
 				log.Printf("Server '%s' (HTTP) failed: %v", name, err)
 			}
 		}()
 	}
-	return server, mux
+	return httpsrv, mux
 }
 func startQuotaPersistence(trafficShaper *stats.TrafficShaper, statsDB *stats.StatsDB) {
 	ticker := time.NewTicker(10 * time.Second)

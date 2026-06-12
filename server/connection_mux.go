@@ -1,4 +1,4 @@
-package main
+package server
 
 import (
 	"errors"
@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 
 	"aps/stats"
+	"aps/util"
 )
 
 // ConnectionMux routes accepted sockets into the HTTP server pipeline.
@@ -115,7 +116,7 @@ func (m *ConnectionMux) Stop() {
 // handleConnection detects protocol and routes connection
 func (m *ConnectionMux) handleConnection(conn net.Conn) {
 	// Extract IP from connection
-	ip := extractIPFromAddr(conn.RemoteAddr().String())
+	ip := util.ExtractIPFromAddr(conn.RemoteAddr().String())
 
 	// Check if IP is banned
 	// Check if IP is banned or rate limited
@@ -128,7 +129,7 @@ func (m *ConnectionMux) handleConnection(conn net.Conn) {
 	if rateLimiter != nil {
 		// 1. Check if banned (fast check)
 		if rateLimiter.IsBanned(ip) {
-			DebugLog("[RATE LIMIT] Blocked connection from banned IP: %s", ip)
+			util.DebugLog("[RATE LIMIT] Blocked connection from banned IP: %s", ip)
 			conn.Close()
 			return
 		}
@@ -140,7 +141,7 @@ func (m *ConnectionMux) handleConnection(conn net.Conn) {
 			}
 			result := rateLimiter.CheckRequest(ip, "", bindings)
 			if !result.Allowed {
-				DebugLog("[RATE LIMIT] Connection rejected by rule: %s", result.Message)
+				util.DebugLog("[RATE LIMIT] Connection rejected by rule: %s", result.Message)
 				conn.Close()
 				return
 			}
