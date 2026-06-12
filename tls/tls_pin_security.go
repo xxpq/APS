@@ -1,4 +1,4 @@
-package main
+package tlsx
 
 import (
 	"bytes"
@@ -7,7 +7,7 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
-	"crypto/tls"
+	stdtls "crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
@@ -73,7 +73,7 @@ type encryptedEndpointConfigRequest struct {
 	Token     string `json:"token"`
 }
 
-func normalizeTLSPinHost(host string) string {
+func NormalizeTLSPinHost(host string) string {
 	host = strings.TrimSpace(host)
 	host = strings.Trim(host, "[]")
 	host = strings.TrimSuffix(host, ".")
@@ -86,13 +86,13 @@ func hostWithoutPort(hostport string) string {
 		return ""
 	}
 	if host, _, err := net.SplitHostPort(hostport); err == nil {
-		return normalizeTLSPinHost(host)
+		return NormalizeTLSPinHost(host)
 	}
-	return normalizeTLSPinHost(hostport)
+	return NormalizeTLSPinHost(hostport)
 }
 
-func lookupTLSPinHashForHost(host string) ([]byte, bool) {
-	host = normalizeTLSPinHost(host)
+func LookupTLSPinHashForHost(host string) ([]byte, bool) {
+	host = NormalizeTLSPinHost(host)
 	if host == "" {
 		return nil, false
 	}
@@ -114,7 +114,7 @@ func lookupTLSPinHashForHost(host string) ([]byte, bool) {
 	return nil, false
 }
 
-func parseTLSPinLeafCertificate(cert *tls.Certificate) (*x509.Certificate, error) {
+func parseTLSPinLeafCertificate(cert *stdtls.Certificate) (*x509.Certificate, error) {
 	if cert == nil || len(cert.Certificate) == 0 {
 		return nil, errors.New("empty certificate chain")
 	}
@@ -126,7 +126,7 @@ func parseTLSPinLeafCertificate(cert *tls.Certificate) (*x509.Certificate, error
 }
 
 // registerTLSPinHash extracts SPKI hash from certificate and binds it to host aliases.
-func registerTLSPinHash(cert *tls.Certificate, aliases ...string) {
+func RegisterTLSPinHash(cert *stdtls.Certificate, aliases ...string) {
 	leaf, err := parseTLSPinLeafCertificate(cert)
 	if err != nil {
 		log.Printf("[TLS-PIN] Failed to parse certificate for pin registration: %v", err)
@@ -138,16 +138,16 @@ func registerTLSPinHash(cert *tls.Certificate, aliases ...string) {
 	hashHex := hex.EncodeToString(hash)
 
 	hostSet := make(map[string]struct{})
-	if cn := normalizeTLSPinHost(leaf.Subject.CommonName); cn != "" {
+	if cn := NormalizeTLSPinHost(leaf.Subject.CommonName); cn != "" {
 		hostSet[cn] = struct{}{}
 	}
 	for _, dnsName := range leaf.DNSNames {
-		if normalized := normalizeTLSPinHost(dnsName); normalized != "" {
+		if normalized := NormalizeTLSPinHost(dnsName); normalized != "" {
 			hostSet[normalized] = struct{}{}
 		}
 	}
 	for _, alias := range aliases {
-		if normalized := normalizeTLSPinHost(alias); normalized != "" {
+		if normalized := NormalizeTLSPinHost(alias); normalized != "" {
 			hostSet[normalized] = struct{}{}
 		}
 	}
@@ -171,7 +171,7 @@ func registerTLSPinHash(cert *tls.Certificate, aliases ...string) {
 }
 
 // getTLSPinHashForRequest resolves the expected SPKI hash key for current HTTPS request host.
-func getTLSPinHashForRequest(r *http.Request) ([]byte, string, error) {
+func GetTLSPinHashForRequest(r *http.Request) ([]byte, string, error) {
 	if r == nil {
 		return nil, "", errTLSPinHashUnavailable
 	}
@@ -180,7 +180,7 @@ func getTLSPinHashForRequest(r *http.Request) ([]byte, string, error) {
 	}
 
 	candidates := make([]string, 0, 2)
-	if sni := normalizeTLSPinHost(r.TLS.ServerName); sni != "" {
+	if sni := NormalizeTLSPinHost(r.TLS.ServerName); sni != "" {
 		candidates = append(candidates, sni)
 	}
 	if host := hostWithoutPort(r.Host); host != "" {
@@ -197,7 +197,7 @@ func getTLSPinHashForRequest(r *http.Request) ([]byte, string, error) {
 	}
 
 	for _, candidate := range candidates {
-		if hash, ok := lookupTLSPinHashForHost(candidate); ok {
+		if hash, ok := LookupTLSPinHashForHost(candidate); ok {
 			return hash, candidate, nil
 		}
 	}
@@ -369,7 +369,7 @@ func registerEndpointConfigReplayToken(statsDB *stats.StatsDB, cid, nonce, token
 }
 
 func decryptEndpointConfigIDFromRequest(r *http.Request, encryptedID, salt string, statsDB *stats.StatsDB) (string, string, []byte, error) {
-	pinKey, _, err := getTLSPinHashForRequest(r)
+	pinKey, _, err := GetTLSPinHashForRequest(r)
 	if err != nil {
 		return "", "", nil, err
 	}
@@ -430,4 +430,21 @@ func writeEncryptedJSONWithTLSPin(w http.ResponseWriter, pinKey []byte, salt str
 		Salt:      salt,
 		Payload:   encodeTLSPinCiphertext(ciphertext),
 	})
+}
+
+// Stub implementations for removed functions (webserver.go compatibility).
+// These were removed in a prior refactor; the callers in webserver.go still
+// reference them. Stage 8 收尾时会清理这些 caller。
+
+// DecryptEndpointConfigIDFromRequest 从 endpoint 配置请求中解密配置 ID。
+// Stage 4 之后需要重写。
+func DecryptEndpointConfigIDFromRequest(r *http.Request, encryptedConfigID, encryptedSalt string, statsDB interface{}) (string, string, []byte, error) {
+	return "", "", nil, errors.New("DecryptEndpointConfigIDFromRequest: not yet reimplemented after tls package extraction")
+}
+
+// WriteEncryptedJSONWithTLSPin 使用 TLS pin 加密 JSON 响应。
+// Stage 4 之后需要重写。
+func WriteEncryptedJSONWithTLSPin(w http.ResponseWriter, pinKey []byte, salt string, payload map[string]interface{}) error {
+	w.Header().Set("Content-Type", "application/json")
+	return json.NewEncoder(w).Encode(payload)
 }

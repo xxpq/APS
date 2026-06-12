@@ -30,6 +30,7 @@ import (
 	"aps/logging"
 	"aps/stats"
 	"aps/security"
+	tlsx "aps/tls"
 )
 
 // ServerManager manages the lifecycle of multiple HTTP servers.
@@ -836,7 +837,7 @@ func startServer(name string, config *ListenConfig, handler http.Handler, rateLi
 					return
 				}
 				EnsureOCSPStaple(&tlsConfig.Certificates[0], "server:"+name)
-				registerTLSPinHash(&tlsConfig.Certificates[0])
+				tlsx.RegisterTLSPinHash(&tlsConfig.Certificates[0])
 			} else if config.Cert == "acme" {
 				acmeTLSConfig := GetACMETLSConfig()
 				if acmeTLSConfig == nil {
@@ -846,7 +847,7 @@ func startServer(name string, config *ListenConfig, handler http.Handler, rateLi
 				tlsConfig = acmeTLSConfig.Clone()
 				for i := range tlsConfig.Certificates {
 					EnsureOCSPStaple(&tlsConfig.Certificates[i], "acme-static:"+name)
-					registerTLSPinHash(&tlsConfig.Certificates[i])
+					tlsx.RegisterTLSPinHash(&tlsConfig.Certificates[i])
 				}
 				if tlsConfig.GetCertificate != nil {
 					baseGetCertificate := tlsConfig.GetCertificate
@@ -855,7 +856,7 @@ func startServer(name string, config *ListenConfig, handler http.Handler, rateLi
 						if certErr == nil && cert != nil {
 							cert = cloneTLSCertificate(cert)
 							EnsureOCSPStaple(cert, "acme:"+info.ServerName)
-							registerTLSPinHash(cert, info.ServerName)
+							tlsx.RegisterTLSPinHash(cert, info.ServerName)
 						}
 						return cert, certErr
 					}
@@ -870,7 +871,7 @@ func startServer(name string, config *ListenConfig, handler http.Handler, rateLi
 				return
 			}
 
-			tlsListener := NewTlsListener(httpListener, tlsConfig)
+			tlsListener := tlsx.NewTlsListener(httpListener, tlsConfig)
 			if err := server.Serve(tlsListener); err != nil && err != http.ErrServerClosed {
 				log.Printf("Server '%s' (HTTPS) failed: %v", name, err)
 			}

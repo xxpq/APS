@@ -23,6 +23,7 @@ import (
 
 	"aps/security"
 	"aps/stats"
+	tlsx "aps/tls"
 )
 
 const responseRouteEnqueueTimeout = 10 * time.Second
@@ -505,7 +506,7 @@ func (s *TCPTunnelServer) handleConnection(conn net.Conn) {
 		tc.Close()
 		return
 	}
-	expectedPinHash, ok := lookupTLSPinHashForHost(reg.ServerHost)
+	expectedPinHash, ok := tlsx.LookupTLSPinHashForHost(reg.ServerHost)
 	if !ok {
 		DebugLog("[TCP TUNNEL] TLS pin hash unavailable for host '%s' from %s", reg.ServerHost, remoteAddr)
 		tc.SendJSON(MsgTypeRegisterAck, RegisterAckPayload{

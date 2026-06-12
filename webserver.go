@@ -25,6 +25,7 @@ import (
 	"aps/logging"
 	"aps/security"
 	"aps/stats"
+	tlsx "aps/tls"
 )
 
 const apsTLSPinTokenPrefix = "apspt1."
@@ -930,7 +931,7 @@ func (h *AdminHandlers) handleTLSPin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	pinKey, host, err := getTLSPinHashForRequest(r)
+	pinKey, host, err := tlsx.GetTLSPinHashForRequest(r)
 	if err != nil {
 		http.Error(w, "TLS pin not available for host", http.StatusBadRequest)
 		return
@@ -939,7 +940,7 @@ func (h *AdminHandlers) handleTLSPin(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"success": true,
-		"alg":     TLSPinAlgorithm,
+		"alg":     tlsx.TLSPinAlgorithm,
 		"host":    host,
 		"hash":    hex.EncodeToString(pinKey),
 	})
@@ -951,7 +952,7 @@ func deriveAPSTLSPinTokenKey(cid, host string) []byte {
 	h.Write([]byte("|"))
 	h.Write([]byte(strings.TrimSpace(cid)))
 	h.Write([]byte("|"))
-	h.Write([]byte(normalizeTLSPinHost(host)))
+	h.Write([]byte(tlsx.NormalizeTLSPinHost(host)))
 	return h.Sum(nil)
 }
 
@@ -962,7 +963,7 @@ func encodeAPSTLSPinToken(pinHash []byte, cid, host string, expUnix int64) (stri
 	payload := map[string]interface{}{
 		"pin":  hex.EncodeToString(pinHash),
 		"cid":  strings.TrimSpace(cid),
-		"host": normalizeTLSPinHost(host),
+		"host": tlsx.NormalizeTLSPinHost(host),
 		"exp":  expUnix,
 	}
 	plain, err := json.Marshal(payload)
@@ -1001,23 +1002,23 @@ func (h *AdminHandlers) handleTLSPinToken(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	host := normalizeTLSPinHost(strings.TrimSpace(r.URL.Query().Get("host")))
+	host := tlsx.NormalizeTLSPinHost(strings.TrimSpace(r.URL.Query().Get("host")))
 	var pinKey []byte
 	if host != "" {
 		var ok bool
-		pinKey, ok = lookupTLSPinHashForHost(host)
+		pinKey, ok = tlsx.LookupTLSPinHashForHost(host)
 		if !ok {
 			http.Error(w, "TLS pin not available for host", http.StatusBadRequest)
 			return
 		}
 	} else {
 		var err error
-		pinKey, host, err = getTLSPinHashForRequest(r)
+		pinKey, host, err = tlsx.GetTLSPinHashForRequest(r)
 		if err != nil {
 			http.Error(w, "TLS pin not available for host", http.StatusBadRequest)
 			return
 		}
-		host = normalizeTLSPinHost(host)
+		host = tlsx.NormalizeTLSPinHost(host)
 	}
 
 	ttlSeconds := int64(600)
@@ -1053,8 +1054,8 @@ func (h *AdminHandlers) handleTLSPinToken(w http.ResponseWriter, r *http.Request
 func (h *AdminHandlers) handleEndpointConfigs(w http.ResponseWriter, r *http.Request) {
 	// Endpoint self-fetch supports encrypted eid only.
 	legacyID := strings.TrimSpace(r.URL.Query().Get("id"))
-	encryptedConfigID := strings.TrimSpace(r.URL.Query().Get(TLSEncryptedConfigIDParam))
-	encryptedSalt := strings.TrimSpace(r.URL.Query().Get(TLSEncryptedSaltParam))
+	encryptedConfigID := strings.TrimSpace(r.URL.Query().Get(tlsx.TLSEncryptedConfigIDParam))
+	encryptedSalt := strings.TrimSpace(r.URL.Query().Get(tlsx.TLSEncryptedSaltParam))
 
 	if r.Method == http.MethodGet && legacyID != "" {
 		http.Error(w, "plaintext id mode is disabled; use encrypted eid", http.StatusBadRequest)
@@ -1062,14 +1063,14 @@ func (h *AdminHandlers) handleEndpointConfigs(w http.ResponseWriter, r *http.Req
 	}
 
 	if r.Method == http.MethodGet && encryptedConfigID != "" {
-		configID, requestSalt, pinKey, err := decryptEndpointConfigIDFromRequest(r, encryptedConfigID, encryptedSalt, h.statsDB)
+		configID, requestSalt, pinKey, err := tlsx.DecryptEndpointConfigIDFromRequest(r, encryptedConfigID, encryptedSalt, h.statsDB)
 		if err != nil {
 			http.Error(w, "invalid encrypted config id", http.StatusBadRequest)
 			return
 		}
 
 		writeConfigPayload := func(payload map[string]interface{}) {
-			if err := writeEncryptedJSONWithTLSPin(w, pinKey, requestSalt, payload); err != nil {
+			if err := tlsx.WriteEncryptedJSONWithTLSPin(w, pinKey, requestSalt, payload); err != nil {
 				http.Error(w, "failed to write encrypted response", http.StatusInternalServerError)
 			}
 		}
