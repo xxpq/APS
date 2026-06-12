@@ -733,12 +733,12 @@ type Mapping struct {
 	TrafficPolicies
 
 	// 解析后的内部字段
-	fromConfig    *EndpointConfig
-	toConfig      *EndpointConfig
+	FromConfig    *EndpointConfig
+	ToConfig      *EndpointConfig
 	ServerNames   []string
-	proxyNames    []string
-	endpointNames []string
-	tunnelNames   []string
+	ProxyNames    []string
+	EndpointNames []string
+	TunnelNames   []string
 	ResolvedProxy *ProxyManager
 }
 
@@ -839,11 +839,11 @@ func (lc *ListenConfig) UnmarshalJSON(data []byte) error {
 
 // GetFromURL 获取 from 的 URL 字符串
 func (m *Mapping) GetFromURL() string {
-	if m.fromConfig != nil {
-		if len(m.fromConfig.URLs) > 0 {
-			return m.fromConfig.URLs[0]
+	if m.FromConfig != nil {
+		if len(m.FromConfig.URLs) > 0 {
+			return m.FromConfig.URLs[0]
 		}
-		return m.fromConfig.URL
+		return m.FromConfig.URL
 	}
 	if str, ok := m.From.(string); ok {
 		return str
@@ -853,11 +853,11 @@ func (m *Mapping) GetFromURL() string {
 
 // GetToURL 获取 to 的 URL 字符串
 func (m *Mapping) GetToURL() string {
-	if m.toConfig != nil {
-		if len(m.toConfig.URLs) > 0 {
-			return m.toConfig.URLs[0]
+	if m.ToConfig != nil {
+		if len(m.ToConfig.URLs) > 0 {
+			return m.ToConfig.URLs[0]
 		}
-		return m.toConfig.URL
+		return m.ToConfig.URL
 	}
 	if str, ok := m.To.(string); ok {
 		return str
@@ -867,12 +867,12 @@ func (m *Mapping) GetToURL() string {
 
 // GetFromConfig 获取 from 的完整配置
 func (m *Mapping) GetFromConfig() *EndpointConfig {
-	return m.fromConfig
+	return m.FromConfig
 }
 
 // GetToConfig 获取 to 的完整配置
 func (m *Mapping) GetToConfig() *EndpointConfig {
-	return m.toConfig
+	return m.ToConfig
 }
 
 // parseEndpointConfig 解析 interface{} 为 EndpointConfig
@@ -1043,16 +1043,16 @@ func processConfig(config *Config) error {
 			continue
 		}
 
-		fromConfig, err := parseEndpointConfig(mapping.From)
+		FromConfig, err := parseEndpointConfig(mapping.From)
 		if err != nil {
 			log.Printf("Warning: mapping %d skipped - failed to parse 'from': %v", i+1, err)
 			continue
 		}
-		if fromConfig == nil || len(fromConfig.URLs) == 0 {
+		if FromConfig == nil || len(FromConfig.URLs) == 0 {
 			log.Printf("Warning: mapping %d skipped - 'from' URL is empty", i+1)
 			continue
 		}
-		mapping.fromConfig = fromConfig
+		mapping.FromConfig = FromConfig
 
 		// 验证 to 字段（必须存在）
 		if mapping.To == nil {
@@ -1061,16 +1061,16 @@ func processConfig(config *Config) error {
 		}
 
 		// 解析 to 配置
-		toConfig, err := parseEndpointConfig(mapping.To)
+		ToConfig, err := parseEndpointConfig(mapping.To)
 		if err != nil {
 			log.Printf("Warning: mapping %d skipped - failed to parse 'to': %v", i+1, err)
 			continue
 		}
-		if toConfig == nil || (len(toConfig.URLs) == 0 && toConfig.URL == "") {
+		if ToConfig == nil || (len(ToConfig.URLs) == 0 && ToConfig.URL == "") {
 			log.Printf("Warning: mapping %d skipped - 'to' URL is empty", i+1)
 			continue
 		}
-		mapping.toConfig = toConfig
+		mapping.ToConfig = ToConfig
 
 		// 解析 server names
 		mapping.ServerNames = parseStringOrArray(mapping.Servers)
@@ -1078,8 +1078,8 @@ func processConfig(config *Config) error {
 			// For TCP mappings (tcp://) or UDP mappings (udp://), don't assign to all servers
 			// They will be matched by port at runtime
 			isRawMapping := false
-			if len(fromConfig.URLs) > 0 {
-				firstURL := fromConfig.URLs[0]
+			if len(FromConfig.URLs) > 0 {
+				firstURL := FromConfig.URLs[0]
 				if strings.HasPrefix(firstURL, "tcp://") || strings.HasPrefix(firstURL, "tcps://") ||
 					strings.HasPrefix(firstURL, "udp://") {
 					isRawMapping = true
@@ -1116,15 +1116,15 @@ func processConfig(config *Config) error {
 		if mapping.Via != nil {
 			// 解析 proxy names from via
 			proxySource := mapping.Via.Proxies
-			if fromConfig.Proxy != nil {
-				proxySource = fromConfig.Proxy // from中的proxy优先级更高
+			if FromConfig.Proxy != nil {
+				proxySource = FromConfig.Proxy // from中的proxy优先级更高
 			}
-			mapping.proxyNames = parseStringOrArray(proxySource)
+			mapping.ProxyNames = parseStringOrArray(proxySource)
 
 			// 解析并初始化代理
-			if len(mapping.proxyNames) > 0 {
+			if len(mapping.ProxyNames) > 0 {
 				var allProxies []string
-				for _, name := range mapping.proxyNames {
+				for _, name := range mapping.ProxyNames {
 					if proxyConfig, ok := config.Proxies[name]; ok {
 						allProxies = append(allProxies, proxyConfig.URLs...)
 					} else {
@@ -1138,10 +1138,10 @@ func processConfig(config *Config) error {
 			}
 
 			// 解析 endpoint names from via
-			mapping.endpointNames = parseStringOrArray(mapping.Via.Endpoints)
+			mapping.EndpointNames = parseStringOrArray(mapping.Via.Endpoints)
 
 			// 解析 tunnel names from via
-			mapping.tunnelNames = parseStringOrArray(mapping.Via.Tunnels)
+			mapping.TunnelNames = parseStringOrArray(mapping.Via.Tunnels)
 		}
 
 		// 验证通过，添加到有效列表

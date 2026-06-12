@@ -104,11 +104,11 @@ func (p *MapRemoteProxy) handleWebSocket(w http.ResponseWriter, r *http.Request)
 	// Populate keys for stats
 	if mapping != nil {
 		ruleKey = matchedFromURL
-		if len(mapping.tunnelNames) > 0 {
-			tunnelKey = mapping.tunnelNames[0]
+		if len(mapping.TunnelNames) > 0 {
+			tunnelKey = mapping.TunnelNames[0]
 		}
-		if len(mapping.proxyNames) > 0 {
-			proxyKey = mapping.proxyNames[0]
+		if len(mapping.ProxyNames) > 0 {
+			proxyKey = mapping.ProxyNames[0]
 		}
 	}
 
@@ -131,11 +131,11 @@ func (p *MapRemoteProxy) handleWebSocket(w http.ResponseWriter, r *http.Request)
 	var tunnelName, endpointName string
 	isTunnelRequest := false
 
-	if mapping != nil && len(mapping.endpointNames) > 0 {
+	if mapping != nil && len(mapping.EndpointNames) > 0 {
 		isTunnelRequest = true
-		randomEndpoint := mapping.endpointNames[0] // Just use the first one for now
-		if len(mapping.endpointNames) > 1 {
-			randomEndpoint = mapping.endpointNames[time.Now().UnixNano()%int64(len(mapping.endpointNames))]
+		randomEndpoint := mapping.EndpointNames[0] // Just use the first one for now
+		if len(mapping.EndpointNames) > 1 {
+			randomEndpoint = mapping.EndpointNames[time.Now().UnixNano()%int64(len(mapping.EndpointNames))]
 		}
 
 		foundTunnel, ok := p.tunnelManager.FindTunnelForEndpoint(randomEndpoint)
@@ -149,9 +149,9 @@ func (p *MapRemoteProxy) handleWebSocket(w http.ResponseWriter, r *http.Request)
 		endpointName = randomEndpoint
 		tunnelKey = tunnelName
 		DebugLog("%s[WS] Will route WebSocket through tunnel '%s' to endpoint '%s'", logPrefix, tunnelName, endpointName)
-	} else if mapping != nil && len(mapping.tunnelNames) > 0 {
+	} else if mapping != nil && len(mapping.TunnelNames) > 0 {
 		isTunnelRequest = true
-		foundTunnel, foundEndpoint, err := p.tunnelManager.GetRandomEndpointFromTunnels(mapping.tunnelNames)
+		foundTunnel, foundEndpoint, err := p.tunnelManager.GetRandomEndpointFromTunnels(mapping.TunnelNames)
 		if err != nil {
 			isError = true
 			log.Printf("%s[WS] %v", logPrefix, err)
@@ -235,11 +235,11 @@ func (p *MapRemoteProxy) handleWebSocket(w http.ResponseWriter, r *http.Request)
 		// - For invalid/self-signed certificates (insecure mode): use target hostname or IP
 		//   This avoids SNI mismatch errors with certificates like ESXi's "localhost.localdomain"
 		if useTLS {
-			var toConfig *EndpointConfig
+			var ToConfig *EndpointConfig
 			if mapping != nil {
-				toConfig = mapping.GetToConfig()
+				ToConfig = mapping.GetToConfig()
 			}
-			insecureMode := shouldUseInsecureBackendMode(toConfig, targetWsURL.String())
+			insecureMode := shouldUseInsecureBackendMode(ToConfig, targetWsURL.String())
 
 			legacyTLSMode := shouldUseLegacyBackendTLS(host, insecureMode)
 
@@ -338,11 +338,11 @@ func (p *MapRemoteProxy) handleWebSocket(w http.ResponseWriter, r *http.Request)
 		copyHeaders(serverHeader, r.Header)
 
 		dialer := *websocket.DefaultDialer
-		var toConfig *EndpointConfig
+		var ToConfig *EndpointConfig
 		if mapping != nil {
-			toConfig = mapping.GetToConfig()
+			ToConfig = mapping.GetToConfig()
 		}
-		insecureMode := shouldUseInsecureBackendMode(toConfig, targetWsURL.String())
+		insecureMode := shouldUseInsecureBackendMode(ToConfig, targetWsURL.String())
 		if targetWsURL.Scheme == "wss" {
 			legacyTLSMode := shouldUseLegacyBackendTLS(targetWsURL.Hostname(), insecureMode)
 			tlsConfig := &tls.Config{
@@ -396,9 +396,9 @@ func (p *MapRemoteProxy) handleWebSocket(w http.ResponseWriter, r *http.Request)
 
 	var wsConfig *WebSocketConfig
 	if mapping != nil {
-		fromConfig := mapping.GetFromConfig()
-		if fromConfig != nil {
-			wsConfig = fromConfig.WebSocket
+		FromConfig := mapping.GetFromConfig()
+		if FromConfig != nil {
+			wsConfig = FromConfig.WebSocket
 		}
 	}
 

@@ -39,8 +39,8 @@ func TestDedicatedProxy_ServeFile_RelativePath(t *testing.T) {
 	mapping := &Mapping{
 		From:       "/rel",
 		To:         toURL,
-		fromConfig: fromConfig,
-		toConfig:   toConfig,
+		FromConfig: fromConfig,
+		ToConfig:   toConfig,
 	}
 
 	proxy := NewDedicatedProxy(mapping, 8081)
@@ -94,8 +94,8 @@ func TestDedicatedProxy_ServeFile_DirectFile(t *testing.T) {
 	mapping := &Mapping{
 		From:       "/direct",
 		To:         toURL,
-		fromConfig: fromConfig,
-		toConfig:   toConfig,
+		FromConfig: fromConfig,
+		ToConfig:   toConfig,
 	}
 
 	proxy := NewDedicatedProxy(mapping, 8082)

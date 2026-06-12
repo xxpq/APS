@@ -115,10 +115,10 @@ func TestMapRequest_DomainPrefilterDisabledForDynamicHostRules(t *testing.T) {
 		Mappings: []Mapping{
 			{
 				ServerNames: []string{serverName},
-				fromConfig: &EndpointConfig{
+				FromConfig: &EndpointConfig{
 					URLs: []string{regexFrom},
 				},
-				toConfig: &EndpointConfig{
+				ToConfig: &EndpointConfig{
 					URLs: []string{regexFrom},
 				},
 			},

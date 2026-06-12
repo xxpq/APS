@@ -13,11 +13,11 @@ func makeTestMapping(serverName, fromURL, toURL string) Mapping {
 
 	return Mapping{
 		ServerNames: []string{serverName},
-		fromConfig: &EndpointConfig{
+		FromConfig: &EndpointConfig{
 			URLs:       []string{fromURL},
 			ParsedURLs: []*url.URL{parsedFrom},
 		},
-		toConfig: &EndpointConfig{
+		ToConfig: &EndpointConfig{
 			URLs:       []string{toURL},
 			ParsedURLs: []*url.URL{parsedTo},
 		},

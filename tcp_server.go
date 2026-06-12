@@ -228,8 +228,8 @@ func (s *RawTCPServer) handleConnection(clientConn net.Conn) {
 				// If we have a mapping, use its ToURL as destination
 				if m := s.findMapping(); m != nil {
 					logEntry.Destination = m.GetToURL()
-					if len(m.proxyNames) > 0 {
-						logEntry.ProxyName = m.proxyNames[0]
+					if len(m.ProxyNames) > 0 {
+						logEntry.ProxyName = m.ProxyNames[0]
 					}
 					if m.Firewall != "" {
 						logEntry.FirewallName = m.Firewall
@@ -336,9 +336,9 @@ func (s *RawTCPServer) handleConnection(clientConn net.Conn) {
 	}
 
 	// Check if we need to use tunnel/proxy via 'via' configuration
-	// via.tunnels -> mapping.tunnelNames
-	// via.endpoints -> mapping.endpointNames
-	if mapping.Via != nil && (len(mapping.tunnelNames) > 0 || len(mapping.endpointNames) > 0) {
+	// via.tunnels -> mapping.TunnelNames
+	// via.endpoints -> mapping.EndpointNames
+	if mapping.Via != nil && (len(mapping.TunnelNames) > 0 || len(mapping.EndpointNames) > 0) {
 		// Extract tunnel key and endpoint key for stats
 		tunnelName, endpointName, _ := s.getTunnelAndEndpoint(mapping)
 		if tunnelName != "" {
@@ -592,11 +592,11 @@ func (s *RawTCPServer) sendProxyConnectViaDataPlane(ctx context.Context, tunnelN
 // getTunnelAndEndpoint gets the tunnel and endpoint names from mapping configuration
 func (s *RawTCPServer) getTunnelAndEndpoint(mapping *Mapping) (tunnelName, endpointName string, err error) {
 	// First try to get from tunnel manager using endpoint names
-	if len(mapping.endpointNames) > 0 {
+	if len(mapping.EndpointNames) > 0 {
 		// Pick a random endpoint name
-		endpointName = mapping.endpointNames[0]
-		if len(mapping.endpointNames) > 1 {
-			endpointName = mapping.endpointNames[rand.Intn(len(mapping.endpointNames))]
+		endpointName = mapping.EndpointNames[0]
+		if len(mapping.EndpointNames) > 1 {
+			endpointName = mapping.EndpointNames[rand.Intn(len(mapping.EndpointNames))]
 		}
 
 		// Find which tunnel this endpoint belongs to
@@ -606,10 +606,10 @@ func (s *RawTCPServer) getTunnelAndEndpoint(mapping *Mapping) (tunnelName, endpo
 	}
 
 	// Try to get from tunnel names
-	if len(mapping.tunnelNames) > 0 {
-		tunnelName = mapping.tunnelNames[0]
-		if len(mapping.tunnelNames) > 1 {
-			tunnelName = mapping.tunnelNames[rand.Intn(len(mapping.tunnelNames))]
+	if len(mapping.TunnelNames) > 0 {
+		tunnelName = mapping.TunnelNames[0]
+		if len(mapping.TunnelNames) > 1 {
+			tunnelName = mapping.TunnelNames[rand.Intn(len(mapping.TunnelNames))]
 		}
 
 		// Get a random endpoint from this tunnel

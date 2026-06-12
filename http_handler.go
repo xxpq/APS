@@ -523,7 +523,7 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	// 只有在未命中mapping且没有任何级别（user/group/server/mapping）的Endpoints/Tunnels配置时，才返回404
 	hasAnyConfig := len(userEndpointNames) > 0 || len(userTunnelNames) > 0 ||
 		len(serverEndpointNames) > 0 || len(serverTunnelNames) > 0 ||
-		(mapping != nil && (len(mapping.endpointNames) > 0 || len(mapping.tunnelNames) > 0))
+		(mapping != nil && (len(mapping.EndpointNames) > 0 || len(mapping.TunnelNames) > 0))
 
 	if !matched && !hasAnyConfig && !r.URL.IsAbs() {
 		isError = true
@@ -535,11 +535,11 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	// Populate keys for stats
 	if mapping != nil {
 		ruleKey = matchedFromURL
-		if len(mapping.tunnelNames) > 0 {
-			tunnelKey = mapping.tunnelNames[0]
+		if len(mapping.TunnelNames) > 0 {
+			tunnelKey = mapping.TunnelNames[0]
 		}
-		if len(mapping.proxyNames) > 0 {
-			proxyKey = mapping.proxyNames[0]
+		if len(mapping.ProxyNames) > 0 {
+			proxyKey = mapping.ProxyNames[0]
 		}
 	}
 
@@ -636,7 +636,7 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		log.Printf("[%s]%s[%s] %s (NO MAPPING - FORWARDED TO USER-LEVEL ENDPOINT/TUNNEL)", clientIP, clientLocation, r.Method, originalURL)
 	} else if len(serverEndpointNames) > 0 || len(serverTunnelNames) > 0 {
 		log.Printf("[%s]%s[%s] %s (NO MAPPING - FORWARDED TO SERVER-LEVEL ENDPOINT/TUNNEL)", clientIP, clientLocation, r.Method, originalURL)
-	} else if mapping != nil && (len(mapping.endpointNames) > 0 || len(mapping.tunnelNames) > 0) {
+	} else if mapping != nil && (len(mapping.EndpointNames) > 0 || len(mapping.TunnelNames) > 0) {
 		log.Printf("[%s]%s[%s] %s (NO MAPPING - FORWARDED TO MAPPING-LEVEL ENDPOINT/TUNNEL)", clientIP, clientLocation, r.Method, originalURL)
 	} else {
 		log.Printf("[%s]%s[%s] %s (NO MAPPING)", clientIP, clientLocation, r.Method, originalURL)
@@ -645,8 +645,8 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	var requestBody io.Reader = r.Body
 	if matched && mapping != nil {
 		// Check if we need to modify the request body
-		fromConfig := mapping.GetFromConfig()
-		needsModification := fromConfig != nil && (fromConfig.Match != "" || len(fromConfig.Replace) > 0)
+		FromConfig := mapping.GetFromConfig()
+		needsModification := FromConfig != nil && (FromConfig.Match != "" || len(FromConfig.Replace) > 0)
 
 		if needsModification {
 			contentType := r.Header.Get("Content-Type")
@@ -676,9 +676,9 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	var actualTargetURL = targetURL
 	var selectedIP string
 	if matched && mapping != nil {
-		toConfig := mapping.GetToConfig()
-		if toConfig != nil {
-			ips := toConfig.GetIPs()
+		ToConfig := mapping.GetToConfig()
+		if ToConfig != nil {
+			ips := ToConfig.GetIPs()
 			if len(ips) > 0 {
 				selectedIP = pickRandomIP(ips)
 				if selectedIP != "" {
@@ -703,11 +703,11 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if matched && mapping != nil {
-		fromConfig := mapping.GetFromConfig()
-		if fromConfig != nil && fromConfig.Script != "" {
-			proxyReq, err = p.scriptRunner.RunOnRequest(proxyReq, fromConfig.Script)
+		FromConfig := mapping.GetFromConfig()
+		if FromConfig != nil && FromConfig.Script != "" {
+			proxyReq, err = p.scriptRunner.RunOnRequest(proxyReq, FromConfig.Script)
 			if err != nil {
-				log.Printf("[SCRIPT] Error running onRequest script %s: %v", fromConfig.Script, err)
+				log.Printf("[SCRIPT] Error running onRequest script %s: %v", FromConfig.Script, err)
 			}
 		}
 	}
@@ -768,10 +768,10 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if matched && mapping != nil {
-		fromConfig := mapping.GetFromConfig()
-		if fromConfig != nil {
-			if len(fromConfig.Headers) > 0 {
-				headers, headersToRemove := fromConfig.GetAllHeaders()
+		FromConfig := mapping.GetFromConfig()
+		if FromConfig != nil {
+			if len(FromConfig.Headers) > 0 {
+				headers, headersToRemove := FromConfig.GetAllHeaders()
 				for _, key := range headersToRemove {
 					proxyReq.Header.Del(key)
 				}
@@ -779,10 +779,10 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 					proxyReq.Header.Set(key, value)
 				}
 			}
-			if len(fromConfig.QueryString) > 0 {
+			if len(FromConfig.QueryString) > 0 {
 				parsedURL, _ := url.Parse(targetURL)
 				query := parsedURL.Query()
-				params, paramsToRemove := fromConfig.GetQueryString()
+				params, paramsToRemove := FromConfig.GetQueryString()
 				for _, key := range paramsToRemove {
 					query.Del(key)
 				}
@@ -793,8 +793,8 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 				// 更新 proxyReq.URL 后无需再更新 targetURL，因为后续直接使用 proxyReq.URL
 				proxyReq.URL = parsedURL
 			}
-			if fromConfig.Proxy != nil {
-				proxyManager := NewProxyManager(fromConfig.Proxy)
+			if FromConfig.Proxy != nil {
+				proxyManager := NewProxyManager(FromConfig.Proxy)
 				defer proxyManager.Close()
 				proxyURL := proxyManager.GetRandomProxy()
 				if proxyURL != "" {
@@ -886,10 +886,10 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		endpointKey = tunnelName + ":" + endpointName // for per-endpoint stats
 		DebugLog("[%s]%s[TUNNEL] Using server-level tunnel '%s' to endpoint '%s'", clientIP, clientLocation, tunnelName, endpointName)
 
-	} else if mapping != nil && len(mapping.endpointNames) > 0 {
+	} else if mapping != nil && len(mapping.EndpointNames) > 0 {
 		// Priority 5: mapping级别的endpoints配置（fallback）
 		isTunnelRequest = true
-		randomEndpoint := mapping.endpointNames[rand.Intn(len(mapping.endpointNames))]
+		randomEndpoint := mapping.EndpointNames[rand.Intn(len(mapping.EndpointNames))]
 
 		foundTunnel, ok := p.tunnelManager.FindTunnelForEndpoint(randomEndpoint)
 		if !ok {
@@ -902,10 +902,10 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		endpointName = randomEndpoint
 		tunnelKey = tunnelName                        // for stats
 		endpointKey = tunnelName + ":" + endpointName // for per-endpoint stats
-	} else if mapping != nil && len(mapping.tunnelNames) > 0 {
+	} else if mapping != nil && len(mapping.TunnelNames) > 0 {
 		// Priority 6: mapping级别的tunnels配置（fallback）
 		isTunnelRequest = true
-		foundTunnel, foundEndpoint, err := p.tunnelManager.GetRandomEndpointFromTunnels(mapping.tunnelNames)
+		foundTunnel, foundEndpoint, err := p.tunnelManager.GetRandomEndpointFromTunnels(mapping.TunnelNames)
 		if err != nil {
 			isError = true
 			http.Error(w, "No available endpoint for specified tunnels", http.StatusBadGateway)
@@ -919,13 +919,13 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if isTunnelRequest {
-		var toConfig *EndpointConfig
+		var ToConfig *EndpointConfig
 		if mapping != nil {
-			toConfig = mapping.GetToConfig()
+			ToConfig = mapping.GetToConfig()
 		}
 		// If insecure mode is enabled (explicitly or by internal https target auto-detection),
 		// add a header to signal the endpoint to skip strict TLS verification.
-		if shouldUseInsecureBackendMode(toConfig, proxyReq.URL.String()) {
+		if shouldUseInsecureBackendMode(ToConfig, proxyReq.URL.String()) {
 			proxyReq.Header.Set("X-Aps-Insecure", "true")
 		}
 
@@ -970,11 +970,11 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		// For HTTPS, build a per-request transport when:
 		// - we are using IP substitution (to preserve correct SNI), or
 		// - backend is in insecure mode (explicit or internal-IP auto mode).
-		var toConfig *EndpointConfig
+		var ToConfig *EndpointConfig
 		if mapping != nil {
-			toConfig = mapping.GetToConfig()
+			ToConfig = mapping.GetToConfig()
 		}
-		insecureMode := shouldUseInsecureBackendMode(toConfig, proxyReq.URL.String())
+		insecureMode := shouldUseInsecureBackendMode(ToConfig, proxyReq.URL.String())
 		if proxyReq.URL.Scheme == "https" && (selectedIP != "" || insecureMode) {
 			// Clone the default transport and set the ServerName for SNI.
 			baseTransport, ok := p.client.Transport.(*http.Transport)
@@ -1039,11 +1039,11 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	statusCode = resp.StatusCode
 
 	if matched && mapping != nil {
-		toConfig := mapping.GetToConfig()
-		if toConfig != nil && toConfig.Script != "" {
-			resp, err = p.scriptRunner.RunOnResponse(resp, toConfig.Script)
+		ToConfig := mapping.GetToConfig()
+		if ToConfig != nil && ToConfig.Script != "" {
+			resp, err = p.scriptRunner.RunOnResponse(resp, ToConfig.Script)
 			if err != nil {
-				log.Printf("[SCRIPT] Error running onResponse script %s: %v", toConfig.Script, err)
+				log.Printf("[SCRIPT] Error running onResponse script %s: %v", ToConfig.Script, err)
 			}
 		}
 	}
@@ -1052,9 +1052,9 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	setCorsHeaders(w.Header())
 
 	if matched && mapping != nil {
-		toConfig := mapping.GetToConfig()
-		if toConfig != nil && len(toConfig.Headers) > 0 {
-			headers, headersToRemove := toConfig.GetAllHeaders()
+		ToConfig := mapping.GetToConfig()
+		if ToConfig != nil && len(ToConfig.Headers) > 0 {
+			headers, headersToRemove := ToConfig.GetAllHeaders()
 			for _, key := range headersToRemove {
 				w.Header().Del(key)
 			}
@@ -1244,12 +1244,12 @@ func needsResponseModification(mapping *Mapping) bool {
 	if mapping == nil {
 		return false
 	}
-	toConfig := mapping.GetToConfig()
-	if toConfig == nil {
+	ToConfig := mapping.GetToConfig()
+	if ToConfig == nil {
 		return false
 	}
 	// 检查是否配置了响应修改
-	return toConfig.Match != "" || len(toConfig.Replace) > 0
+	return ToConfig.Match != "" || len(ToConfig.Replace) > 0
 }
 
 func (p *MapRemoteProxy) modifyRequestBody(r *http.Request, mapping *Mapping) ([]byte, error) {
@@ -1264,12 +1264,12 @@ func (p *MapRemoteProxy) modifyRequestBody(r *http.Request, mapping *Mapping) ([
 	if mapping == nil {
 		return body, nil
 	}
-	fromConfig := mapping.GetFromConfig()
-	if fromConfig == nil {
+	FromConfig := mapping.GetFromConfig()
+	if FromConfig == nil {
 		return body, nil
 	}
-	if fromConfig.Match != "" {
-		re, err := compileRegex(fromConfig.Match)
+	if FromConfig.Match != "" {
+		re, err := compileRegex(FromConfig.Match)
 		if err != nil {
 			log.Printf("Invalid match regex in 'from' config: %v", err)
 			return body, nil
@@ -1281,9 +1281,9 @@ func (p *MapRemoteProxy) modifyRequestBody(r *http.Request, mapping *Mapping) ([
 			body = []byte{}
 		}
 	}
-	if len(fromConfig.Replace) > 0 {
+	if len(FromConfig.Replace) > 0 {
 		tempBody := string(body)
-		for key, value := range fromConfig.Replace {
+		for key, value := range FromConfig.Replace {
 			re, err := compileRegex(key)
 			if err != nil {
 				log.Printf("Invalid replace regex in 'from' config: %v", err)
@@ -1312,12 +1312,12 @@ func (p *MapRemoteProxy) modifyResponseBody(resp *http.Response, mapping *Mappin
 		return body, nil
 	}
 
-	toConfig := mapping.GetToConfig()
-	if toConfig == nil {
+	ToConfig := mapping.GetToConfig()
+	if ToConfig == nil {
 		return body, nil
 	}
 
-	if toConfig.Match == "" && len(toConfig.Replace) == 0 {
+	if ToConfig.Match == "" && len(ToConfig.Replace) == 0 {
 		return body, nil
 	}
 
@@ -1329,8 +1329,8 @@ func (p *MapRemoteProxy) modifyResponseBody(resp *http.Response, mapping *Mappin
 		body = decodedBody
 	}
 
-	if toConfig.Match != "" {
-		re, err := compileRegex(toConfig.Match)
+	if ToConfig.Match != "" {
+		re, err := compileRegex(ToConfig.Match)
 		if err != nil {
 			log.Printf("Invalid match regex in 'to' config: %v", err)
 			return body, nil
@@ -1345,9 +1345,9 @@ func (p *MapRemoteProxy) modifyResponseBody(resp *http.Response, mapping *Mappin
 		}
 	}
 
-	if len(toConfig.Replace) > 0 {
+	if len(ToConfig.Replace) > 0 {
 		tempBody := string(body)
-		for key, value := range toConfig.Replace {
+		for key, value := range ToConfig.Replace {
 			re, err := compileRegex(key)
 			if err != nil {
 				log.Printf("Invalid replace regex in 'to' config: %v", err)
