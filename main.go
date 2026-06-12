@@ -408,26 +408,9 @@ func main() {
 	log.Println("  Any Proxy Service (APS) v1.0.0")
 	log.Println("===========================================")
 
-	if err := InitCertificates(); err != nil {
-		log.Fatalf("Failed to initialize certificates: %v", err)
-	}
-
 	config, err := LoadConfig(*configFile)
 	if err != nil {
 		log.Fatalf("Failed to load config: %v", err)
-	}
-
-	if err := ReconcileGlobalGridRuntime(config); err != nil {
-		log.Fatalf("Failed to initialize grid runtime: %v", err)
-	}
-	gridRuntime := GetGlobalGridRuntime()
-	if gridRuntime != nil {
-		defer func() {
-			if err := gridRuntime.Close(); err != nil {
-				log.Printf("[GRID] Failed to close grid runtime: %v", err)
-			}
-		}()
-		log.Printf("[GRID] Enabled deployment mode: %s", config.Grid.Deployment.Mode)
 	}
 
 	InitACME(config)
@@ -525,10 +508,6 @@ func main() {
 	}
 	log.Println("===========================================")
 	fmt.Println()
-	fmt.Println("HTTPS Interception Setup:")
-	fmt.Println("   1. Configure your system or browser to use one of the proxy servers.")
-	fmt.Println("   2. Visit '/.ssl' on any server with 'cert: \"auto\"' to download the root certificate.")
-	fmt.Println()
 
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
@@ -593,19 +572,9 @@ func createServerHandler(serverName string, mappings []*Mapping, serverConfig *L
 	mux := http.NewServeMux()
 	proxy := NewMapRemoteProxy(config, harManager, tunnelManager, scriptRunner, trafficShaper, stats, staticCache, loggingDB, serverName, rateLimiter)
 
-	// Register auto-cert endpoints when cert is set to "auto".
-	if certStr, ok := serverConfig.Cert.(string); ok && certStr == "auto" {
-		certHandlers := &CertHandlers{}
-		certHandlers.RegisterHandlers(mux)
-	}
-
 	authHandlers := &AuthHandlers{}
 	authHandlers.RegisterHandlers(mux)
 
-	if gridRuntime := GetGlobalGridRuntime(); gridRuntime != nil {
-		gridHandlers := NewGridHandlers(config, gridRuntime, serverName)
-		gridHandlers.RegisterHandlers(mux)
-	}
 
 	mux.HandleFunc("/.replay", replayManager.ServeHTTP)
 
@@ -702,13 +671,9 @@ func createServerHandler(serverName string, mappings []*Mapping, serverConfig *L
 			return
 		}
 
-		// 娴狅絿鎮婄拠閿嬬湴 (CONNECT)
-		if r.Method == http.MethodConnect {
-			proxy.ServeHTTP(w, r)
-			return
-		}
-
-		// Fallback for all non-CONNECT requests.
+		// Forward proxy is no longer supported; all non-tunnel requests are
+		// dispatched to the reverse proxy handler which rejects absolute-URL
+		// and CONNECT method requests explicitly.
 		proxy.ServeHTTP(w, r)
 	})
 
@@ -866,16 +831,6 @@ func startServer(name string, config *ListenConfig, handler http.Handler, rateLi
 				}
 				EnsureOCSPStaple(&tlsConfig.Certificates[0], "server:"+name)
 				registerTLSPinHash(&tlsConfig.Certificates[0])
-			} else if config.Cert == "auto" {
-				tlsConfig.GetCertificate = func(info *tls.ClientHelloInfo) (*tls.Certificate, error) {
-					cert, certErr := GenerateCertForHost(info.ServerName)
-					if certErr == nil && cert != nil {
-						cert = cloneTLSCertificate(cert)
-						EnsureOCSPStaple(cert, "auto:"+info.ServerName)
-						registerTLSPinHash(cert, info.ServerName)
-					}
-					return cert, certErr
-				}
 			} else if config.Cert == "acme" {
 				acmeTLSConfig := GetACMETLSConfig()
 				if acmeTLSConfig == nil {

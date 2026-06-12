@@ -180,6 +180,3 @@ func PutDoneChannel(ch chan struct{}) {
 // ============================================================================
 // Pre-allocated Constants
 // ============================================================================
-
-// connectEstablishedResponse is the pre-allocated HTTP 200 response for CONNECT
-var connectEstablishedResponse = []byte("HTTP/1.1 200 Connection Established\r\n\r\n")

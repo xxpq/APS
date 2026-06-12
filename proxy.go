@@ -108,21 +108,11 @@ func NewMapRemoteProxy(config *Config, harManager *HarLoggerManager, tunnelManag
 }
 
 func (p *MapRemoteProxy) sendRequestStreamViaDataPlane(ctx context.Context, tunnelName, endpointName string, reqPayload *RequestPayload) (io.ReadCloser, []byte, error) {
-	if runtime := GetGlobalGridRuntime(); runtime != nil {
-		if engine := NewGridExecutionEngine(runtime, p.tunnelManager, p.serverName); engine != nil {
-			return engine.SendRequestStream(ctx, tunnelName, endpointName, reqPayload)
-		}
-	}
 	return p.tunnelManager.SendRequestStream(ctx, tunnelName, endpointName, reqPayload)
 }
 
 func (p *MapRemoteProxy) sendProxyConnectViaDataPlane(ctx context.Context, tunnelName, endpointName string, host string, port int, useTLS bool, clientConn net.Conn, clientIP string) (<-chan struct{}, error) {
-	if runtime := GetGlobalGridRuntime(); runtime != nil {
-		if engine := NewGridExecutionEngine(runtime, p.tunnelManager, p.serverName); engine != nil {
-			return engine.SendProxyConnect(ctx, tunnelName, endpointName, host, port, useTLS, clientConn, clientIP)
-		}
-	}
-	return p.tunnelManager.SendProxyConnect(ctx, tunnelName, endpointName, host, port, useTLS, clientConn, clientIP, nil)
+	return p.tunnelManager.SendProxyConnect(ctx, tunnelName, endpointName, host, port, useTLS, clientConn, clientIP)
 }
 
 // createProxyClient 为指定的代理 URL 创建 HTTP 客户端
@@ -211,8 +201,10 @@ func (p *MapRemoteProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// CONNECT method is no longer supported as a forward proxy entry point.
+	// It is only accepted on the dedicated `/.tunnel` endpoint (see main.go).
 	if r.Method == http.MethodConnect {
-		p.handleConnectWithIntercept(w, r)
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 		return
 	}
 

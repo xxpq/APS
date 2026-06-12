@@ -1,11 +1,5 @@
 {
   "debug": true,
-  "grid": {
-    "deployment": {
-      "enabled": true,
-      "mode": "standalone",
-      "sqlite_path": "aps_grid.db"
-    },
     "routing": {
       "strategy": "reliability",
       "hop_guard": true,
@@ -33,7 +27,6 @@
     "default": {
       "port": 80,
       "type": 2,
-      "proxy": false,
       "public": true,
       "panel": true,
       "firewall": "office_access",
@@ -42,7 +35,6 @@
     "mstsc_sucdri_my_pc": {
       "port": 3388,
       "type": 1,
-      "proxy": false,
       "public": true,
       "panel": false,
       "firewall": "china_only"
@@ -50,14 +42,12 @@
     "mstsc_sucdri_vps": {
       "port": 3387,
       "type": 1,
-      "proxy": false,
       "public": true,
       "panel": false
     },
     "mstsc_sucdri_windows": {
       "port": 3690,
       "type": 1,
-      "proxy": false,
       "public": true,
       "panel": false,
       "firewall": "china_only"
@@ -65,7 +55,6 @@
     "mstsc_sucdri_windows_audit": {
       "port": 3390,
       "type": 1,
-      "proxy": false,
       "public": true,
       "panel": false,
       "firewall": "china_only"
@@ -73,7 +62,6 @@
     "proxy": {
       "port": 1080,
       "type": 2,
-      "proxy": true,
       "public": true,
       "panel": false,
       "firewall": "china_only"
@@ -81,14 +69,12 @@
     "ssh_ls_sh_sucdri": {
       "port": 1222,
       "type": 1,
-      "proxy": false,
       "public": true,
       "panel": false
     },
     "ssh_sucdri": {
       "port": 2222,
       "type": 1,
-      "proxy": false,
       "public": true,
       "panel": false,
       "firewall": "china_only"
@@ -96,7 +82,6 @@
     "ssl": {
       "port": 443,
       "type": 2,
-      "proxy": false,
       "cert": "acme",
       "public": true,
       "panel": true,
@@ -105,7 +90,6 @@
     "sucdri_esxi": {
       "port": 5000,
       "type": 1,
-      "proxy": false,
       "public": true,
       "panel": false,
       "firewall": "china_only"
@@ -221,8 +205,6 @@
     "notes": [
       "All endpoints keep gatewayDiscovery enabled and use UDP/TCP 37990.",
       "You can configure static gateways via gatewayAddress as either string (comma/semicolon/space separated) or string array while keeping broadcast discovery enabled.",
-      "Grid runtime handles QUIC+TCP parallel, ICE candidate exchange, and APS relay fallback.",
-      "Route/path cache TTL follows grid.routing.path_ttl_seconds and runtime probe refresh."
     ]
   },
   "auth": {
@@ -230,7 +212,6 @@
       "admin": {
         "password": "admin",
         "admin": true,
-        "proxy": true
       }
     }
   },

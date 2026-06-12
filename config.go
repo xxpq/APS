@@ -47,7 +47,6 @@ type Config struct {
 	Tunnels           map[string]*TunnelConfig       `json:"tunnels,omitempty"`
 	Endpoints         map[string]*EndpointConfig_APS `json:"endpoints,omitempty"` // Endpoint configurations
 	Mirrors           map[string][]string            `json:"mirrors,omitempty"`   // Mirror groups
-	Grid              *GridConfig                    `json:"grid,omitempty"`
 	Auth              *AuthConfig                    `json:"auth,omitempty"`
 	AuthProviders     map[string]*AuthProviderConfig `json:"authProviders,omitempty"` // 第三方认证提供商配置
 	P12s              map[string]*P12Config          `json:"p12s,omitempty"`
@@ -521,7 +520,6 @@ type TrafficPolicies struct {
 type User struct {
 	Password          string      `json:"password"`
 	Admin             bool        `json:"admin,omitempty"`
-	Proxy             bool        `json:"proxy,omitempty"` // 是否允许使用 HTTP/HTTPS 代理服务
 	Token             string      `json:"token,omitempty"`
 	Groups            []string    `json:"groups,omitempty"`
 	Dump              string      `json:"dump,omitempty"`
@@ -793,7 +791,6 @@ type RuleAuth struct {
 type ListenConfig struct {
 	Port              int         `json:"port"`
 	Type              int         `json:"type,omitempty"`  // 1=TCP, 2=HTTP, 3=UDP, 4=TCP+UDP, 5=HTTP+UDP
-	Proxy             *bool       `json:"proxy,omitempty"` // true: 启用 HTTP/HTTPS 代理服务, false: 禁用 (default false)
 	Cert              interface{} `json:"cert,omitempty"`  // string ("auto") or CertFiles
 	Key               string      `json:"key,omitempty"`
 	Auth              *ServerAuth `json:"auth,omitempty"`
@@ -1073,10 +1070,6 @@ func LoadConfig(filename string) (*Config, error) {
 }
 
 func processConfig(config *Config) error {
-	if err := ensureGridConfigSettings(config); err != nil {
-		return err
-	}
-
 	// 解析并验证每个 mapping
 	validMappings := make([]Mapping, 0, len(config.Mappings))
 	for i := range config.Mappings {
@@ -1234,10 +1227,6 @@ func (c *Config) Reload(filename string) (map[string]*ListenConfig, error) {
 			TrafficPolicies:    cfg.TrafficPolicies,
 		}
 		// Deep copy pointer fields
-		if cfg.Proxy != nil {
-			v := *cfg.Proxy
-			configCopy.Proxy = &v
-		}
 		if cfg.Public != nil {
 			v := *cfg.Public
 			configCopy.Public = &v
@@ -1289,7 +1278,6 @@ func (c *Config) Reload(filename string) (map[string]*ListenConfig, error) {
 	c.Scripting = newConfig.Scripting
 	c.Mappings = newConfig.Mappings
 	c.Auth = newConfig.Auth
-	c.Grid = newConfig.Grid
 	c.Debug = newConfig.Debug
 	c.Firewalls = newConfig.Firewalls // Add firewall hot reload
 	c.mu.Unlock()

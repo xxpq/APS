@@ -30,7 +30,7 @@ go build .
 
 ### 2. 配置
 
-创建一个名为 `config.json` 的文件。这是一个最简化的配置，它启动一个在 `8080` 端口的 HTTP 代理，并将所有对 `http://example.com` 的请求重定向到 `http://httpbin.org`。
+创建一个名为 `config.json` 的文件。这是一个最简化的配置，它启动一个在 `8080` 端口的反向代理服务，并将所有对 `http://example.com` 的请求重定向到 `http://httpbin.org`。
 
 ```json
 {
@@ -54,20 +54,6 @@ go build .
 ```bash
 ./aps -config=config.json
 ```
-
-### 4. 配置 HTTPS 拦截
-
-1. 在 `config.json` 中添加一个支持 HTTPS 拦截的服务器：
-   ```json
-   "https-proxy": {
-     "port": 8443,
-     "cert": "auto"
-   }
-   ```
-2. 将您的系统或浏览器的代理设置为 `127.0.0.1:8443`。
-3. 在浏览器中访问任意 HTTP 网站，然后导航到 `http://<any-domain>/.ssl` (例如 `http://example.com/.ssl`)。
-4. 下载 `Any_Proxy_Service.crt` 证书文件。
-5. 将此证书导入到您的系统或浏览器的“受信任的根证书颁发机构”中。
 
 ## 核心概念
 
@@ -104,9 +90,9 @@ go build .
     "port": 8080,
     "public": false
   },
-  "https-proxy-with-auth": {
+  "https-server-with-auth": {
     "port": 8443,
-    "cert": "auto",
+    "cert": "acme",
     "panel": true,
     "auth": {
       "users": ["user1"],
@@ -316,7 +302,7 @@ go run ./endpoint/main.go -server 127.0.0.1:3000 -tunnel my-secure-tunnel -name 
   "servers": {
     "main-gateway": {
       "port": 443,
-      "cert": "auto",
+      "cert": "acme",
       "endpoints": ["fallback-instance-1", "fallback-instance-2"]
     }
   }
@@ -682,7 +668,6 @@ if __name__ == "__main__":
 
 ## 管理端点
 
-- `/.ssl`: 证书安装页面与根 CA 下载，文件名 `Any_Proxy_Service.crt`。
 - `/.api/stats`: 实时统计 JSON（已替换旧路径 `/.stats`）。未认证时对 `rules`/`users`/`servers`/`tunnels`/`proxies` 键名进行脱敏；认证后显示真实名称。指标包含：
   - QPS（按首末请求时间窗口计算，窗口 < 1s 时退化为请求数）
   - 响应时长 平均/最短/最长（毫秒）
@@ -705,15 +690,6 @@ if __name__ == "__main__":
   - 未认证访问 `/.api/stats` 时，维度键名以 `md5(key + timestamp)` 返回；认证后返回真实键名。
 - 前端静态：
   - `/.admin/`: 从 `./admin-ui/dist` 目录提供管理界面静态文件，包含统计仪表盘（1s 自动刷新）、配置编辑器、登录/退出。
-
-### HTTPS CONNECT 拦截策略
-
-- 自动判定是否进行 MITM：
-  - 若存在以 `https://{host}` 前缀匹配的映射规则，则对该主机的 CONNECT 进行拦截并生成伪造证书进行解密（MITM）。
-  - 否则以纯隧道方式直连目标主机，不解密内容。
-- 证书下载与信任：
-  - 将 server 的 `cert` 设为 `"auto"` 后，可在该服务访问 `/.ssl` 下载根 CA 并安装信任。
-- 参考实现：[handleConnectWithIntercept()](connect_handler.go:15)、[shouldInterceptHost()](connect_handler.go:35)、[TlsListener](tls_listener.go:9)。
 
 ### WebSocket 路由与匹配说明
 
@@ -858,7 +834,6 @@ if __name__ == "__main__":
 
 - 入口地址
   - 管理面板静态页面：`/.admin/`（Carbon Design 风格，无需构建即可使用）
-  - 证书安装页面：`/.ssl`（下载根 CA：`Any_Proxy_Service.crt`）
 - 登录与认证
   - 登录接口：`POST /.api/login`（仅 `auth.users` 中设置了 `admin: true` 的用户可登录）
   - 登录成功后：
@@ -877,8 +852,6 @@ if __name__ == "__main__":
   - 刷新频率：默认每 1s 自动刷新，支持“立即刷新”“暂停/恢复”
   - 未认证访问时：`rules`/`users`/`servers`/`tunnels`/`proxies` 的键名会被脱敏（`md5(key + timestamp)`）；认证后显示真实名称
   - 指标包含：请求数、错误数、QPS、请求包/响应包大小的平均/最小/最大、响应时长的平均/最短/最长
-- 快速导航
-  - 在 `/.ssl` 页面顶部导航可直接进入 `/.admin/` 与查看 `/.api/stats` 原始 JSON
 
 ## 统计指标说明（/.api/stats）
 

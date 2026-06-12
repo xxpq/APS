@@ -401,23 +401,12 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var username string
-	// 检查是否是代理请求（绝对URL或 CONNECT 方法）
-	isProxyRequest := r.URL.IsAbs() || r.Method == http.MethodConnect
-
-	// 如果是代理请求，检查 server 是否启用了代理功能
-	if isProxyRequest {
-		if serverConfig == nil || serverConfig.Proxy == nil || !*serverConfig.Proxy {
-			isError = true
-			DebugLogThrottled(
-				"proxy_request_rejected_no_proxy|"+p.serverName,
-				30*time.Second,
-				"[PROXY] Proxy request rejected: server '%s' does not have proxy enabled",
-				p.serverName,
-			)
-			w.Header().Set("Proxy-Authenticate", `Basic realm="Proxy Disabled"`)
-			http.Error(w, "Proxy service is not enabled on this server", http.StatusProxyAuthRequired)
-			return
-		}
+	// Forward proxy is no longer supported; absolute-URL or CONNECT requests
+	// from clients are rejected as the service only acts as a reverse proxy.
+	if r.URL.IsAbs() || r.Method == http.MethodConnect {
+		isError = true
+		http.Error(w, "Forward proxy is not supported on this server", http.StatusMethodNotAllowed)
+		return
 	}
 
 	// Skip internal auth if third-party auth is configured
@@ -426,26 +415,11 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		authorized, user, username = p.checkAuth(r, mapping)
 		if !authorized {
 			isError = true
-			if r.Method == http.MethodConnect || r.Header.Get("Proxy-Authorization") == "" {
-				w.Header().Set("Proxy-Authenticate", `Basic realm="Restricted"`)
-				http.Error(w, "Proxy authentication required", http.StatusProxyAuthRequired)
-			} else {
-				http.Error(w, "Forbidden by rule", http.StatusForbidden)
-			}
+			http.Error(w, "Forbidden by rule", http.StatusForbidden)
 			return
 		}
 		if user != nil {
 			userKey = username
-		}
-
-		// 如果是代理请求，检查用户是否有代理权限
-		if isProxyRequest {
-			if hasPermission, errMsg := p.checkProxyPermission(user, username); !hasPermission {
-				isError = true
-				log.Printf("[PROXY] User '%s' denied proxy access: %s", username, errMsg)
-				http.Error(w, "Forbidden: "+errMsg, http.StatusForbidden)
-				return
-			}
 		}
 	}
 

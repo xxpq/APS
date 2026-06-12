@@ -160,30 +160,7 @@ func (p *MapRemoteProxy) checkTunnelAccess(user *User, username string, tunnelAu
 	return false
 }
 
-// checkProxyPermission 检查用户是否有代理使用权限
-// 返回值: (hasPermission bool, errorMessage string)
-func (p *MapRemoteProxy) checkProxyPermission(user *User, username string) (bool, string) {
-	// 如果用户为 nil（匿名访问），则无权限
-	if user == nil {
-		return false, "Proxy access requires authentication"
-	}
-
-	// 检查用户是否直接配置了 proxy 权限
-	if user.Proxy {
-		return true, ""
-	}
-
-	// 检查用户所属的组是否有 proxy 权限
-	if p.config.Auth != nil && p.config.Auth.Groups != nil {
-		for _, groupName := range user.Groups {
-			if group, ok := p.config.Auth.Groups[groupName]; ok {
-				// 注意：Group 结构体中没有 Proxy 字段，所以这里只检查用户级别
-				// 如果需要组级别的 proxy 权限，需要在 Group 结构体中添加 Proxy 字段
-				_ = group // 避免未使用的变量警告
-			}
-		}
-	}
-
-	// 用户没有代理权限
-	return false, "User does not have proxy permission"
-}
+// checkProxyPermission has been removed: forward proxy is no longer
+// supported. Authentication for the reverse proxy is handled by
+// checkAuth() which uses the Proxy-Authorization header for backward
+// compatibility, and by mapping-level auth rules.
