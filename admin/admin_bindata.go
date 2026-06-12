@@ -1,4 +1,4 @@
-// Code generated for package main by go-bindata DO NOT EDIT. (@generated)
+// Code generated for package admin by go-bindata DO NOT EDIT. (@generated)
 // sources:
 // admin_static/carbon/charts.css
 // admin_static/carbon/charts.js
@@ -8,7 +8,7 @@
 // admin_static/index.html
 // admin_static/script.js
 // admin_static/style.css
-package main
+package admin
 
 import (
 	"bytes"

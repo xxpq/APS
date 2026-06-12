@@ -1,0 +1,3 @@
+package admin
+
+//go:generate go run github.com/go-bindata/go-bindata/go-bindata@v3.1.2+incompatible -pkg=admin -o admin_bindata.go -prefix admin_static/ admin_static/...

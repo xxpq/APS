@@ -20,6 +20,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"aps/admin"
 	"aps/asn"
 	"aps/cache"
 	"aps/firewall"
@@ -142,7 +143,7 @@ func (h *AdminHandlers) SetTunnelManager(tm TunnelManagerInterface) {
 }
 
 func writeEmbeddedAdminAsset(w http.ResponseWriter, assetName, contentType string) {
-	data, err := Asset(assetName)
+	data, err := admin.Asset(assetName)
 	if err != nil {
 		log.Printf("failed to load embedded admin asset %q: %v", assetName, err)
 		http.Error(w, "Not Found", http.StatusNotFound)
