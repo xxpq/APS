@@ -25,6 +25,7 @@ import (
 	"golang.org/x/crypto/pkcs12"
 
 	"aps/asn"
+	"aps/cache"
 	"aps/firewall"
 	"aps/logging"
 	"aps/stats"
@@ -1582,7 +1583,7 @@ func (p *MapRemoteProxy) checkThirdPartyAuth(r *http.Request, authUrl string, pr
 	}
 	DebugLog("[AUTH] Token found in request: %s", maskToken(token))
 
-	authCache := GetAuthCache()
+	authCache := cache.GetAuthCache()
 	cacheKey := authCache.GenerateCacheKey(token, r.Method, r.Host, r.URL.Path)
 
 	// 1. Check fresh cache

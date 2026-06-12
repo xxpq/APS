@@ -21,6 +21,7 @@ import (
 	"sync"
 	"time"
 	"aps/asn"
+	"aps/cache"
 	"aps/firewall"
 	"aps/logging"
 	"aps/security"
@@ -46,7 +47,7 @@ func (h *AuthHandlers) handleRevoke(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	count := GetAuthCache().RevokeByToken(token)
+	count := cache.GetAuthCache().RevokeByToken(token)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"status":  "success",
@@ -61,7 +62,7 @@ func (h *AuthHandlers) handleInfo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	info := GetAuthCache().GetInfoByToken(token)
+	info := cache.GetAuthCache().GetInfoByToken(token)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(info)
 }
