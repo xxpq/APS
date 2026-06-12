@@ -128,7 +128,7 @@ func (s *RawTCPServer) UpdateMappings(mappings []*Mapping) {
 func (s *RawTCPServer) acceptLoop() {
 	log.Printf("[RAW TCP] Accept loop started for server '%s'", s.name)
 	for {
-		DebugLog("[RAW TCP] Waiting for connection on '%s'...", s.name)
+		util.DebugLog("[RAW TCP] Waiting for connection on '%s'...", s.name)
 		conn, err := s.listener.Accept()
 		if err != nil {
 			s.mu.Lock()
@@ -247,7 +247,7 @@ func (s *RawTCPServer) handleConnection(clientConn net.Conn) {
 
 				go func(entry *logging.LogEntry) {
 					if err := s.loggingDB.AddLog(entry); err != nil {
-						DebugLog("[LOGGING] Failed to record rawtcp log: %v", err)
+						util.DebugLog("[LOGGING] Failed to record rawtcp log: %v", err)
 					}
 				}(logEntry)
 			}
@@ -263,11 +263,11 @@ func (s *RawTCPServer) handleConnection(clientConn net.Conn) {
 	if s.config.Firewall != "" {
 		firewallRule = firewall.GetFirewallRule(s.appConfig.Firewalls, s.config.Firewall)
 		if firewallRule != nil {
-			DebugLog("[FIREWALL] Using server-level firewall rule '%s'", s.config.Firewall)
+			util.DebugLog("[FIREWALL] Using server-level firewall rule '%s'", s.config.Firewall)
 
 			// Check if client IP is allowed by server firewall
 			if !firewall.CheckFirewall(clientAddr, firewallRule) {
-				DebugLog("%s[RAW TCP] Connection from %s blocked by server firewall", clientLocation, clientAddr)
+				util.DebugLog("%s[RAW TCP] Connection from %s blocked by server firewall", clientLocation, clientAddr)
 				clientConn.Close()
 				isIntercepted = true
 				// isError = true // Firewall block is now counted as intercepted
@@ -310,11 +310,11 @@ func (s *RawTCPServer) handleConnection(clientConn net.Conn) {
 	if firewallRule == nil && mapping.Firewall != "" {
 		firewallRule = firewall.GetFirewallRule(s.appConfig.Firewalls, mapping.Firewall)
 		if firewallRule != nil {
-			DebugLog("[FIREWALL] Using mapping-level firewall rule '%s'", mapping.Firewall)
+			util.DebugLog("[FIREWALL] Using mapping-level firewall rule '%s'", mapping.Firewall)
 
 			// Check if client IP is allowed by mapping firewall
 			if !firewall.CheckFirewall(clientAddr, firewallRule) {
-				DebugLog("%s[RAW TCP] Connection from %s blocked by mapping firewall", clientLocation, clientAddr)
+				util.DebugLog("%s[RAW TCP] Connection from %s blocked by mapping firewall", clientLocation, clientAddr)
 				clientConn.Close()
 				isIntercepted = true
 				// isError = true // Firewall block is now counted as intercepted
@@ -359,17 +359,17 @@ func (s *RawTCPServer) handleConnection(clientConn net.Conn) {
 
 // findMapping finds a matching mapping for this TCP server
 func (s *RawTCPServer) findMapping() *Mapping {
-	DebugLog("[RAW TCP] findMapping: Server '%s' (port %d) has %d mappings", s.name, s.config.Port, len(s.mappings))
+	util.DebugLog("[RAW TCP] findMapping: Server '%s' (port %d) has %d mappings", s.name, s.config.Port, len(s.mappings))
 
 	// First, try to find a mapping explicitly assigned to this server
 	for i, m := range s.mappings {
-		DebugLog("[RAW TCP] findMapping: Checking mapping %d: %s -> %s, serverNames=%v", i, m.GetFromURL(), m.GetToURL(), m.ServerNames)
+		util.DebugLog("[RAW TCP] findMapping: Checking mapping %d: %s -> %s, serverNames=%v", i, m.GetFromURL(), m.GetToURL(), m.ServerNames)
 		for _, serverName := range m.ServerNames {
 			if serverName == s.name {
 				fromURL := m.GetFromURL()
 				if strings.HasPrefix(fromURL, "tcp://") {
 					// Logging moved to caller after firewall checks
-					DebugLog("[RAW TCP] findMapping: Found explicit match by serverName")
+					util.DebugLog("[RAW TCP] findMapping: Found explicit match by serverName")
 					return m
 				}
 			}
@@ -379,7 +379,7 @@ func (s *RawTCPServer) findMapping() *Mapping {
 	// If no explicit mapping, try to match by port
 	// This handles the case where mapping doesn't specify servers
 	serverPort := s.config.Port
-	DebugLog("[RAW TCP] findMapping: No explicit serverName match, trying port matching for port %d", serverPort)
+	util.DebugLog("[RAW TCP] findMapping: No explicit serverName match, trying port matching for port %d", serverPort)
 	for i, m := range s.mappings {
 		fromURL := m.GetFromURL()
 		if !strings.HasPrefix(fromURL, "tcp://") {
@@ -389,27 +389,27 @@ func (s *RawTCPServer) findMapping() *Mapping {
 		// Parse the from URL to get the port
 		u, err := url.Parse(fromURL)
 		if err != nil {
-			DebugLog("[RAW TCP] findMapping: Failed to parse URL %s: %v", fromURL, err)
+			util.DebugLog("[RAW TCP] findMapping: Failed to parse URL %s: %v", fromURL, err)
 			continue
 		}
 
 		portStr := u.Port()
 		if portStr == "" {
-			DebugLog("[RAW TCP] findMapping: No port in URL %s", fromURL)
+			util.DebugLog("[RAW TCP] findMapping: No port in URL %s", fromURL)
 			continue
 		}
 
 		mappingPort, err := strconv.Atoi(portStr)
 		if err != nil {
-			DebugLog("[RAW TCP] findMapping: Failed to parse port %s: %v", portStr, err)
+			util.DebugLog("[RAW TCP] findMapping: Failed to parse port %s: %v", portStr, err)
 			continue
 		}
 
-		DebugLog("[RAW TCP] findMapping: Mapping %d port %d vs server port %d", i, mappingPort, serverPort)
+		util.DebugLog("[RAW TCP] findMapping: Mapping %d port %d vs server port %d", i, mappingPort, serverPort)
 		// If ports match, use this mapping
 		if mappingPort == serverPort {
 			// Logging moved to caller after firewall checks
-			DebugLog("[RAW TCP] findMapping: Found match by port!")
+			util.DebugLog("[RAW TCP] findMapping: Found match by port!")
 			return m
 		}
 	}

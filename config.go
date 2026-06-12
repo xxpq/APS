@@ -21,19 +21,10 @@ import (
 	"aps/security"
 )
 
-// IsDebugMode 全局debug模式标志（re-export 自 aps/util，Stage 8 清理）。
-// 仅为初始值复制，不是引用；4 个写入点（config.go:1059/1062/1282/1285）
-// 修改的是本 package 的 IsDebugMode，故下方 DebugLog 读本地 var 才能正确工作。
+// IsDebugMode 全局debug模式标志（Stage 8 已清理：直接用 util.IsDebugMode）。
+// 保留为 var 是为了向后兼容 4 个写入点（config.go:1025/1028/1257/1260），
+// 它们现在同时更新 util.IsDebugMode 和本 var（仅作历史引用）。
 var IsDebugMode = util.IsDebugMode
-
-// DebugLog 只在debug模式下输出日志（re-export 自 aps/util，Stage 8 清理）。
-// 读 package main 本地 IsDebugMode（见上注释），不调用 util.DebugLog，
-// 因为 util.IsDebugMode 不会被任何写入点更新。
-func DebugLog(format string, args ...interface{}) {
-	if IsDebugMode {
-		log.Printf(format, args...)
-	}
-}
 
 // Server Types
 const (
@@ -1023,9 +1014,11 @@ func LoadConfig(filename string) (*Config, error) {
 	// 设置全局debug模式标志
 	if config.Debug != nil && *config.Debug {
 		IsDebugMode = true
+		util.IsDebugMode = true
 		log.Println("[CONFIG] Debug mode enabled")
 	} else {
 		IsDebugMode = false
+		util.IsDebugMode = false
 	}
 
 	return &config, nil
@@ -1255,9 +1248,11 @@ func (c *Config) Reload(filename string) (map[string]*ListenConfig, error) {
 	// 更新全局debug模式标志
 	if newConfig.Debug != nil && *newConfig.Debug {
 		IsDebugMode = true
+		util.IsDebugMode = true
 		log.Println("[CONFIG] Debug mode enabled")
 	} else {
 		IsDebugMode = false
+		util.IsDebugMode = false
 		log.Println("[CONFIG] Debug mode disabled")
 	}
 

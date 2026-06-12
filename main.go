@@ -127,13 +127,13 @@ func (sm *ServerManager) Start(name string, serverConfig *ListenConfig, isACMEEn
 		// For rawTCP servers, also match by port if no explicit server assignment
 		if (serverConfig.Type == ServerTypeTCP || serverConfig.Type == ServerTypeTCPUDP) && len(mapping.ServerNames) == 0 {
 			fromURL := mapping.GetFromURL()
-			DebugLog("[TCP MAPPING] Checking mapping %s for server '%s' (port %d), serverNames=%v", fromURL, name, serverConfig.Port, mapping.ServerNames)
+			util.DebugLog("[TCP MAPPING] Checking mapping %s for server '%s' (port %d), serverNames=%v", fromURL, name, serverConfig.Port, mapping.ServerNames)
 			if strings.HasPrefix(fromURL, "tcp://") {
 				// Parse the from URL to get the port
 				if u, err := url.Parse(fromURL); err == nil {
 					if portStr := u.Port(); portStr != "" {
 						if mappingPort, err := strconv.Atoi(portStr); err == nil {
-							DebugLog("[TCP MAPPING] Parsed port %d from %s, comparing with server port %d", mappingPort, fromURL, serverConfig.Port)
+							util.DebugLog("[TCP MAPPING] Parsed port %d from %s, comparing with server port %d", mappingPort, fromURL, serverConfig.Port)
 							if mappingPort == serverConfig.Port {
 								serverMappings[name] = append(serverMappings[name], mapping)
 								log.Printf("[RAW TCP] Auto-assigned mapping %s to server '%s' (port %d)", fromURL, name, serverConfig.Port)
@@ -653,7 +653,7 @@ func createServerHandler(serverName string, mappings []*Mapping, serverConfig *L
 		})
 		mux.Handle("/.tunnel", tunnelConnectHandler)
 	} else {
-		DebugLog("[TCP TUNNEL] Server '%s' is not bound by any tunnel; '/.tunnel' is not registered", serverName)
+		util.DebugLog("[TCP TUNNEL] Server '%s' is not bound by any tunnel; '/.tunnel' is not registered", serverName)
 	}
 
 	// 閺嶈宓?panel 閹貉冨煑 /.api 娑?/.admin 閻ㄥ嫭鏁為崘?
@@ -1030,7 +1030,7 @@ func startLogCleanup(config *Config, loggingDB *logging.LoggingDB) {
 			if err := loggingDB.CleanupOldLogs(retentionHours); err != nil {
 				log.Printf("[LOGGING] Error cleaning up old logs: %v", err)
 			} else {
-				DebugLog("[LOGGING] Cleanup completed, retention=%d hours", retentionHours)
+				util.DebugLog("[LOGGING] Cleanup completed, retention=%d hours", retentionHours)
 			}
 		}
 	}()

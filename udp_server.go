@@ -14,6 +14,7 @@ import (
 	"aps/firewall"
 	"aps/logging"
 	"aps/stats"
+"aps/util"
 	"aps/tunnel"
 )
 
@@ -192,7 +193,7 @@ func (s *RawUDPServer) createSession(clientAddr *net.UDPAddr) (*UDPSession, erro
 		firewallRule := firewall.GetFirewallRule(s.appConfig.Firewalls, s.config.Firewall)
 		if firewallRule != nil {
 			if !firewall.CheckFirewall(clientIP, firewallRule) {
-				DebugLog("%s[RAW UDP] Packet from %s blocked by server firewall", clientLocation, clientIP)
+				util.DebugLog("%s[RAW UDP] Packet from %s blocked by server firewall", clientLocation, clientIP)
 				return nil, nil
 			}
 		}
@@ -210,7 +211,7 @@ func (s *RawUDPServer) createSession(clientAddr *net.UDPAddr) (*UDPSession, erro
 		firewallRule := firewall.GetFirewallRule(s.appConfig.Firewalls, mapping.Firewall)
 		if firewallRule != nil {
 			if !firewall.CheckFirewall(clientIP, firewallRule) {
-				DebugLog("%s[RAW UDP] Packet from %s blocked by mapping firewall", clientLocation, clientIP)
+				util.DebugLog("%s[RAW UDP] Packet from %s blocked by mapping firewall", clientLocation, clientIP)
 				return nil, nil
 			}
 		}

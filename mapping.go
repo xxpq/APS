@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"aps/util"
 )
 
 // routeCacheEntry represents a cached route match result
@@ -336,11 +337,11 @@ func boolCachePart(v bool) string {
 }
 
 func logMatchSuccess(originalURL, fromPattern, newURL string) {
-	DebugLog("[DEBUG] MATCH OK: %s (pattern=%s) -> %s", originalURL, fromPattern, newURL)
+	util.DebugLog("[DEBUG] MATCH OK: %s (pattern=%s) -> %s", originalURL, fromPattern, newURL)
 }
 
 func logMatchFailure(originalURL, reason string) {
-	DebugLog("[DEBUG] MATCH FAIL: %s (reason=%s)", originalURL, reason)
+	util.DebugLog("[DEBUG] MATCH FAIL: %s (reason=%s)", originalURL, reason)
 }
 
 func (p *MapRemoteProxy) matchAndReplace(parsedOriginal *url.URL, parsedFrom *url.URL, originalURL, fromPattern, toPattern string) (bool, string) {

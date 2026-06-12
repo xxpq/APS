@@ -29,6 +29,7 @@ import (
 	"aps/firewall"
 	"aps/logging"
 	"aps/stats"
+"aps/util"
 	"aps/tunnel"
 )
 
@@ -262,7 +263,7 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 
 					// Write to database
 					if err := p.loggingDB.AddLog(entry); err != nil {
-						DebugLog("[LOGGING] Failed to record log entry: %v", err)
+						util.DebugLog("[LOGGING] Failed to record log entry: %v", err)
 					}
 				}()
 			}
@@ -329,7 +330,7 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 
 			bytesSent = uint64(len(cachedEntry.Body))
 			statusCode = cachedEntry.StatusCode // 记录原始状态码用于统计
-			DebugLog("[CACHE] HIT: %s (%d bytes, compressed=%v)", fullURL, len(cachedEntry.Body), cachedEntry.IsCompressed)
+			util.DebugLog("[CACHE] HIT: %s (%d bytes, compressed=%v)", fullURL, len(cachedEntry.Body), cachedEntry.IsCompressed)
 			return
 		}
 	}
@@ -473,13 +474,13 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	if serverConfig != nil && serverConfig.Firewall != "" {
 		firewallRule = firewall.GetFirewallRule(p.config.Firewalls, serverConfig.Firewall)
 		if firewallRule != nil {
-			DebugLog("[FIREWALL] Using server-level firewall rule '%s'", serverConfig.Firewall)
+			util.DebugLog("[FIREWALL] Using server-level firewall rule '%s'", serverConfig.Firewall)
 		}
 	}
 	if firewallRule == nil && mapping != nil && mapping.Firewall != "" {
 		firewallRule = firewall.GetFirewallRule(p.config.Firewalls, mapping.Firewall)
 		if firewallRule != nil {
-			DebugLog("[FIREWALL] Using mapping-level firewall rule '%s'", mapping.Firewall)
+			util.DebugLog("[FIREWALL] Using mapping-level firewall rule '%s'", mapping.Firewall)
 		}
 	}
 
@@ -489,7 +490,7 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	if !firewall.CheckFirewall(clientIP, firewallRule) {
 		isIntercepted = true
 		// isError = true // Firewall block is now counted as intercepted, not error
-		DebugLog("[FIREWALL] Request from %s blocked by firewall", clientIP)
+		util.DebugLog("[FIREWALL] Request from %s blocked by firewall", clientIP)
 		http.Error(w, "Forbidden", http.StatusForbidden)
 		return
 	}
@@ -667,7 +668,7 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 				}
 				requestBody = bytes.NewReader(modifiedBody)
 			} else {
-				DebugLog("[MODIFICATION] Skipping request body modification for non-text content type: %s", contentType)
+				util.DebugLog("[MODIFICATION] Skipping request body modification for non-text content type: %s", contentType)
 			}
 		}
 	}
@@ -834,7 +835,7 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		endpointName = randomEndpoint
 		tunnelKey = tunnelName                        // for stats
 		endpointKey = tunnelName + ":" + endpointName // for per-endpoint stats
-		DebugLog("[%s]%s[TUNNEL] Using user-level endpoint '%s' via tunnel '%s'", clientIP, clientLocation, endpointName, tunnelName)
+		util.DebugLog("[%s]%s[TUNNEL] Using user-level endpoint '%s' via tunnel '%s'", clientIP, clientLocation, endpointName, tunnelName)
 
 	} else if len(userTunnelNames) > 0 {
 		// Priority 2: 用户级别的tunnels配置
@@ -850,7 +851,7 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		endpointName = foundEndpoint
 		tunnelKey = tunnelName                        // for stats
 		endpointKey = tunnelName + ":" + endpointName // for per-endpoint stats
-		DebugLog("[%s]%s[TUNNEL] Using user-level tunnel '%s' to endpoint '%s'", clientIP, clientLocation, tunnelName, endpointName)
+		util.DebugLog("[%s]%s[TUNNEL] Using user-level tunnel '%s' to endpoint '%s'", clientIP, clientLocation, tunnelName, endpointName)
 
 	} else if len(serverEndpointNames) > 0 {
 		// Priority 3: server级别的endpoints配置
@@ -868,7 +869,7 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		endpointName = randomEndpoint
 		tunnelKey = tunnelName                        // for stats
 		endpointKey = tunnelName + ":" + endpointName // for per-endpoint stats
-		DebugLog("[%s]%s[TUNNEL] Using server-level endpoint '%s' via tunnel '%s'", clientIP, clientLocation, endpointName, tunnelName)
+		util.DebugLog("[%s]%s[TUNNEL] Using server-level endpoint '%s' via tunnel '%s'", clientIP, clientLocation, endpointName, tunnelName)
 
 	} else if len(serverTunnelNames) > 0 {
 		// Priority 4: server级别的tunnels配置
@@ -884,7 +885,7 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		endpointName = foundEndpoint
 		tunnelKey = tunnelName                        // for stats
 		endpointKey = tunnelName + ":" + endpointName // for per-endpoint stats
-		DebugLog("[%s]%s[TUNNEL] Using server-level tunnel '%s' to endpoint '%s'", clientIP, clientLocation, tunnelName, endpointName)
+		util.DebugLog("[%s]%s[TUNNEL] Using server-level tunnel '%s' to endpoint '%s'", clientIP, clientLocation, tunnelName, endpointName)
 
 	} else if mapping != nil && len(mapping.EndpointNames) > 0 {
 		// Priority 5: mapping级别的endpoints配置（fallback）
@@ -937,7 +938,7 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		DebugLog("[%s]%s[TUNNEL] Forwarding request for %s via tunnel '%s' to endpoint '%s'", clientIP, clientLocation, originalURL, tunnelName, endpointName)
+		util.DebugLog("[%s]%s[TUNNEL] Forwarding request for %s via tunnel '%s' to endpoint '%s'", clientIP, clientLocation, originalURL, tunnelName, endpointName)
 
 		reqPayload := &tunnel.RequestPayload{
 			URL:        proxyReq.URL.String(),
@@ -1091,7 +1092,7 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	readBody := !isStreaming && ((needsModification && isTextContentType(contentType)) || shouldCache)
 
 	if isStreaming {
-		DebugLog("[STREAM] Detected streaming response (SSE=%v, Chunked=%v). Bypassing buffering.", isSSE, isChunked)
+		util.DebugLog("[STREAM] Detected streaming response (SSE=%v, Chunked=%v). Bypassing buffering.", isSSE, isChunked)
 		// Disable caching if it was somehow still flagged
 		shouldCache = false
 	}
@@ -1119,7 +1120,7 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 
 			// If we skipped modification but had a rule, log it
 			if needsModification {
-				DebugLog("[MODIFICATION] Skipping response body modification for non-text content type: %s", resp.Header.Get("Content-Type"))
+				util.DebugLog("[MODIFICATION] Skipping response body modification for non-text content type: %s", resp.Header.Get("Content-Type"))
 			}
 		}
 
@@ -1137,7 +1138,7 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	} else {
 		// Streaming mode (no modification, no caching)
 		if needsModification {
-			DebugLog("[MODIFICATION] Skipping response body modification for non-text content type: %s", resp.Header.Get("Content-Type"))
+			util.DebugLog("[MODIFICATION] Skipping response body modification for non-text content type: %s", resp.Header.Get("Content-Type"))
 		}
 	}
 
@@ -1204,7 +1205,7 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	bytesSent = counterWriter.BytesWritten
 
 	// 静态文件缓存保存 - 仅缓存成功的200响应且为GET请求
-	DebugLog("[DEBUG] Checking cacheability: Method=%s, StaticCache!=nil=%v, Path=%s, Status=%d, ReadBody=%v", r.Method, p.staticCache != nil, r.URL.Path, resp.StatusCode, readBody)
+	util.DebugLog("[DEBUG] Checking cacheability: Method=%s, StaticCache!=nil=%v, Path=%s, Status=%d, ReadBody=%v", r.Method, p.staticCache != nil, r.URL.Path, resp.StatusCode, readBody)
 	if shouldCache && readBody {
 		cacheURL := p.buildOriginalURL(r)
 
@@ -1355,7 +1356,7 @@ func (p *MapRemoteProxy) modifyResponseBody(resp *http.Response, mapping *Mappin
 			}
 			unescapedValue := unescapeReplacementString(value)
 			tempBody = re.ReplaceAllString(tempBody, unescapedValue)
-			DebugLog("[RESPONSE REPLACE] Applied replacement: %s -> %s", key, value)
+			util.DebugLog("[RESPONSE REPLACE] Applied replacement: %s -> %s", key, value)
 		}
 		body = []byte(tempBody)
 	}
@@ -1582,7 +1583,7 @@ func (p *MapRemoteProxy) checkThirdPartyAuth(r *http.Request, authUrl string, pr
 		log.Printf("[AUTH] No token found in request")
 		return false, "", ""
 	}
-	DebugLog("[AUTH] Token found in request: %s", maskToken(token))
+	util.DebugLog("[AUTH] Token found in request: %s", maskToken(token))
 
 	authCache := cache.GetAuthCache()
 	cacheKey := authCache.GenerateCacheKey(token, r.Method, r.Host, r.URL.Path)
@@ -1628,22 +1629,22 @@ func (p *MapRemoteProxy) checkThirdPartyAuth(r *http.Request, authUrl string, pr
 
 		if dest.Header != "" {
 			authReq.Header.Set(dest.Header, token)
-			DebugLog("[AUTH] Forwarding token to header %s", dest.Header)
+			util.DebugLog("[AUTH] Forwarding token to header %s", dest.Header)
 		}
 		if dest.Cookie != "" {
 			authReq.AddCookie(&http.Cookie{Name: dest.Cookie, Value: token})
-			DebugLog("[AUTH] Forwarding token to cookie %s", dest.Cookie)
+			util.DebugLog("[AUTH] Forwarding token to cookie %s", dest.Cookie)
 		}
 		if dest.QueryString != "" {
 			q := authReq.URL.Query()
 			q.Set(dest.QueryString, token)
 			authReq.URL.RawQuery = q.Encode()
-			DebugLog("[AUTH] Forwarding token to querystring %s", dest.QueryString)
+			util.DebugLog("[AUTH] Forwarding token to querystring %s", dest.QueryString)
 		}
 	} else {
 		// Default: Authorization Bearer
 		authReq.Header.Set("Authorization", "Bearer "+token)
-		DebugLog("[AUTH] Forwarding token to Authorization Bearer header")
+		util.DebugLog("[AUTH] Forwarding token to Authorization Bearer header")
 	}
 
 	// Optimization: Send Hash if available

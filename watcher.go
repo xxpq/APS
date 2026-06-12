@@ -5,6 +5,8 @@ import (
 	"os"
 	"reflect"
 	"time"
+
+	"aps/util"
 )
 
 type ConfigWatcher struct {
@@ -54,7 +56,7 @@ func (w *ConfigWatcher) watch() {
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 
-	DebugLog("Config file watcher started for: %s", w.filename)
+	util.DebugLog("Config file watcher started for: %s", w.filename)
 
 	for {
 		select {
@@ -73,11 +75,11 @@ func (w *ConfigWatcher) watch() {
 				if err != nil {
 					log.Printf("Error reloading config: %v", err)
 				} else {
-					DebugLog("Config reloaded successfully, synchronizing servers...")
+					util.DebugLog("Config reloaded successfully, synchronizing servers...")
 
 					// Update tunnel manager with new tunnel configurations
 					if w.serverManager != nil && w.serverManager.tunnelManager != nil {
-						DebugLog("Notifying TunnelManager of configuration changes...")
+						util.DebugLog("Notifying TunnelManager of configuration changes...")
 						w.serverManager.tunnelManager.UpdateTunnels(buildTCPTunnelConfig(w.config))
 					}
 
@@ -121,7 +123,7 @@ func (w *ConfigWatcher) watch() {
 			}
 
 		case <-w.stopChan:
-			DebugLog("Config file watcher stopped")
+			util.DebugLog("Config file watcher stopped")
 			return
 		}
 	}
