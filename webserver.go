@@ -23,6 +23,7 @@ import (
 	"aps/asn"
 	"aps/firewall"
 	"aps/logging"
+	"aps/security"
 )
 
 const apsTLSPinTokenPrefix = "apspt1."
@@ -1092,7 +1093,7 @@ func (h *AdminHandlers) handleEndpointConfigs(w http.ResponseWriter, r *http.Req
 			return
 		}
 
-		sessionCredential, sessionExpiresAt, issueErr := issueEndpointSessionCredential(configID, endpoint.TunnelName, endpoint.EndpointName)
+		sessionCredential, sessionExpiresAt, issueErr := security.IssueEndpointSessionCredential(configID, endpoint.TunnelName, endpoint.EndpointName)
 		if issueErr != nil {
 			writeConfigPayload(map[string]interface{}{
 				"success": false,
@@ -1227,7 +1228,7 @@ func (h *AdminHandlers) pushConfigToEndpoint(configID, tunnelName, endpointName 
 		return
 	}
 
-	sessionCredential, sessionExpiresAt, issueErr := issueEndpointSessionCredential(configID, config.TunnelName, config.EndpointName)
+	sessionCredential, sessionExpiresAt, issueErr := security.IssueEndpointSessionCredential(configID, config.TunnelName, config.EndpointName)
 	if issueErr != nil {
 		log.Printf("[CONFIG] Failed to issue session credential for %s: %v", configID, issueErr)
 		return

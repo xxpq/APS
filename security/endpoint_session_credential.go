@@ -1,4 +1,4 @@
-package main
+package security
 
 import (
 	"crypto/rand"
@@ -61,7 +61,7 @@ func pruneExpiredEndpointSessionCredentialsLocked(now int64) {
 	}
 }
 
-func issueEndpointSessionCredential(cid, tunnelName, endpointName string) (string, int64, error) {
+func IssueEndpointSessionCredential(cid, tunnelName, endpointName string) (string, int64, error) {
 	cid = strings.TrimSpace(cid)
 	tunnelName = strings.TrimSpace(tunnelName)
 	endpointName = strings.TrimSpace(endpointName)
@@ -96,7 +96,7 @@ func issueEndpointSessionCredential(cid, tunnelName, endpointName string) (strin
 	return credential, expiresAt, nil
 }
 
-func peekEndpointSessionCredential(cid, tunnelName, endpointName string) (string, error) {
+func PeekEndpointSessionCredential(cid, tunnelName, endpointName string) (string, error) {
 	cid = strings.TrimSpace(cid)
 	tunnelName = strings.TrimSpace(tunnelName)
 	endpointName = strings.TrimSpace(endpointName)
@@ -127,7 +127,7 @@ func peekEndpointSessionCredential(cid, tunnelName, endpointName string) (string
 	return entry.Credential, nil
 }
 
-func consumeEndpointSessionCredential(cid, tunnelName, endpointName, credential string) error {
+func ConsumeEndpointSessionCredential(cid, tunnelName, endpointName, credential string) error {
 	cid = strings.TrimSpace(cid)
 	tunnelName = strings.TrimSpace(tunnelName)
 	endpointName = strings.TrimSpace(endpointName)

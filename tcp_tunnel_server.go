@@ -20,6 +20,8 @@ import (
 	"time"
 
 	"github.com/xtaci/smux"
+
+	"aps/security"
 )
 
 const responseRouteEnqueueTimeout = 10 * time.Second
@@ -40,7 +42,6 @@ type TCPTunnelServer struct {
 
 const secureRegistrationWindow = 90 * time.Second
 
-const gridEndpointSessionTokenTTLSeconds = 3600
 
 // EndpointStats holds statistics for an endpoint
 type EndpointStats struct {
@@ -58,8 +59,6 @@ type TCPEndpoint struct {
 	TunnelName       string
 	EndpointName     string
 	ConfigID         string
-	GridNodeID       string
-	GridSessionToken string
 	Conn             *TunnelConn
 	RemoteAddr       string
 	OnlineTime       time.Time
@@ -186,14 +185,6 @@ func isRegistrationTimestampFresh(ts int64) bool {
 		delta = -delta
 	}
 	return time.Duration(delta)*time.Second <= secureRegistrationWindow
-}
-
-func endpointGridNodeIDFromRegister(reg RegisterPayload) string {
-	nodeID := strings.TrimSpace(reg.EndpointName)
-	if nodeID != "" {
-		return nodeID
-	}
-	return strings.TrimSpace(reg.ConfigID)
 }
 
 func (s *TCPTunnelServer) registerSecureRegistrationReplayToken(cid string, ts int64, proof string) error {
@@ -494,7 +485,7 @@ func (s *TCPTunnelServer) handleConnection(conn net.Conn) {
 		}
 	}
 
-	effectiveCredential, credErr := peekEndpointSessionCredential(reg.ConfigID, reg.TunnelName, reg.EndpointName)
+	effectiveCredential, credErr := security.PeekEndpointSessionCredential(reg.ConfigID, reg.TunnelName, reg.EndpointName)
 	if credErr != nil {
 		DebugLog("[TCP TUNNEL] Missing/invalid session credential for cid '%s' from %s: %v", reg.ConfigID, remoteAddr, credErr)
 		tc.SendJSON(MsgTypeRegisterAck, RegisterAckPayload{
@@ -592,7 +583,7 @@ func (s *TCPTunnelServer) handleConnection(conn net.Conn) {
 		tc.Close()
 		return
 	}
-	if err := consumeEndpointSessionCredential(reg.ConfigID, reg.TunnelName, reg.EndpointName, effectiveCredential); err != nil {
+	if err := security.ConsumeEndpointSessionCredential(reg.ConfigID, reg.TunnelName, reg.EndpointName, effectiveCredential); err != nil {
 		DebugLog("[TCP TUNNEL] Session credential consume failed for cid '%s' from %s: %v", reg.ConfigID, remoteAddr, err)
 		tc.SendJSON(MsgTypeRegisterAck, RegisterAckPayload{
 			Success: false,
@@ -649,56 +640,12 @@ func (s *TCPTunnelServer) handleConnection(conn net.Conn) {
 	s.endpoints[endpoint.ID] = endpoint
 	s.mu.Unlock()
 
-	gridNodeID := endpointGridNodeIDFromRegister(reg)
-	gridSessionToken := ""
-	var gridSessionExpires int64
-	runtime := GetGlobalGridRuntime()
-	if gridNodeID != "" && runtime == nil {
-		DebugLog("[TCP TUNNEL] Grid runtime disabled; reject endpoint=%s cid=%s", reg.EndpointName, reg.ConfigID)
-		tc.SendJSON(MsgTypeRegisterAck, RegisterAckPayload{
-			Success: false,
-			Error:   "grid runtime disabled on APS",
-		})
-		tc.Close()
-		s.unregisterEndpoint(endpoint.ID)
-		return
-	}
-	if runtime != nil && gridNodeID != "" {
-		issueResp, issueErr := runtime.IssueSessionToken(context.Background(), &GridIssueTokenRequest{
-			NodeID:     gridNodeID,
-			Scope:      defaultGridEndpointControlScopes(),
-			TTLSeconds: gridEndpointSessionTokenTTLSeconds,
-		})
-		if issueErr != nil || issueResp == nil || !issueResp.Success || issueResp.Token == nil || strings.TrimSpace(issueResp.Token.Token) == "" {
-			if issueErr == nil && issueResp != nil && issueResp.Error != "" {
-				issueErr = errors.New(issueResp.Error)
-			}
-			if issueErr == nil {
-				issueErr = errors.New("empty grid token response")
-			}
-			DebugLog("[TCP TUNNEL] Failed to issue grid session token for endpoint=%s cid=%s: %v", reg.EndpointName, reg.ConfigID, issueErr)
-			tc.SendJSON(MsgTypeRegisterAck, RegisterAckPayload{
-				Success: false,
-				Error:   "grid session issue failed",
-			})
-			tc.Close()
-			s.unregisterEndpoint(endpoint.ID)
-			return
-		}
-		gridSessionToken = strings.TrimSpace(issueResp.Token.Token)
-		gridSessionExpires = issueResp.Token.ExpiresAt
-	}
 
-	endpoint.GridNodeID = gridNodeID
-	endpoint.GridSessionToken = gridSessionToken
 
 	// Send registration acknowledgement
 	if err := tc.SendJSON(MsgTypeRegisterAck, RegisterAckPayload{
 		Success:            true,
 		CipherSuite:        negotiatedCipherSuite,
-		GridNodeID:         gridNodeID,
-		GridSessionToken:   gridSessionToken,
-		GridSessionExpires: gridSessionExpires,
 	}); err != nil {
 		DebugLog("[TCP TUNNEL] Failed to send registration ack to %s: %v", remoteAddr, err)
 		tc.Close()
@@ -747,7 +694,6 @@ func (s *TCPTunnelServer) handleConnection(conn net.Conn) {
 	go endpoint.writeLoop()
 	go endpoint.readLoop(s)
 	go endpoint.probeLoop()
-	go endpoint.acceptInboundStreams(s)
 
 	// Send mirror addresses if configured (non-blocking)
 	go sendMirrorUpdate(s, endpoint)
@@ -794,37 +740,9 @@ func (s *TCPTunnelServer) unregisterEndpoint(endpointID string) {
 		s.tunnelManager.UnregisterEndpoint(endpoint)
 	}
 	if exists {
-		s.revokeEndpointGridSession(endpoint)
 	}
 }
 
-func (s *TCPTunnelServer) revokeEndpointGridSession(endpoint *TCPEndpoint) {
-	if endpoint == nil {
-		return
-	}
-	runtime := GetGlobalGridRuntime()
-	if runtime == nil {
-		return
-	}
-	token := strings.TrimSpace(endpoint.GridSessionToken)
-	if token != "" {
-		resp, err := runtime.RevokeSessionToken(context.Background(), &GridRevokeTokenRequest{Token: token})
-		if err != nil {
-			DebugLog("[GRID] revoke endpoint session token failed endpoint=%s node=%s err=%v", endpoint.EndpointName, endpoint.GridNodeID, err)
-		} else if resp != nil && !resp.Success {
-			DebugLog("[GRID] revoke endpoint session token rejected endpoint=%s node=%s err=%s", endpoint.EndpointName, endpoint.GridNodeID, strings.TrimSpace(resp.Error))
-		}
-	}
-	nodeID := strings.TrimSpace(endpoint.GridNodeID)
-	if nodeID == "" {
-		nodeID = strings.TrimSpace(endpoint.EndpointName)
-	}
-	if nodeID != "" {
-		if _, err := runtime.MarkNodeOffline(context.Background(), nodeID, "endpoint_disconnected"); err != nil {
-			DebugLog("[GRID] mark node offline failed endpoint=%s node=%s err=%v", endpoint.EndpointName, nodeID, err)
-		}
-	}
-}
 
 // GetEndpoint returns an endpoint by ID
 func (s *TCPTunnelServer) GetEndpoint(endpointID string) (*TCPEndpoint, bool) {
@@ -1417,34 +1335,8 @@ func (ep *TCPEndpoint) closeProxyConnection(connectionID, reason string) {
 }
 
 // CreateProxyConnection creates a new proxy connection through this endpoint
-func (ep *TCPEndpoint) CreateProxyConnection(ctx context.Context, host string, port int, useTLS bool, clientConn net.Conn, clientIP string, frame *ForwardFrame) (<-chan struct{}, error) {
+func (ep *TCPEndpoint) CreateProxyConnection(ctx context.Context, host string, port int, useTLS bool, clientConn net.Conn, clientIP string) (<-chan struct{}, error) {
 	connectionID := generateRequestID()
-	frame = nextForwardFrame(frame)
-	hops := parseGridHopPlanPayload(frame.Payload)
-	nextHop := ""
-	remaining := []string(nil)
-	if len(hops) > 0 {
-		nextHop = hops[0]
-		if len(hops) > 1 {
-			remaining = append(remaining, hops[1:]...)
-		}
-	}
-	enableQUIC, enableTCP, parallel := true, true, true
-	enableICE := true
-	extraICECandidates := []string(nil)
-	plannedICECandidates := parseGridHopPlanICECandidates(frame.Payload)
-	if runtime := GetGlobalGridRuntime(); runtime != nil {
-		enableQUIC, enableTCP, parallel = runtime.transportCapabilities()
-		enableICE = runtime.isICEEnabled()
-		extraICECandidates = runtime.iceStaticCandidates(host, port)
-	}
-	iceCandidates := []string(nil)
-	if enableICE {
-		iceCandidates = mergeGridICECandidateSets(
-			plannedICECandidates,
-			buildGridICECandidatesWithExtras(host, port, extraICECandidates),
-		)
-	}
 
 	pc := &tcpProxyConnection{
 		connectionID: connectionID,
@@ -1470,25 +1362,11 @@ func (ep *TCPEndpoint) CreateProxyConnection(ctx context.Context, host string, p
 	// We use a temporary TunnelConn wrapper to send the JSON payload
 	streamConn := NewTunnelConn(stream)
 	if err := streamConn.SendJSON(MsgTypeProxyConnect, ProxyConnectPayload{
-		ConnectionID:      connectionID,
-		Host:              host,
-		Port:              port,
-		TLS:               useTLS,
-		ClientIP:          clientIP,
-		RouteID:           frame.RouteID,
-		RouteEpoch:        frame.RouteEpoch,
-		HopCount:          frame.HopCount,
-		TraceID:           frame.TraceID,
-		GridNextHop:       nextHop,
-		GridHops:          remaining,
-		GridFinalHost:     host,
-		GridFinalPort:     port,
-		GridFinalTLS:      useTLS,
-		GridEnableQUIC:    enableQUIC,
-		GridEnableTCP:     enableTCP,
-		GridParallel:      parallel,
-		GridEnableICE:     enableICE,
-		GridICECandidates: iceCandidates,
+		ConnectionID: connectionID,
+		Host:         host,
+		Port:         port,
+		TLS:          useTLS,
+		ClientIP:     clientIP,
 	}); err != nil {
 		stream.Close()
 		ep.closeProxyConnection(connectionID, "send error")
@@ -1547,164 +1425,6 @@ func (ep *TCPEndpoint) CreateProxyConnection(ctx context.Context, host string, p
 	return pc.done, nil
 }
 
-func (ep *TCPEndpoint) acceptInboundStreams(server *TCPTunnelServer) {
-	for {
-		if ep.session == nil {
-			return
-		}
-		stream, err := ep.session.AcceptStream()
-		if err != nil {
-			if ep.IsOnline() {
-				DebugLog("[GRID] inbound stream accept failed for endpoint %s: %v", ep.ID, err)
-			}
-			return
-		}
-		go ep.handleInboundStream(server, stream)
-	}
-}
-
-func (ep *TCPEndpoint) handleInboundStream(server *TCPTunnelServer, srcStream *smux.Stream) {
-	defer srcStream.Close()
-
-	srcConn := NewTunnelConn(srcStream)
-	msg, err := srcConn.ReadMessage()
-	if err != nil {
-		DebugLog("[GRID] failed to read inbound stream bootstrap from %s: %v", ep.EndpointName, err)
-		return
-	}
-	if msg.Type == MsgTypeRequestStart {
-		ep.handleInboundRequestStream(server, srcStream, msg)
-		return
-	}
-	if msg.Type != MsgTypeProxyConnect {
-		DebugLog("[GRID] unexpected inbound stream message type=%d endpoint=%s", msg.Type, ep.EndpointName)
-		return
-	}
-
-	var payload ProxyConnectPayload
-	if err := msg.ParseJSON(&payload); err != nil {
-		DebugLog("[GRID] invalid inbound stream payload from %s: %v", ep.EndpointName, err)
-		return
-	}
-	if payload.HopCount > 128 {
-		DebugLog("[GRID] inbound stream rejected by hop_guard endpoint=%s hop=%d", ep.EndpointName, payload.HopCount)
-		return
-	}
-
-	routeTo := strings.TrimSpace(payload.GridRouteTo)
-	if routeTo == "" {
-		DebugLog("[GRID] inbound stream missing grid_route_to from %s", ep.EndpointName)
-		return
-	}
-	if routeTo == ep.EndpointName {
-		DebugLog("[GRID] inbound stream rejected self route endpoint=%s", ep.EndpointName)
-		return
-	}
-	if server == nil || server.tunnelManager == nil {
-		DebugLog("[GRID] tunnel manager unavailable for inbound relay")
-		return
-	}
-
-	tunnelName, ok := server.tunnelManager.FindTunnelForEndpoint(routeTo)
-	if !ok {
-		DebugLog("[GRID] route_to endpoint offline: %s", routeTo)
-		return
-	}
-	dstEndpoint, err := server.tunnelManager.GetEndpoint(tunnelName, routeTo)
-	if err != nil || dstEndpoint == nil {
-		DebugLog("[GRID] failed selecting relay destination endpoint=%s: %v", routeTo, err)
-		return
-	}
-
-	dstStream, err := dstEndpoint.session.OpenStream()
-	if err != nil {
-		DebugLog("[GRID] failed opening relay stream to endpoint=%s: %v", routeTo, err)
-		return
-	}
-	defer dstStream.Close()
-
-	payload.GridRouteTo = ""
-	dstConn := NewTunnelConn(dstStream)
-	if err := dstConn.SendJSON(MsgTypeProxyConnect, payload); err != nil {
-		DebugLog("[GRID] failed forwarding relay bootstrap to endpoint=%s: %v", routeTo, err)
-		return
-	}
-
-	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		_, _ = io.Copy(dstStream, srcStream)
-	}()
-	go func() {
-		defer wg.Done()
-		_, _ = io.Copy(srcStream, dstStream)
-	}()
-	wg.Wait()
-}
-
-func (ep *TCPEndpoint) handleInboundRequestStream(server *TCPTunnelServer, srcStream *smux.Stream, bootstrap *TunnelMessage) {
-	var payload RequestStartPayloadTCP
-	if err := bootstrap.ParseJSON(&payload); err != nil {
-		DebugLog("[GRID] invalid inbound request stream payload from %s: %v", ep.EndpointName, err)
-		return
-	}
-	if payload.HopCount > 128 {
-		DebugLog("[GRID] inbound request stream rejected by hop_guard endpoint=%s hop=%d", ep.EndpointName, payload.HopCount)
-		return
-	}
-
-	routeTo := strings.TrimSpace(payload.GridRouteTo)
-	if routeTo == "" {
-		DebugLog("[GRID] inbound request stream missing grid_route_to from %s", ep.EndpointName)
-		return
-	}
-	if routeTo == ep.EndpointName {
-		DebugLog("[GRID] inbound request stream rejected self route endpoint=%s", ep.EndpointName)
-		return
-	}
-	if server == nil || server.tunnelManager == nil {
-		DebugLog("[GRID] tunnel manager unavailable for inbound request relay")
-		return
-	}
-
-	tunnelName, ok := server.tunnelManager.FindTunnelForEndpoint(routeTo)
-	if !ok {
-		DebugLog("[GRID] request route_to endpoint offline: %s", routeTo)
-		return
-	}
-	dstEndpoint, err := server.tunnelManager.GetEndpoint(tunnelName, routeTo)
-	if err != nil || dstEndpoint == nil {
-		DebugLog("[GRID] failed selecting request relay destination endpoint=%s: %v", routeTo, err)
-		return
-	}
-
-	dstStream, err := dstEndpoint.session.OpenStream()
-	if err != nil {
-		DebugLog("[GRID] failed opening request relay stream to endpoint=%s: %v", routeTo, err)
-		return
-	}
-	defer dstStream.Close()
-
-	payload.GridRouteTo = ""
-	dstConn := NewTunnelConn(dstStream)
-	if err := dstConn.SendJSON(MsgTypeRequestStart, payload); err != nil {
-		DebugLog("[GRID] failed forwarding request relay bootstrap to endpoint=%s: %v", routeTo, err)
-		return
-	}
-
-	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		_, _ = io.Copy(dstStream, srcStream)
-	}()
-	go func() {
-		defer wg.Done()
-		_, _ = io.Copy(srcStream, dstStream)
-	}()
-	wg.Wait()
-}
 
 func generateRequestID() string {
 	b := make([]byte, 16)
