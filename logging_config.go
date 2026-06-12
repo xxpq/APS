@@ -1,5 +1,9 @@
 package main
 
+import (
+	"aps/firewall"
+)
+
 // LoggingConfig holds the effective logging configuration for a request
 type LoggingConfig struct {
 	LogLevel       int
@@ -17,7 +21,7 @@ func collectLoggingConfig(
 	groups []*Group,
 	tunnel *TunnelConfig,
 	proxy *ProxyConfig,
-	firewall *FirewallRule,
+	firewall *firewall.FirewallRule,
 ) LoggingConfig {
 	// Default values from global config
 	logLevel := 0

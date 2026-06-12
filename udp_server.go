@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"aps/firewall"
 )
 
 // RawUDPServer manages a raw UDP server for forwarding packets
@@ -184,9 +186,9 @@ func (s *RawUDPServer) createSession(clientAddr *net.UDPAddr) (*UDPSession, erro
 
 	// Check firewall
 	if s.config.Firewall != "" {
-		firewallRule := GetFirewallRule(s.appConfig, s.config.Firewall)
+		firewallRule := firewall.GetFirewallRule(s.appConfig.Firewalls, s.config.Firewall)
 		if firewallRule != nil {
-			if !CheckFirewall(clientIP, firewallRule) {
+			if !firewall.CheckFirewall(clientIP, firewallRule) {
 				DebugLog("%s[RAW UDP] Packet from %s blocked by server firewall", clientLocation, clientIP)
 				return nil, nil
 			}
@@ -202,9 +204,9 @@ func (s *RawUDPServer) createSession(clientAddr *net.UDPAddr) (*UDPSession, erro
 
 	// Check mapping firewall
 	if mapping.Firewall != "" {
-		firewallRule := GetFirewallRule(s.appConfig, mapping.Firewall)
+		firewallRule := firewall.GetFirewallRule(s.appConfig.Firewalls, mapping.Firewall)
 		if firewallRule != nil {
-			if !CheckFirewall(clientIP, firewallRule) {
+			if !firewall.CheckFirewall(clientIP, firewallRule) {
 				DebugLog("%s[RAW UDP] Packet from %s blocked by mapping firewall", clientLocation, clientIP)
 				return nil, nil
 			}

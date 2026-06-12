@@ -21,6 +21,7 @@ import (
 	"sync"
 	"time"
 	"aps/asn"
+	"aps/firewall"
 )
 
 const apsTLSPinTokenPrefix = "apspt1."
@@ -1474,7 +1475,7 @@ func (h *AdminHandlers) handleFirewalls(w http.ResponseWriter, r *http.Request) 
 	case http.MethodGet:
 		h.configMux.RLock()
 		defer h.configMux.RUnlock()
-		resp := make(map[string]*FirewallRule)
+		resp := make(map[string]*firewall.FirewallRule)
 		if h.config.Firewalls != nil {
 			for name, fw := range h.config.Firewalls {
 				resp[name] = fw
@@ -1485,7 +1486,7 @@ func (h *AdminHandlers) handleFirewalls(w http.ResponseWriter, r *http.Request) 
 	case http.MethodPost:
 		var req struct {
 			Name     string       `json:"name"`
-			Firewall FirewallRule `json:"firewall"`
+			Firewall firewall.FirewallRule `json:"firewall"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" {
 			http.Error(w, "Invalid payload", http.StatusBadRequest)
@@ -1494,12 +1495,12 @@ func (h *AdminHandlers) handleFirewalls(w http.ResponseWriter, r *http.Request) 
 		h.configMux.Lock()
 		defer h.configMux.Unlock()
 		if h.config.Firewalls == nil {
-			h.config.Firewalls = make(map[string]*FirewallRule)
+			h.config.Firewalls = make(map[string]*firewall.FirewallRule)
 		}
 		fw := req.Firewall
 		h.config.Firewalls[req.Name] = &fw
 		// Parse the firewall rule
-		if err := ParseFirewallRule(&fw); err != nil {
+		if err := firewall.ParseFirewallRule(&fw); err != nil {
 			log.Printf("[FIREWALL] Warning: failed to parse firewall rule '%s': %v", req.Name, err)
 		} else {
 			log.Printf("[FIREWALL] Loaded firewall rule '%s'", req.Name)

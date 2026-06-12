@@ -25,6 +25,7 @@ import (
 	"golang.org/x/crypto/pkcs12"
 
 	"aps/asn"
+	"aps/firewall"
 )
 
 // 对象池 - 用于高并发场景下复用对象，减少 GC 压力
@@ -132,7 +133,7 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		serverConfig  *ListenConfig
 		mapping       *Mapping
 		user          *User
-		firewallRule  *FirewallRule
+		firewallRule  *firewall.FirewallRule
 	)
 
 	// Defer the consolidated stats recording
@@ -466,13 +467,13 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Check firewall rules (server firewall takes priority over mapping firewall)
 	if serverConfig != nil && serverConfig.Firewall != "" {
-		firewallRule = GetFirewallRule(p.config, serverConfig.Firewall)
+		firewallRule = firewall.GetFirewallRule(p.config.Firewalls, serverConfig.Firewall)
 		if firewallRule != nil {
 			DebugLog("[FIREWALL] Using server-level firewall rule '%s'", serverConfig.Firewall)
 		}
 	}
 	if firewallRule == nil && mapping != nil && mapping.Firewall != "" {
-		firewallRule = GetFirewallRule(p.config, mapping.Firewall)
+		firewallRule = firewall.GetFirewallRule(p.config.Firewalls, mapping.Firewall)
 		if firewallRule != nil {
 			DebugLog("[FIREWALL] Using mapping-level firewall rule '%s'", mapping.Firewall)
 		}
@@ -481,7 +482,7 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	// Check if client IP is allowed
 	clientIP := getClientIP(r)
 	clientLocation := formatLocationTagHTTP(clientIP)
-	if !CheckFirewall(clientIP, firewallRule) {
+	if !firewall.CheckFirewall(clientIP, firewallRule) {
 		isIntercepted = true
 		// isError = true // Firewall block is now counted as intercepted, not error
 		DebugLog("[FIREWALL] Request from %s blocked by firewall", clientIP)

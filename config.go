@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"aps/util"
+	"aps/firewall"
 )
 
 // IsDebugMode 全局debug模式标志（re-export 自 aps/util，Stage 8 清理）。
@@ -58,7 +59,7 @@ type Config struct {
 	P12s              map[string]*P12Config          `json:"p12s,omitempty"`
 	Scripting         *ScriptingConfig               `json:"scripting,omitempty"`
 	StaticCache       *StaticCacheConfig             `json:"static_cache,omitempty"` // 静态文件缓存配置
-	Firewalls         map[string]*FirewallRule       `json:"firewalls,omitempty"`    // 防火墙规则组配置
+	Firewalls         map[string]*firewall.FirewallRule       `json:"firewalls,omitempty"`    // 防火墙规则组配置
 	Mappings          []Mapping                      `json:"mappings"`
 	Version           int64                          `json:"version,omitempty"` // 配置版本号，用于并发编辑检测
 	RateLimitRules    map[string]*RateLimitRule      `json:"rateLimitRules,omitempty"`
@@ -1194,7 +1195,7 @@ func processConfig(config *Config) error {
 	// Parse and initialize firewall rules
 	if config.Firewalls != nil {
 		for name, rule := range config.Firewalls {
-			if err := ParseFirewallRule(rule); err != nil {
+			if err := firewall.ParseFirewallRule(rule); err != nil {
 				log.Printf("[FIREWALL] Warning: failed to parse firewall rule '%s': %v", name, err)
 			} else {
 				log.Printf("[FIREWALL] Loaded firewall rule '%s'", name)

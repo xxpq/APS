@@ -4,6 +4,8 @@ import (
 	"net"
 	"sync"
 	"testing"
+
+	"aps/firewall"
 )
 
 // Mock connection to simulate client
@@ -30,9 +32,9 @@ func (m *mockConn) RemoteAddr() net.Addr {
 func TestRawTCPServer_FirewallBlock(t *testing.T) {
 	// Setup config with firewall rule
 	appConfig := &Config{
-		Firewalls: map[string]*FirewallRule{
+		Firewalls: map[string]*firewall.FirewallRule{
 			"block_rule": {
-				Block: &FilterRules{
+				Block: &firewall.FilterRules{
 					Networks: []string{"192.168.1.100"},
 				},
 			},
@@ -40,7 +42,7 @@ func TestRawTCPServer_FirewallBlock(t *testing.T) {
 		mu: sync.RWMutex{},
 	}
 	// Parse the rule
-	ParseFirewallRule(appConfig.Firewalls["block_rule"])
+	firewall.ParseFirewallRule(appConfig.Firewalls["block_rule"])
 
 	serverConfig := &ListenConfig{
 		Firewall: "block_rule",

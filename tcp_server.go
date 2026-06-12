@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"aps/asn"
+	"aps/firewall"
 )
 
 // RawTCPServer manages a raw TCP server for forwarding connections
@@ -254,14 +255,14 @@ func (s *RawTCPServer) handleConnection(clientConn net.Conn) {
 
 	// Check firewall rules BEFORE logging anything
 	// This prevents blocked IPs from appearing in logs
-	var firewallRule *FirewallRule
+	var firewallRule *firewall.FirewallRule
 	if s.config.Firewall != "" {
-		firewallRule = GetFirewallRule(s.appConfig, s.config.Firewall)
+		firewallRule = firewall.GetFirewallRule(s.appConfig.Firewalls, s.config.Firewall)
 		if firewallRule != nil {
 			DebugLog("[FIREWALL] Using server-level firewall rule '%s'", s.config.Firewall)
 
 			// Check if client IP is allowed by server firewall
-			if !CheckFirewall(clientAddr, firewallRule) {
+			if !firewall.CheckFirewall(clientAddr, firewallRule) {
 				DebugLog("%s[RAW TCP] Connection from %s blocked by server firewall", clientLocation, clientAddr)
 				clientConn.Close()
 				isIntercepted = true
@@ -303,12 +304,12 @@ func (s *RawTCPServer) handleConnection(clientConn net.Conn) {
 	// Let's preserve that behavior.
 
 	if firewallRule == nil && mapping.Firewall != "" {
-		firewallRule = GetFirewallRule(s.appConfig, mapping.Firewall)
+		firewallRule = firewall.GetFirewallRule(s.appConfig.Firewalls, mapping.Firewall)
 		if firewallRule != nil {
 			DebugLog("[FIREWALL] Using mapping-level firewall rule '%s'", mapping.Firewall)
 
 			// Check if client IP is allowed by mapping firewall
-			if !CheckFirewall(clientAddr, firewallRule) {
+			if !firewall.CheckFirewall(clientAddr, firewallRule) {
 				DebugLog("%s[RAW TCP] Connection from %s blocked by mapping firewall", clientLocation, clientAddr)
 				clientConn.Close()
 				isIntercepted = true
