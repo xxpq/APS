@@ -5,6 +5,8 @@ import (
 	"net"
 	"sync"
 	"sync/atomic"
+
+	"aps/stats"
 )
 
 // ConnectionMux routes accepted sockets into the HTTP server pipeline.
@@ -12,7 +14,7 @@ import (
 type ConnectionMux struct {
 	listener    net.Listener
 	httpHandler func(net.Conn) // Handler for HTTP connections
-	rateLimiter *RateLimitEngine
+	rateLimiter *stats.RateLimitEngine
 	ruleNames   []string
 	serverName  string
 	mu          sync.RWMutex
@@ -72,7 +74,7 @@ func (m *ConnectionMux) SetHTTPHandler(handler func(net.Conn)) {
 }
 
 // SetRateLimiter sets the rate limiter for connection tracking
-func (m *ConnectionMux) SetRateLimiter(limiter *RateLimitEngine, serverName string, ruleNames []string) {
+func (m *ConnectionMux) SetRateLimiter(limiter *stats.RateLimitEngine, serverName string, ruleNames []string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.rateLimiter = limiter

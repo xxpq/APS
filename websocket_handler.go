@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+
+	"aps/stats"
 )
 
 func shouldUseLegacyBackendTLS(host string, insecureMode bool) bool {
@@ -64,7 +66,7 @@ func (p *MapRemoteProxy) handleWebSocket(w http.ResponseWriter, r *http.Request)
 		responseTime := time.Since(startTime)
 		p.stats.AddBytesSent(bytesSent)
 		p.stats.AddBytesRecv(bytesRecv)
-		p.stats.Record(RecordData{
+		p.stats.Record(stats.RecordData{
 			RuleKey:      ruleKey,
 			UserKey:      userKey,
 			ServerKey:    p.serverName,

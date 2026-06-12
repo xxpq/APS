@@ -1,4 +1,4 @@
-package main
+package stats
 
 import (
 	"context"
@@ -295,7 +295,7 @@ type limitedReadWriteCloser struct {
 	writer io.Writer
 }
 
-func newLimitedReadWriteCloser(rwc io.ReadWriteCloser, limiter *rate.Limiter, quota *TrafficQuota) io.ReadWriteCloser {
+func NewLimitedReadWriteCloser(rwc io.ReadWriteCloser, limiter *rate.Limiter, quota *TrafficQuota) io.ReadWriteCloser {
 	reader := io.Reader(rwc)
 	writer := io.Writer(rwc)
 
@@ -388,6 +388,23 @@ func (lw *limitedWriter) Write(p []byte) (n int, err error) {
 		if err := lw.l.WaitN(context.Background(), n); err != nil {
 			return n, err
 		}
+	}
+	return
+}
+// RangeQuotas iterates over all stored quotas. The handler must not modify the map.
+func (ts *TrafficShaper) RangeQuotas(fn func(key string, value interface{}) bool) {
+	ts.quotas.Range(func(k, v interface{}) bool {
+		return fn(k.(string), v)
+	})
+}
+
+// Used returns the current usage for a TrafficQuota or RequestQuota.
+func QuotaUsed(v interface{}) (traffic, requests int64) {
+	if tq, ok := v.(*TrafficQuota); ok {
+		traffic = tq.Used
+	}
+	if rq, ok := v.(*RequestQuota); ok {
+		requests = rq.Used
 	}
 	return
 }

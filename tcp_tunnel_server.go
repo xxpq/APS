@@ -22,6 +22,7 @@ import (
 	"github.com/xtaci/smux"
 
 	"aps/security"
+	"aps/stats"
 )
 
 const responseRouteEnqueueTimeout = 10 * time.Second
@@ -34,7 +35,7 @@ type TCPTunnelServer struct {
 	endpoints     map[string]*TCPEndpoint // endpointID -> endpoint
 	portForwards  map[string]portForwardRouteState
 	config        *Config
-	statsDB       *StatsDB
+	statsDB       *stats.StatsDB
 	running       bool
 	replayMu      sync.Mutex
 	replaySeen    map[string]int64
@@ -128,7 +129,7 @@ type portForwardRouteState struct {
 }
 
 // NewTCPTunnelServer creates a new TCP tunnel server.
-func NewTCPTunnelServer(config *Config, statsDB *StatsDB) *TCPTunnelServer {
+func NewTCPTunnelServer(config *Config, statsDB *stats.StatsDB) *TCPTunnelServer {
 	return &TCPTunnelServer{
 		config:       config,
 		statsDB:      statsDB,

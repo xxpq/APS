@@ -1,4 +1,4 @@
-package main
+package stats
 
 import (
 	"encoding/json"
@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"aps/asn"
+	"aps/util"
 )
 
 // NumericMetric holds aggregated values for a numeric metric like response time or bytes sent.
@@ -79,8 +80,10 @@ type StatsCollector struct {
 	EndpointStats sync.Map // map[string]*Metrics - per endpoint statistics
 	UrlStats      sync.Map // map[string]*Metrics - per URL statistics
 
-	// For auth-aware masking in stats
-	Config *Config
+	// AdminAuthFunc determines if a request comes from an admin (set by caller).
+	// Used by ServeHTTP to gate stats endpoint access. Replaces the previous
+	// Config field dependency to decouple stats package from config package.
+	AdminAuthFunc func(*http.Request) bool
 
 	// Asynchronous processing
 	recordChan chan RecordData // Channel for async stats processing
@@ -93,10 +96,9 @@ type StatsCollector struct {
 }
 
 // NewStatsCollector creates and initializes a new StatsCollector.
-func NewStatsCollector(config *Config) *StatsCollector {
+func NewStatsCollector() *StatsCollector {
 	sc := &StatsCollector{
 		StartTime:  time.Now(),
-		Config:     config,
 		recordChan: make(chan RecordData, 10000), // Buffer 10000 records
 		stopCh:     make(chan struct{}),
 	}
@@ -193,7 +195,7 @@ func (sc *StatsCollector) Record(data RecordData) {
 	default:
 		// Channel is full, drop the data to avoid blocking
 		// This is acceptable for statistics - we prioritize performance
-		DebugLog("[STATS] Record channel full, dropping stats data")
+		util.DebugLog("[STATS] Record channel full, dropping stats data")
 	}
 }
 
@@ -696,7 +698,7 @@ type PublicStats struct {
 // ServeHTTP provides an HTTP endpoint to expose stats as JSON.
 func (sc *StatsCollector) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// 未通过认证则进行键名脱敏（支持会话 Cookie 与 Bearer token）
-	if !isAdminRequest(r, sc.Config) {
+	if sc.AdminAuthFunc != nil && !sc.AdminAuthFunc(r) {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}

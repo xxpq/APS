@@ -12,6 +12,7 @@ import (
 
 	"aps/cache"
 	"aps/logging"
+	"aps/stats"
 )
 
 type MapRemoteProxy struct {
@@ -19,19 +20,19 @@ type MapRemoteProxy struct {
 	// dataStore          *DataStore // Removed, no longer needed
 	tunnelManager TunnelManagerInterface
 	scriptRunner  *ScriptRunner
-	trafficShaper *TrafficShaper
-	stats         *StatsCollector
+	trafficShaper *stats.TrafficShaper
+	stats         *stats.StatsCollector
 	staticCache   *cache.StaticCacheManager // 静态文件缓存管理器
 	loggingDB     *logging.LoggingDB          // 请求日志数据库
 	serverName    string
 
-	rateLimiter        *RateLimitEngine
+	rateLimiter        *stats.RateLimitEngine
 	client             *http.Client
 	concurrencyLimiter chan struct{}
 	endpointTunnelMap  map[string]string // endpointName -> tunnelName
 }
 
-func NewMapRemoteProxy(config *Config, tunnelManager TunnelManagerInterface, scriptRunner *ScriptRunner, trafficShaper *TrafficShaper, stats *StatsCollector, staticCache *cache.StaticCacheManager, loggingDB *logging.LoggingDB, serverName string, rateLimiter *RateLimitEngine) *MapRemoteProxy {
+func NewMapRemoteProxy(config *Config, tunnelManager TunnelManagerInterface, scriptRunner *ScriptRunner, trafficShaper *stats.TrafficShaper, stats *stats.StatsCollector, staticCache *cache.StaticCacheManager, loggingDB *logging.LoggingDB, serverName string, rateLimiter *stats.RateLimitEngine) *MapRemoteProxy {
 	// Default policies from the server config, if they exist
 	serverConfig := config.Servers[serverName]
 	policies := config.ResolvePolicies(serverConfig, &Mapping{}, nil, "") // Get server-level or default policies
@@ -173,11 +174,11 @@ func (p *MapRemoteProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			// We don't have token here yet, pass empty
 			result := p.rateLimiter.CheckRequest(clientIP, "", bindings)
 			if !result.Allowed {
-				if result.Action == ActionRedirect {
+				if result.Action == stats.ActionRedirect {
 					http.Redirect(w, r, result.RedirectURL, http.StatusFound)
 					return
 				}
-				if result.Action == ActionQueue {
+				if result.Action == stats.ActionQueue {
 					// Simple queue implementation: sleep
 					time.Sleep(result.WaitDuration)
 					// Re-check? Or just allow?

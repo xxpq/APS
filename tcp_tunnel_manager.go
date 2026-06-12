@@ -8,13 +8,13 @@ import (
 	"log"
 	"math/rand"
 	"net"
-	"net/url"
 	"os"
 	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"aps/stats"
 )
 
 // pendingRequestPool removed to prevent reusing closed channels
@@ -300,7 +300,7 @@ func (tm *TCPTunnelManager) FindTunnelForEndpoint(endpointName string) (string, 
 }
 
 // SendProxyConnect establishes a TCP proxy connection through the tunnel
-func (tm *TCPTunnelManager) SendProxyConnect(ctx context.Context, tunnelName, endpointName string, host string, port int, useTLS bool, clientConn interface{}, clientIP string, frame *ForwardFrame) (<-chan struct{}, error) {
+func (tm *TCPTunnelManager) SendProxyConnect(ctx context.Context, tunnelName, endpointName string, host string, port int, useTLS bool, clientConn interface{}, clientIP string) (<-chan struct{}, error) {
 	ep, err := tm.GetEndpoint(tunnelName, endpointName)
 	if err != nil {
 		return nil, err
@@ -312,7 +312,7 @@ func (tm *TCPTunnelManager) SendProxyConnect(ctx context.Context, tunnelName, en
 		Write([]byte) (int, error)
 		Close() error
 	}); ok {
-		return ep.CreateProxyConnection(ctx, host, port, useTLS, &simpleNetConn{nc}, clientIP, frame)
+		return ep.CreateProxyConnection(ctx, host, port, useTLS, &simpleNetConn{nc}, clientIP)
 	}
 
 	return nil, errors.New("invalid client connection type")
@@ -350,23 +350,9 @@ func (tm *TCPTunnelManager) SendRequestStream(ctx context.Context, tunnelName, e
 	sourceIP := normalizeTCPTunnelLogValue(reqPayload.SourceIP)
 	targetAddr := extractTCPTunnelTargetAddr(reqPayload.URL)
 	logPrefix := buildTCPTunnelRoutePrefix(sourceIP, ep.EndpointName, ep.ID, targetAddr)
-	frame := nextForwardFrame(reqPayload.GridFrame)
-	DebugLog("%s [GRID] Forward frame route=%s epoch=%d hop=%d trace=%s", logPrefix, frame.RouteID, frame.RouteEpoch, frame.HopCount, frame.TraceID)
 
 	if len(reqPayload.HeaderData) == 0 && len(reqPayload.Data) > 0 {
 		reqPayload.HeaderData = append([]byte(nil), reqPayload.Data...)
-	}
-	useStreamingRequest := len(reqPayload.HeaderData) > 0 || reqPayload.Body != nil
-	gridHops := parseGridHopPlanPayload(frame.Payload)
-	relayPayload := reqPayload
-	if len(gridHops) > 0 && useStreamingRequest {
-		if relayPayload == nil {
-			relayPayload = reqPayload
-		}
-		if relayPayload != nil && len(relayPayload.HeaderData) == 0 && len(relayPayload.Data) > 0 {
-			relayPayload.HeaderData = append([]byte(nil), relayPayload.Data...)
-		}
-		return tm.sendRequestStreamViaRelay(ctx, ep, relayPayload, frame, gridHops, logPrefix)
 	}
 
 	requestID := generateRequestID()
@@ -407,7 +393,7 @@ func (tm *TCPTunnelManager) SendRequestStream(ctx context.Context, tunnelName, e
 		return nil, nil, sendErr
 	}
 
-	if !useStreamingRequest {
+	if len(reqPayload.HeaderData) == 0 {
 		return fail(errors.New("missing request header bytes"))
 	}
 	encryptedHeader, err := ep.KeyManager.Encrypt(reqPayload.HeaderData)
@@ -416,13 +402,9 @@ func (tm *TCPTunnelManager) SendRequestStream(ctx context.Context, tunnelName, e
 	}
 
 	if err := ep.SendJSON(MsgTypeRequestStart, RequestStartPayloadTCP{
-		ID:         requestID,
-		URL:        reqPayload.URL,
-		Header:     encryptedHeader,
-		RouteID:    frame.RouteID,
-		RouteEpoch: frame.RouteEpoch,
-		HopCount:   frame.HopCount,
-		TraceID:    frame.TraceID,
+		ID:     requestID,
+		URL:    reqPayload.URL,
+		Header: encryptedHeader,
 	}); err != nil {
 		return fail(err)
 	}
@@ -620,274 +602,8 @@ func writeAllToPipe(pipeWriter *io.PipeWriter, data []byte) error {
 	return nil
 }
 
-func (tm *TCPTunnelManager) sendRequestStreamViaRelay(ctx context.Context, ep *TCPEndpoint, reqPayload *RequestPayload, frame *ForwardFrame, gridHops []string, logPrefix string) (io.ReadCloser, []byte, error) {
-	if ep == nil || ep.session == nil {
-		return nil, nil, errors.New("endpoint stream session unavailable")
-	}
-	if reqPayload == nil {
-		return nil, nil, errors.New("request payload is nil")
-	}
-	if len(reqPayload.HeaderData) == 0 {
-		return nil, nil, errors.New("missing request header bytes")
-	}
-	if len(gridHops) == 0 {
-		return nil, nil, errors.New("missing grid hop plan")
-	}
-
-	finalHost, finalPort, finalTLS, err := extractGridRequestTarget(reqPayload.URL)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	requestID := generateRequestID()
-	stream, err := ep.session.OpenStream()
-	if err != nil {
-		return nil, nil, err
-	}
-
-	requestStartedAt := time.Now()
-	ep.MarkRequestStart()
-	var doneFlag int32
-	reportRequestDone := func(doneErr error) {
-		if atomic.CompareAndSwapInt32(&doneFlag, 0, 1) {
-			ep.MarkRequestDone(time.Since(requestStartedAt), doneErr)
-		}
-	}
-
-	fail := func(failErr error) (io.ReadCloser, []byte, error) {
-		_ = stream.Close()
-		reportRequestDone(failErr)
-		return nil, nil, failErr
-	}
-
-	nextHop := strings.TrimSpace(gridHops[0])
-	if nextHop == "" {
-		return fail(errors.New("invalid next hop in grid hop plan"))
-	}
-	var remaining []string
-	if len(gridHops) > 1 {
-		remaining = append(remaining, gridHops[1:]...)
-	}
-
-	enableQUIC, enableTCP, parallel := true, true, true
-	enableICE := true
-	extraICECandidates := []string(nil)
-	plannedICECandidates := parseGridHopPlanICECandidates(frame.Payload)
-	if runtime := GetGlobalGridRuntime(); runtime != nil {
-		enableQUIC, enableTCP, parallel = runtime.transportCapabilities()
-		enableICE = runtime.isICEEnabled()
-		extraICECandidates = runtime.iceStaticCandidates(finalHost, finalPort)
-	}
-	iceCandidates := []string(nil)
-	if enableICE {
-		iceCandidates = mergeGridICECandidateSets(
-			plannedICECandidates,
-			buildGridICECandidatesWithExtras(finalHost, finalPort, extraICECandidates),
-		)
-	}
-
-	tc := NewTunnelConn(stream)
-	startPayload := RequestStartPayloadTCP{
-		ID:                requestID,
-		URL:               reqPayload.URL,
-		Header:            reqPayload.HeaderData,
-		RouteID:           frame.RouteID,
-		RouteEpoch:        frame.RouteEpoch,
-		HopCount:          frame.HopCount,
-		TraceID:           frame.TraceID,
-		GridNextHop:       nextHop,
-		GridHops:          remaining,
-		GridFinalHost:     finalHost,
-		GridFinalPort:     finalPort,
-		GridFinalTLS:      finalTLS,
-		GridEnableQUIC:    enableQUIC,
-		GridEnableTCP:     enableTCP,
-		GridParallel:      parallel,
-		GridEnableICE:     enableICE,
-		GridICECandidates: iceCandidates,
-		GridPayloadPlain:  true,
-	}
-	if err := tc.SendJSON(MsgTypeRequestStart, startPayload); err != nil {
-		return fail(err)
-	}
-	DebugLog("%s [GRID] relay request stream start id=%s next=%s hops=%v final=%s:%d", logPrefix, requestID, nextHop, remaining, finalHost, finalPort)
-
-	if reqPayload.Body != nil {
-		defer reqPayload.Body.Close()
-		buf := make([]byte, httpStreamChunkSize)
-		for {
-			select {
-			case <-ctx.Done():
-				_ = tc.SendJSON(MsgTypeRequestEnd, RequestEndPayloadTCP{
-					ID:    requestID,
-					Error: ctx.Err().Error(),
-				})
-				return fail(ctx.Err())
-			default:
-			}
-
-			n, readErr := reqPayload.Body.Read(buf)
-			if n > 0 {
-				payload, payloadErr := BuildScopedBinaryPayload(requestID, buf[:n])
-				if payloadErr != nil {
-					_ = tc.SendJSON(MsgTypeRequestEnd, RequestEndPayloadTCP{
-						ID:    requestID,
-						Error: payloadErr.Error(),
-					})
-					return fail(payloadErr)
-				}
-				if err := tc.WriteMessage(&TunnelMessage{
-					Type:    MsgTypeRequestChunkBin,
-					Payload: payload,
-				}); err != nil {
-					_ = tc.SendJSON(MsgTypeRequestEnd, RequestEndPayloadTCP{
-						ID:    requestID,
-						Error: err.Error(),
-					})
-					return fail(err)
-				}
-			}
-
-			if readErr == io.EOF {
-				break
-			}
-			if readErr != nil {
-				_ = tc.SendJSON(MsgTypeRequestEnd, RequestEndPayloadTCP{
-					ID:    requestID,
-					Error: readErr.Error(),
-				})
-				return fail(readErr)
-			}
-		}
-	}
-
-	if err := tc.SendJSON(MsgTypeRequestEnd, RequestEndPayloadTCP{ID: requestID}); err != nil {
-		return fail(err)
-	}
-
-	var headerBytes []byte
-	for {
-		msg, err := tc.ReadMessage()
-		if err != nil {
-			return fail(err)
-		}
-		switch msg.Type {
-		case MsgTypeResponseHeader:
-			var header ResponseHeaderPayloadTCP
-			if err := msg.ParseJSON(&header); err != nil {
-				return fail(err)
-			}
-			if strings.TrimSpace(header.ID) != requestID {
-				continue
-			}
-			headerBytes = append([]byte(nil), header.Header...)
-		case MsgTypeResponseChunk:
-			return fail(errors.New("legacy response chunk format is no longer supported"))
-		case MsgTypeResponseChunkBin:
-			return fail(errors.New("response header not received before response body"))
-		case MsgTypeResponseEnd:
-			var end ResponseEndPayloadTCP
-			if err := msg.ParseJSON(&end); err != nil {
-				return fail(err)
-			}
-			if strings.TrimSpace(end.ID) != requestID {
-				continue
-			}
-			if end.Error != "" {
-				return fail(errors.New(end.Error))
-			}
-			return fail(errors.New("relay request ended without response header"))
-		default:
-			continue
-		}
-		break
-	}
-
-	pipeReader, pipeWriter := io.Pipe()
-	go func() {
-		var streamErr error
-		defer func() {
-			if streamErr != nil {
-				_ = pipeWriter.CloseWithError(streamErr)
-			} else {
-				_ = pipeWriter.Close()
-			}
-			_ = stream.Close()
-			reportRequestDone(streamErr)
-		}()
-
-		for {
-			msg, readErr := tc.ReadMessage()
-			if readErr != nil {
-				streamErr = readErr
-				return
-			}
-			switch msg.Type {
-			case MsgTypeResponseChunkBin:
-				scopeID, chunkData, err := ParseScopedBinaryPayload(msg.Payload)
-				if err != nil {
-					streamErr = err
-					return
-				}
-				if scopeID != requestID {
-					continue
-				}
-				if err := writeAllToPipe(pipeWriter, chunkData); err != nil {
-					streamErr = err
-					return
-				}
-			case MsgTypeResponseEnd:
-				var end ResponseEndPayloadTCP
-				if err := msg.ParseJSON(&end); err != nil {
-					streamErr = err
-					return
-				}
-				if strings.TrimSpace(end.ID) != requestID {
-					continue
-				}
-				if end.Error != "" {
-					streamErr = errors.New(end.Error)
-				}
-				return
-			default:
-				streamErr = fmt.Errorf("unsupported relay response message type=%d", msg.Type)
-				return
-			}
-		}
-	}()
-
-	return pipeReader, headerBytes, nil
-}
-
-func extractGridRequestTarget(rawURL string) (host string, port int, useTLS bool, err error) {
-	parsed, err := url.Parse(strings.TrimSpace(rawURL))
-	if err != nil {
-		return "", 0, false, err
-	}
-	host = strings.TrimSpace(parsed.Hostname())
-	if host == "" {
-		return "", 0, false, errors.New("request url missing host")
-	}
-	switch strings.ToLower(strings.TrimSpace(parsed.Scheme)) {
-	case "https":
-		useTLS = true
-		port = 443
-	default:
-		useTLS = false
-		port = 80
-	}
-	if p := strings.TrimSpace(parsed.Port()); p != "" {
-		customPort, convErr := strconv.Atoi(p)
-		if convErr != nil || customPort <= 0 {
-			return "", 0, false, errors.New("invalid request url port")
-		}
-		port = customPort
-	}
-	return host, port, useTLS, nil
-}
-
 // GetEndpointsInfo returns information about endpoints in a tunnel
-func (tm *TCPTunnelManager) GetEndpointsInfo(tunnelName string, stats *StatsCollector) map[string]*EndpointInfo {
+func (tm *TCPTunnelManager) GetEndpointsInfo(tunnelName string, statsCol *stats.StatsCollector) map[string]*EndpointInfo {
 	tm.mu.RLock()
 	tunnel, exists := tm.tunnels[tunnelName]
 	tm.mu.RUnlock()
@@ -902,11 +618,11 @@ func (tm *TCPTunnelManager) GetEndpointsInfo(tunnelName string, stats *StatsColl
 		if len(endpoints) > 0 {
 			ep := endpoints[0]
 
-			// Get per-endpoint statistics from StatsCollector
-			var endpointStats *PublicMetrics
-			if stats != nil {
+			// Get per-endpoint statistics from stats.StatsCollector
+			var endpointStats *stats.PublicMetrics
+			if statsCol != nil {
 				endpointKey := tunnelName + ":" + endpointName
-				endpointStats = stats.GetMetricsForKey(&stats.EndpointStats, endpointKey)
+				endpointStats = statsCol.GetMetricsForKey(&statsCol.EndpointStats, endpointKey)
 			}
 
 			info[endpointName] = &EndpointInfo{

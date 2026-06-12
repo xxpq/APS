@@ -24,6 +24,7 @@ import (
 	"aps/firewall"
 	"aps/logging"
 	"aps/security"
+	"aps/stats"
 )
 
 const apsTLSPinTokenPrefix = "apspt1."
@@ -111,15 +112,15 @@ type AdminHandlers struct {
 	sessions      *SessionStore
 	tunnelManager TunnelManagerInterface
 	// dataStore      *DataStore // Removed, no longer needed
-	statsCollector *StatsCollector
-	statsDB        *StatsDB
+	statsCollector *stats.StatsCollector
+	statsDB        *stats.StatsDB
 	loggingDB      *logging.LoggingDB
 	logBroadcaster *logging.LogBroadcaster
-	rateLimiter    *RateLimitEngine
+	rateLimiter    *stats.RateLimitEngine
 }
 
 // NewAdminHandlers creates a new AdminHandlers instance.
-func NewAdminHandlers(config *Config, configPath string, serverName string, statsCollector *StatsCollector, statsDB *StatsDB, loggingDB *logging.LoggingDB, logBroadcaster *logging.LogBroadcaster, rateLimiter *RateLimitEngine) *AdminHandlers {
+func NewAdminHandlers(config *Config, configPath string, serverName string, statsCollector *stats.StatsCollector, statsDB *stats.StatsDB, loggingDB *logging.LoggingDB, logBroadcaster *logging.LogBroadcaster, rateLimiter *stats.RateLimitEngine) *AdminHandlers {
 	return &AdminHandlers{
 		config:         config,
 		configPath:     configPath,
@@ -182,31 +183,31 @@ func (h *AdminHandlers) RegisterHandlers(mux *http.ServeMux) {
 			return
 		}
 
-		stats := h.statsCollector.GetIPStats()
+		ipStats := h.statsCollector.GetIPStats()
 
-		// Enrich stats with location and rate limiter status
-		for i := range stats {
+		// Enrich ipStats with location and rate limiter status
+		for i := range ipStats {
 			// Get location from ASN cache
-			location, err := asn.GetIPLocation(stats[i].IP)
+			location, err := asn.GetIPLocation(ipStats[i].IP)
 			if err == nil && location != nil {
-				stats[i].Location = location
+				ipStats[i].Location = location
 			}
 
 			// Get rate limiter status (true = not banned, false = banned)
 			if h.rateLimiter != nil {
-				stats[i].Status = !h.rateLimiter.IsBanned(stats[i].IP)
+				ipStats[i].Status = !h.rateLimiter.IsBanned(ipStats[i].IP)
 			} else {
-				stats[i].Status = true
+				ipStats[i].Status = true
 			}
 		}
 
 		response := struct {
-			IPs       []IPRequestStats `json:"ips"`
-			TotalIPs  int              `json:"totalIPs"`
-			TimeRange string           `json:"timeRange"`
+			IPs       []stats.IPRequestStats `json:"ips"`
+			TotalIPs  int                    `json:"totalIPs"`
+			TimeRange string                 `json:"timeRange"`
 		}{
-			IPs:       stats,
-			TotalIPs:  len(stats),
+			IPs:       ipStats,
+			TotalIPs:  len(ipStats),
 			TimeRange: "24h",
 		}
 
@@ -1800,7 +1801,7 @@ func (h *AdminHandlers) handleTimeSeriesStats(w http.ResponseWriter, r *http.Req
 }
 
 // extractGlobalTimeSeries extracts global statistics from snapshots
-func extractGlobalTimeSeries(snapshots []TimeSeriesSnapshot) []map[string]interface{} {
+func extractGlobalTimeSeries(snapshots []stats.TimeSeriesSnapshot) []map[string]interface{} {
 	result := make([]map[string]interface{}, len(snapshots))
 	for i, s := range snapshots {
 		result[i] = map[string]interface{}{
@@ -1816,11 +1817,11 @@ func extractGlobalTimeSeries(snapshots []TimeSeriesSnapshot) []map[string]interf
 }
 
 // extractDimensionTimeSeries extracts dimensional statistics for a specific key
-func extractDimensionTimeSeries(snapshots []TimeSeriesSnapshot, dimension, key string) []map[string]interface{} {
+func extractDimensionTimeSeries(snapshots []stats.TimeSeriesSnapshot, dimension, key string) []map[string]interface{} {
 	result := make([]map[string]interface{}, 0, len(snapshots))
 
 	for _, s := range snapshots {
-		var dimStats *DimensionStats
+		var dimStats *stats.DimensionStats
 
 		switch dimension {
 		case "rules":
@@ -1865,13 +1866,13 @@ func (h *AdminHandlers) handleRateLimitRules(w http.ResponseWriter, r *http.Requ
 	}
 
 	if r.Method == http.MethodPost {
-		var rule RateLimitRule
+		var rule stats.RateLimitRule
 		if err := json.NewDecoder(r.Body).Decode(&rule); err != nil {
 			http.Error(w, err.Error(), 400)
 			return
 		}
 		if h.config.RateLimitRules == nil {
-			h.config.RateLimitRules = make(map[string]*RateLimitRule)
+			h.config.RateLimitRules = make(map[string]*stats.RateLimitRule)
 		}
 		h.config.RateLimitRules[rule.Name] = &rule
 		if err := h.saveConfigLocked(); err != nil {

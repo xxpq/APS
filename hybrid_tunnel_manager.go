@@ -7,6 +7,8 @@ import (
 	"net"
 	"sync"
 	"time"
+
+	"aps/stats"
 )
 
 // HybridTunnelManager 绠＄悊TCP闅ч亾鐨勭鐞嗗櫒
@@ -15,12 +17,12 @@ type HybridTunnelManager struct {
 	tcpManager     *TCPTunnelManager
 	tcpServer      *TCPTunnelServer
 	config         *Config
-	statsCollector *StatsCollector
-	statsDB        *StatsDB
+	statsCollector *stats.StatsCollector
+	statsDB        *stats.StatsDB
 }
 
 // NewHybridTunnelManager creates a hybrid tunnel manager.
-func NewHybridTunnelManager(config *Config, statsCollector *StatsCollector, statsDB *StatsDB) *HybridTunnelManager {
+func NewHybridTunnelManager(config *Config, statsCollector *stats.StatsCollector, statsDB *stats.StatsDB) *HybridTunnelManager {
 	htm := &HybridTunnelManager{
 		config:         config,
 		statsCollector: statsCollector,
@@ -50,7 +52,7 @@ func (htm *HybridTunnelManager) HandleTunnelConnection(conn net.Conn) {
 }
 
 // SetStatsCollector sets stats collector.
-func (htm *HybridTunnelManager) SetStatsCollector(statsCollector *StatsCollector) {
+func (htm *HybridTunnelManager) SetStatsCollector(statsCollector *stats.StatsCollector) {
 	htm.mu.Lock()
 	defer htm.mu.Unlock()
 	htm.statsCollector = statsCollector
@@ -74,9 +76,9 @@ func (htm *HybridTunnelManager) SendRequestStream(ctx context.Context, tunnelNam
 }
 
 // SendProxyConnect establishes a TCP proxy connection through the tunnel.
-func (htm *HybridTunnelManager) SendProxyConnect(ctx context.Context, tunnelName, endpointName string, host string, port int, useTLS bool, clientConn net.Conn, clientIP string, frame *ForwardFrame) (<-chan struct{}, error) {
+func (htm *HybridTunnelManager) SendProxyConnect(ctx context.Context, tunnelName, endpointName string, host string, port int, useTLS bool, clientConn net.Conn, clientIP string) (<-chan struct{}, error) {
 	if htm.tcpManager != nil {
-		return htm.tcpManager.SendProxyConnect(ctx, tunnelName, endpointName, host, port, useTLS, clientConn, clientIP, frame)
+		return htm.tcpManager.SendProxyConnect(ctx, tunnelName, endpointName, host, port, useTLS, clientConn, clientIP)
 	}
 	return nil, errors.New("no available tunnel manager for proxy connection")
 }
@@ -98,7 +100,7 @@ func (htm *HybridTunnelManager) FindTunnelForEndpoint(endpointName string) (stri
 }
 
 // GetEndpointsInfo 鑾峰彇绔偣淇℃伅
-func (htm *HybridTunnelManager) GetEndpointsInfo(tunnelName string, stats *StatsCollector) map[string]*EndpointInfo {
+func (htm *HybridTunnelManager) GetEndpointsInfo(tunnelName string, stats *stats.StatsCollector) map[string]*EndpointInfo {
 	if htm.tcpManager == nil {
 		return nil
 	}

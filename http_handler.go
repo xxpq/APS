@@ -27,6 +27,7 @@ import (
 	"aps/asn"
 	"aps/firewall"
 	"aps/logging"
+	"aps/stats"
 )
 
 // 对象池 - 用于高并发场景下复用对象，减少 GC 压力
@@ -142,7 +143,7 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		responseTime := time.Since(startTime)
 		p.stats.AddBytesSent(bytesSent)
 		p.stats.AddBytesRecv(bytesRecv)
-		p.stats.Record(RecordData{
+		p.stats.Record(stats.RecordData{
 			RuleKey:      ruleKey,
 			UserKey:      userKey,
 			ServerKey:    p.serverName,
@@ -446,11 +447,11 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		if len(bindings) > 0 {
 			result := p.rateLimiter.CheckRequest(clientIP, token, bindings)
 			if !result.Allowed {
-				if result.Action == ActionRedirect {
+				if result.Action == stats.ActionRedirect {
 					http.Redirect(w, r, result.RedirectURL, http.StatusFound)
 					return
 				}
-				if result.Action == ActionQueue {
+				if result.Action == stats.ActionQueue {
 					time.Sleep(result.WaitDuration)
 				} else {
 					http.Error(w, result.Message, http.StatusTooManyRequests)
@@ -1152,7 +1153,7 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 
 	var writer io.Writer = w
 	if limiter != nil || len(quotas) > 0 {
-		limitedWriter := newLimitedReadWriteCloser(nil, limiter, trackingQuota)
+		limitedWriter := stats.NewLimitedReadWriteCloser(nil, limiter, trackingQuota)
 		writer = limitedWriter.(io.Writer)
 	}
 

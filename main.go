@@ -28,6 +28,7 @@ import (
 	"aps/asn"
 	"aps/cache"
 	"aps/logging"
+	"aps/stats"
 )
 
 // ServerManager manages the lifecycle of multiple HTTP servers.
@@ -43,14 +44,14 @@ type ServerManager struct {
 	// dataStore     *DataStore // Removed, replaced by statsDB for persistence
 	tunnelManager  TunnelManagerInterface
 	scriptRunner   *ScriptRunner
-	trafficShaper  *TrafficShaper
-	stats          *StatsCollector
+	trafficShaper  *stats.TrafficShaper
+	stats          *stats.StatsCollector
 	staticCache    *cache.StaticCacheManager
 	replayManager  *ReplayManager
-	statsDB        *StatsDB
+	statsDB        *stats.StatsDB
 	loggingDB      *logging.LoggingDB
 	logBroadcaster *logging.LogBroadcaster
-	rateLimiter    *RateLimitEngine
+	rateLimiter    *stats.RateLimitEngine
 }
 
 type tunnelInboundConn struct {
@@ -62,13 +63,13 @@ func (c *tunnelInboundConn) TunnelServerName() string {
 	return c.serverName
 }
 
-func NewServerManager(config *Config, configFile string, tunnelManager TunnelManagerInterface, scriptRunner *ScriptRunner, trafficShaper *TrafficShaper, stats *StatsCollector, staticCache *cache.StaticCacheManager, replayManager *ReplayManager, statsDB *StatsDB, loggingDB *logging.LoggingDB, logBroadcaster *logging.LogBroadcaster) *ServerManager {
-	rateLimiter := NewRateLimitEngine(config.RateLimitRules)
-	// go rateLimiter.CleanupExpired() // RateLimitEngine handles cleanup internally or doesn't need explicit cleanup loop yet?
+func NewServerManager(config *Config, configFile string, tunnelManager TunnelManagerInterface, scriptRunner *ScriptRunner, trafficShaper *stats.TrafficShaper, statsCol *stats.StatsCollector, staticCache *cache.StaticCacheManager, replayManager *ReplayManager, statsDB *stats.StatsDB, loggingDB *logging.LoggingDB, logBroadcaster *logging.LogBroadcaster) *ServerManager {
+	rateLimiter := stats.NewRateLimitEngine(config.RateLimitRules)
+	// go rateLimiter.CleanupExpired() // stats.RateLimitEngine handles cleanup internally or doesn't need explicit cleanup loop yet?
 	// The new engine uses sync.Map and doesn't have a cleanup loop yet.
 	// We should probably add one, but for now let's just initialize it.
-	// The old one had CleanupExpired. The new one has trackers that might grow.
-	// WindowTracker resets itself. Banned map might grow.
+	// The old one had stats.CleanupExpired. The new one has trackers that might grow.
+	// stats.WindowTracker resets itself. Banned map might grow.
 	// We can add a cleanup goroutine later if needed.
 
 	return &ServerManager{
@@ -81,7 +82,7 @@ func NewServerManager(config *Config, configFile string, tunnelManager TunnelMan
 		tunnelManager:  tunnelManager,
 		scriptRunner:   scriptRunner,
 		trafficShaper:  trafficShaper,
-		stats:          stats,
+		stats:          statsCol,
 		staticCache:    staticCache,
 		replayManager:  replayManager,
 		statsDB:        statsDB,
@@ -431,7 +432,7 @@ func main() {
 	log.Printf("[DB] Opened shared database: aps.db")
 
 	// Initialize statistics module with shared database
-	statsDB, err := NewStatsDB(db)
+	statsDB, err := stats.NewStatsDB(db)
 	if err != nil {
 		log.Fatalf("Failed to initialize stats DB: %v", err)
 	}
@@ -464,8 +465,12 @@ func main() {
 
 	tunnelManager := NewHybridTunnelManager(config, nil, statsDB) // 娴ｈ法鏁ゅǎ宄版値闂呇囦壕缁狅紕鎮婇崳?
 	scriptRunner := NewScriptRunner(config.Scripting)
-	trafficShaper := NewTrafficShaper(initialQuotaUsage)
-	statsCollector := NewStatsCollector(config)
+	trafficShaper := stats.NewTrafficShaper(initialQuotaUsage)
+	statsCollector := stats.NewStatsCollector()
+	// 设置 stats endpoint 的 admin 鉴权（适配 stats 包解耦后的 AdminAuthFunc 字段）
+	statsCollector.AdminAuthFunc = func(r *http.Request) bool {
+		return isAdminRequest(r, config)
+	}
 	defer statsCollector.Close() // Ensure graceful shutdown of async stats workers
 
 	// 閸掓繂顫愰崠鏍饯閹焦鏋冩禒鍓佺处鐎涙顓搁悶鍡楁珤
@@ -568,9 +573,9 @@ func (sm *ServerManager) StartAll() {
 	}
 }
 
-func createServerHandler(serverName string, mappings []*Mapping, serverConfig *ListenConfig, config *Config, configFile string, tunnelManager TunnelManagerInterface, scriptRunner *ScriptRunner, trafficShaper *TrafficShaper, stats *StatsCollector, staticCache *cache.StaticCacheManager, replayManager *ReplayManager, isACMEEnabled bool, statsDB *StatsDB, loggingDB *logging.LoggingDB, logBroadcaster *logging.LogBroadcaster, rateLimiter *RateLimitEngine) http.Handler {
+func createServerHandler(serverName string, mappings []*Mapping, serverConfig *ListenConfig, config *Config, configFile string, tunnelManager TunnelManagerInterface, scriptRunner *ScriptRunner, trafficShaper *stats.TrafficShaper, statsCol *stats.StatsCollector, staticCache *cache.StaticCacheManager, replayManager *ReplayManager, isACMEEnabled bool, statsDB *stats.StatsDB, loggingDB *logging.LoggingDB, logBroadcaster *logging.LogBroadcaster, rateLimiter *stats.RateLimitEngine) http.Handler {
 	mux := http.NewServeMux()
-	proxy := NewMapRemoteProxy(config, tunnelManager, scriptRunner, trafficShaper, stats, staticCache, loggingDB, serverName, rateLimiter)
+	proxy := NewMapRemoteProxy(config, tunnelManager, scriptRunner, trafficShaper, statsCol, staticCache, loggingDB, serverName, rateLimiter)
 
 	authHandlers := &AuthHandlers{}
 	authHandlers.RegisterHandlers(mux)
@@ -642,10 +647,10 @@ func createServerHandler(serverName string, mappings []*Mapping, serverConfig *L
 	// 閺嶈宓?panel 閹貉冨煑 /.api 娑?/.admin 閻ㄥ嫭鏁為崘?
 	if serverConfig.Panel != nil && *serverConfig.Panel {
 		// 濞ｈ濮炵紒鐔活吀閺佺増宓佺粩顖滃仯
-		mux.HandleFunc("/.api/stats", stats.ServeHTTP)
+		mux.HandleFunc("/.api/stats", statsCol.ServeHTTP)
 
 		// 濞夈劌鍞界粻锛勬倞闂堛垺婢樻径鍕倞閸?
-		adminHandlers := NewAdminHandlers(config, configFile, serverName, stats, statsDB, loggingDB, logBroadcaster, rateLimiter)
+		adminHandlers := NewAdminHandlers(config, configFile, serverName, statsCol, statsDB, loggingDB, logBroadcaster, rateLimiter)
 		// 鐠佸墽鐤唗unnel缁狅紕鎮婇崳銊ョ穿閻㈩煉绱濋悽銊ょ艾閺屻儴顕梕ndpoint閻樿埖鈧?
 		adminHandlers.SetTunnelManager(tunnelManager)
 		adminHandlers.RegisterHandlers(mux)
@@ -779,7 +784,7 @@ func configureTunnelMTLSForServer(name string, serverConfig *ListenConfig, tlsCo
 	return nil
 }
 
-func startServer(name string, config *ListenConfig, handler http.Handler, rateLimiter *RateLimitEngine) (*http.Server, *ConnectionMux) {
+func startServer(name string, config *ListenConfig, handler http.Handler, rateLimiter *stats.RateLimitEngine) (*http.Server, *ConnectionMux) {
 	// Determine bind address based on 'public' (default: true)
 	host := "127.0.0.1"
 	if config.Public == nil || *config.Public {
@@ -879,21 +884,14 @@ func startServer(name string, config *ListenConfig, handler http.Handler, rateLi
 	}
 	return server, mux
 }
-func startQuotaPersistence(trafficShaper *TrafficShaper, statsDB *StatsDB) {
+func startQuotaPersistence(trafficShaper *stats.TrafficShaper, statsDB *stats.StatsDB) {
 	ticker := time.NewTicker(10 * time.Second)
 	go func() {
 		for range ticker.C {
-			trafficShaper.quotas.Range(func(key, value interface{}) bool {
-				sourceKey := key.(string)
-				var trafficUsed, requestsUsed int64
-				if tq, ok := value.(*TrafficQuota); ok {
-					trafficUsed = tq.Used
-				}
-				if rq, ok := value.(*RequestQuota); ok {
-					requestsUsed = rq.Used
-				}
-				if err := statsDB.SaveQuotaUsage(sourceKey, trafficUsed, requestsUsed); err != nil {
-					log.Printf("[QUOTA] Error saving quota usage to DB for %s: %v", sourceKey, err)
+			trafficShaper.RangeQuotas(func(key string, value interface{}) bool {
+				trafficUsed, requestsUsed := stats.QuotaUsed(value)
+				if err := statsDB.SaveQuotaUsage(key, trafficUsed, requestsUsed); err != nil {
+					log.Printf("[QUOTA] Error saving quota usage to DB for %s: %v", key, err)
 				}
 				return true
 			})
@@ -901,73 +899,73 @@ func startQuotaPersistence(trafficShaper *TrafficShaper, statsDB *StatsDB) {
 	}()
 }
 
-func startStatsCollection(stats *StatsCollector, statsDB *StatsDB) {
+func startStatsCollection(statsCol *stats.StatsCollector, statsDB *stats.StatsDB) {
 	ticker := time.NewTicker(1 * time.Minute)
 	go func() {
 		for range ticker.C {
-			snapshot := TimeSeriesSnapshot{
+			snapshot := stats.TimeSeriesSnapshot{
 				Timestamp: time.Now().Unix(),
-				Global: GlobalStats{
-					TotalRequests:     atomic.LoadUint64(&stats.TotalRequests),
-					ActiveConnections: atomic.LoadInt64(&stats.ActiveConnections),
-					BytesReceived:     atomic.LoadUint64(&stats.TotalBytesRecv),
-					BytesSent:         atomic.LoadUint64(&stats.TotalBytesSent),
+				Global: stats.GlobalStats{
+					TotalRequests:     atomic.LoadUint64(&statsCol.TotalRequests),
+					ActiveConnections: atomic.LoadInt64(&statsCol.ActiveConnections),
+					BytesReceived:     atomic.LoadUint64(&statsCol.TotalBytesRecv),
+					BytesSent:         atomic.LoadUint64(&statsCol.TotalBytesSent),
 				},
-				Rules:   make(map[string]*DimensionStats),
-				Users:   make(map[string]*DimensionStats),
-				Servers: make(map[string]*DimensionStats),
-				Tunnels: make(map[string]*DimensionStats),
-				Proxies: make(map[string]*DimensionStats),
+				Rules:   make(map[string]*stats.DimensionStats),
+				Users:   make(map[string]*stats.DimensionStats),
+				Servers: make(map[string]*stats.DimensionStats),
+				Tunnels: make(map[string]*stats.DimensionStats),
+				Proxies: make(map[string]*stats.DimensionStats),
 			}
 
 			// Calculate global QPS
-			uptime := time.Since(stats.StartTime).Seconds()
+			uptime := time.Since(statsCol.StartTime).Seconds()
 			if uptime > 0 {
 				snapshot.Global.RequestsPerSecond = float64(snapshot.Global.TotalRequests) / uptime
 			}
 
 			// Collect dimensional stats - Rules
-			stats.RuleStats.Range(func(key, value interface{}) bool {
+			statsCol.RuleStats.Range(func(key, value interface{}) bool {
 				k := key.(string)
-				m := value.(*Metrics)
+				m := value.(*stats.Metrics)
 				snapshot.Rules[k] = extractDimensionStats(m)
 				return true
 			})
 
 			// Collect dimensional stats - Users
-			stats.UserStats.Range(func(key, value interface{}) bool {
+			statsCol.UserStats.Range(func(key, value interface{}) bool {
 				k := key.(string)
-				m := value.(*Metrics)
+				m := value.(*stats.Metrics)
 				snapshot.Users[k] = extractDimensionStats(m)
 				return true
 			})
 
 			// Collect dimensional stats - Servers
-			stats.ServerStats.Range(func(key, value interface{}) bool {
+			statsCol.ServerStats.Range(func(key, value interface{}) bool {
 				k := key.(string)
-				m := value.(*Metrics)
+				m := value.(*stats.Metrics)
 				snapshot.Servers[k] = extractDimensionStats(m)
 				return true
 			})
 
 			// Collect dimensional stats - Tunnels
-			stats.TunnelStats.Range(func(key, value interface{}) bool {
+			statsCol.TunnelStats.Range(func(key, value interface{}) bool {
 				k := key.(string)
-				m := value.(*Metrics)
+				m := value.(*stats.Metrics)
 				snapshot.Tunnels[k] = extractDimensionStats(m)
 				return true
 			})
 
 			// Collect dimensional stats - Proxies
-			stats.ProxyStats.Range(func(key, value interface{}) bool {
+			statsCol.ProxyStats.Range(func(key, value interface{}) bool {
 				k := key.(string)
-				m := value.(*Metrics)
+				m := value.(*stats.Metrics)
 				snapshot.Proxies[k] = extractDimensionStats(m)
 				return true
 			})
 
 			// Collect dimensional stats - IPs (Top 200)
-			snapshot.IPs = stats.GetTopIPsAsDimensionStats(200)
+			snapshot.IPs = statsCol.GetTopIPsAsDimensionStats(200)
 
 			// Save to DB
 			if err := statsDB.AddSnapshot(snapshot); err != nil {
@@ -977,8 +975,8 @@ func startStatsCollection(stats *StatsCollector, statsDB *StatsDB) {
 	}()
 }
 
-// extractDimensionStats extracts dimension-specific statistics from Metrics
-func extractDimensionStats(m *Metrics) *DimensionStats {
+// extractDimensionStats extracts dimension-specific statistics from stats.Metrics
+func extractDimensionStats(m *stats.Metrics) *stats.DimensionStats {
 	requestCount := atomic.LoadUint64(&m.RequestCount)
 	totalBytesRecv := atomic.LoadUint64(&m.BytesRecv.Total)
 	totalBytesSent := atomic.LoadUint64(&m.BytesSent.Total)
@@ -989,7 +987,7 @@ func extractDimensionStats(m *Metrics) *DimensionStats {
 		avgRespTime = float64(totalResponseTime) / float64(requestCount) / 1e6 // Convert to ms
 	}
 
-	return &DimensionStats{
+	return &stats.DimensionStats{
 		Requests:    requestCount,
 		BytesRecv:   totalBytesRecv,
 		BytesSent:   totalBytesSent,

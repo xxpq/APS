@@ -17,6 +17,7 @@ import (
 
 	"aps/util"
 	"aps/firewall"
+	"aps/stats"
 )
 
 // IsDebugMode 全局debug模式标志（re-export 自 aps/util，Stage 8 清理）。
@@ -62,7 +63,7 @@ type Config struct {
 	Firewalls         map[string]*firewall.FirewallRule       `json:"firewalls,omitempty"`    // 防火墙规则组配置
 	Mappings          []Mapping                      `json:"mappings"`
 	Version           int64                          `json:"version,omitempty"` // 配置版本号，用于并发编辑检测
-	RateLimitRules    map[string]*RateLimitRule      `json:"rateLimitRules,omitempty"`
+	RateLimitRules    map[string]*stats.RateLimitRule      `json:"rateLimitRules,omitempty"`
 	mu                sync.RWMutex
 }
 
@@ -404,51 +405,8 @@ type CacheSizeLimit struct {
 	Disk string `json:"disk,omitempty"` // 磁盘缓存限制，如 "1g", "1000g"
 }
 
-// TimeSeriesSnapshot represents a point-in-time statistics snapshot with dimensional data
-type TimeSeriesSnapshot struct {
-	Timestamp int64 `json:"timestamp"` // Unix timestamp in seconds
-
-	// Global statistics
-	Global GlobalStats `json:"global"`
-
-	// Dimensional statistics (only store top active dimensions to limit storage)
-	Rules   map[string]*DimensionStats `json:"rules,omitempty"`
-	Users   map[string]*DimensionStats `json:"users,omitempty"`
-	Servers map[string]*DimensionStats `json:"servers,omitempty"`
-	Tunnels map[string]*DimensionStats `json:"tunnels,omitempty"`
-	Proxies map[string]*DimensionStats `json:"proxies,omitempty"`
-	IPs     map[string]*DimensionStats `json:"ips,omitempty"`
-}
-
-// GlobalStats contains system-wide statistics
-type GlobalStats struct {
-	TotalRequests     uint64  `json:"totalRequests"`
-	ActiveConnections int64   `json:"activeConnections"`
-	RequestsPerSecond float64 `json:"requestsPerSecond"`
-	BytesReceived     uint64  `json:"bytesReceived"`
-	BytesSent         uint64  `json:"bytesSent"`
-}
-
-// DimensionStats contains statistics for a specific dimension (rule, user, etc.)
-type DimensionStats struct {
-	Requests    uint64  `json:"requests"`
-	BytesRecv   uint64  `json:"bytesRecv"`
-	BytesSent   uint64  `json:"bytesSent"`
-	Errors      uint64  `json:"errors"`
-	AvgRespTime float64 `json:"avgRespTime"` // milliseconds
-
-	// Protocol-specific statistics
-	HTTPRequests    uint64 `json:"httpRequests"`
-	HTTPSuccess     uint64 `json:"httpSuccess"`
-	HTTPFailure     uint64 `json:"httpFailure"`
-	RawTCPRequests  uint64 `json:"rawTcpRequests"`
-	HTTPBytesSent   uint64 `json:"httpBytesSent"`
-	HTTPBytesRecv   uint64 `json:"httpBytesRecv"`
-	RawTCPBytesSent uint64 `json:"rawTcpBytesSent"`
-	RawTCPBytesRecv uint64 `json:"rawTcpBytesRecv"`
-	RawUDPBytesSent uint64 `json:"rawUdpBytesSent"`
-	RawUDPBytesRecv uint64 `json:"rawUdpBytesRecv"`
-}
+// stats.TimeSeriesSnapshot / stats.GlobalStats / stats.DimensionStats 已迁到 aps/stats 包，
+// Stage 3 拆分后此处不再重复定义。
 
 type ProxyConfig struct {
 	URLs              []string `json:"urls"`

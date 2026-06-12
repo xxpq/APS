@@ -21,6 +21,8 @@ import (
 	"golang.org/x/crypto/argon2"
 	"golang.org/x/crypto/hkdf"
 	"golang.org/x/crypto/pbkdf2"
+
+	"aps/stats"
 )
 
 // Key rotation parameters
@@ -67,7 +69,7 @@ type SessionKeyManager struct {
 	kdfSalt         string       // KDF salt from tunnel config
 	replaySeen      map[string]int64
 	replayOpCount   uint64
-	replayStatsDB   *StatsDB
+	replayStatsDB   *stats.StatsDB
 	mu              sync.RWMutex
 }
 
@@ -93,7 +95,7 @@ type KeyConfirmPayload struct {
 }
 
 // NewSessionKeyManager creates a new session key manager.
-func NewSessionKeyManager(masterPassword string, endpointName string, statsDB *StatsDB) *SessionKeyManager {
+func NewSessionKeyManager(masterPassword string, endpointName string, statsDB *stats.StatsDB) *SessionKeyManager {
 	return &SessionKeyManager{
 		masterPassword: masterPassword,
 		endpointName:   endpointName,

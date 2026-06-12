@@ -22,6 +22,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"aps/stats"
 )
 
 const (
@@ -316,7 +318,7 @@ func isEndpointConfigTokenFresh(ts int64) bool {
 	return time.Duration(delta)*time.Second <= endpointConfigTokenWindow
 }
 
-func registerEndpointConfigReplayToken(statsDB *StatsDB, cid, nonce, token string, ts int64) error {
+func registerEndpointConfigReplayToken(statsDB *stats.StatsDB, cid, nonce, token string, ts int64) error {
 	now := time.Now().UTC().Unix()
 	expiry := ts + int64((endpointConfigTokenWindow + time.Minute).Seconds())
 	replayToken := strings.Join([]string{
@@ -366,7 +368,7 @@ func registerEndpointConfigReplayToken(statsDB *StatsDB, cid, nonce, token strin
 	return nil
 }
 
-func decryptEndpointConfigIDFromRequest(r *http.Request, encryptedID, salt string, statsDB *StatsDB) (string, string, []byte, error) {
+func decryptEndpointConfigIDFromRequest(r *http.Request, encryptedID, salt string, statsDB *stats.StatsDB) (string, string, []byte, error) {
 	pinKey, _, err := getTLSPinHashForRequest(r)
 	if err != nil {
 		return "", "", nil, err
