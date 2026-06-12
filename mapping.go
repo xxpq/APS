@@ -163,7 +163,7 @@ func (p *MapRemoteProxy) shouldFastRejectRequestByDomain(originalURL string) boo
 func (p *MapRemoteProxy) calculateMatchScore(mapping *Mapping, r *http.Request, originalURL string, isWebSocketUpgrade bool) (int, string, string) {
 	// Check if the mapping is for the current server
 	isForThisServer := false
-	for _, name := range mapping.serverNames {
+	for _, name := range mapping.ServerNames {
 		if name == p.serverName {
 			isForThisServer = true
 			break

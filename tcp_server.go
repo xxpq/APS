@@ -340,7 +340,7 @@ func (s *RawTCPServer) handleConnection(clientConn net.Conn) {
 			endpointKey = tunnelName + ":" + endpointName
 		}
 		s.forwardViaTunnel(clientConn, mapping, targetHost, targetPort, useTLS, clientAddr, &bytesSent, &bytesRecv)
-	} else if mapping.resolvedProxy != nil {
+	} else if mapping.ResolvedProxy != nil {
 		s.forwardViaProxy(clientConn, mapping, targetHost, targetPort, &bytesSent, &bytesRecv)
 	} else {
 		s.forwardDirect(clientConn, targetHost, targetPort, &bytesSent, &bytesRecv)
@@ -356,8 +356,8 @@ func (s *RawTCPServer) findMapping() *Mapping {
 
 	// First, try to find a mapping explicitly assigned to this server
 	for i, m := range s.mappings {
-		DebugLog("[RAW TCP] findMapping: Checking mapping %d: %s -> %s, serverNames=%v", i, m.GetFromURL(), m.GetToURL(), m.serverNames)
-		for _, serverName := range m.serverNames {
+		DebugLog("[RAW TCP] findMapping: Checking mapping %d: %s -> %s, serverNames=%v", i, m.GetFromURL(), m.GetToURL(), m.ServerNames)
+		for _, serverName := range m.ServerNames {
 			if serverName == s.name {
 				fromURL := m.GetFromURL()
 				if strings.HasPrefix(fromURL, "tcp://") {
@@ -461,7 +461,7 @@ func (s *RawTCPServer) forwardDirect(clientConn net.Conn, targetHost string, tar
 
 // forwardViaProxy forwards the connection via HTTP CONNECT proxy
 func (s *RawTCPServer) forwardViaProxy(clientConn net.Conn, mapping *Mapping, targetHost string, targetPort int, bytesSent, bytesRecv *uint64) {
-	proxyURL := mapping.resolvedProxy.GetRandomProxy()
+	proxyURL := mapping.ResolvedProxy.GetRandomProxy()
 	if proxyURL == "" {
 		log.Printf("[RAW TCP] No proxy available")
 		s.forwardDirect(clientConn, targetHost, targetPort, bytesSent, bytesRecv)
@@ -580,12 +580,7 @@ func (s *RawTCPServer) forwardViaTunnel(clientConn net.Conn, mapping *Mapping, t
 }
 
 func (s *RawTCPServer) sendProxyConnectViaDataPlane(ctx context.Context, tunnelName, endpointName string, host string, port int, useTLS bool, clientConn net.Conn, clientIP string) (<-chan struct{}, error) {
-	if runtime := GetGlobalGridRuntime(); runtime != nil {
-		if engine := NewGridExecutionEngine(runtime, s.tunnelManager, s.name); engine != nil {
-			return engine.SendProxyConnect(ctx, tunnelName, endpointName, host, port, useTLS, clientConn, clientIP)
-		}
-	}
-	return s.tunnelManager.SendProxyConnect(ctx, tunnelName, endpointName, host, port, useTLS, clientConn, clientIP, nil)
+	return s.tunnelManager.SendProxyConnect(ctx, tunnelName, endpointName, host, port, useTLS, clientConn, clientIP)
 }
 
 // getTunnelAndEndpoint gets the tunnel and endpoint names from mapping configuration

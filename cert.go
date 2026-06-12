@@ -279,7 +279,7 @@ func refreshDomainIndexes(config *Config) {
 }
 
 func mappingUsesACMEServer(config *Config, mapping *Mapping) bool {
-	for _, serverName := range mapping.serverNames {
+	for _, serverName := range mapping.ServerNames {
 		if server, ok := config.Servers[serverName]; ok {
 			if certStr, ok := server.Cert.(string); ok && certStr == "acme" {
 				return true

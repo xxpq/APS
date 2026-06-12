@@ -14,12 +14,18 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"aps/util"
 )
 
-// IsDebugMode 全局debug模式标志
-var IsDebugMode bool = false
+// IsDebugMode 全局debug模式标志（re-export 自 aps/util，Stage 8 清理）。
+// 仅为初始值复制，不是引用；4 个写入点（config.go:1059/1062/1282/1285）
+// 修改的是本 package 的 IsDebugMode，故下方 DebugLog 读本地 var 才能正确工作。
+var IsDebugMode = util.IsDebugMode
 
-// DebugLog 只在debug模式下输出日志
+// DebugLog 只在debug模式下输出日志（re-export 自 aps/util，Stage 8 清理）。
+// 读 package main 本地 IsDebugMode（见上注释），不调用 util.DebugLog，
+// 因为 util.IsDebugMode 不会被任何写入点更新。
 func DebugLog(format string, args ...interface{}) {
 	if IsDebugMode {
 		log.Printf(format, args...)
@@ -769,11 +775,11 @@ type Mapping struct {
 	// 解析后的内部字段
 	fromConfig    *EndpointConfig
 	toConfig      *EndpointConfig
-	serverNames   []string
+	ServerNames   []string
 	proxyNames    []string
 	endpointNames []string
 	tunnelNames   []string
-	resolvedProxy *ProxyManager
+	ResolvedProxy *ProxyManager
 }
 
 type RuleAuth struct {
@@ -1107,8 +1113,8 @@ func processConfig(config *Config) error {
 		mapping.toConfig = toConfig
 
 		// 解析 server names
-		mapping.serverNames = parseStringOrArray(mapping.Servers)
-		if len(mapping.serverNames) == 0 {
+		mapping.ServerNames = parseStringOrArray(mapping.Servers)
+		if len(mapping.ServerNames) == 0 {
 			// For TCP mappings (tcp://) or UDP mappings (udp://), don't assign to all servers
 			// They will be matched by port at runtime
 			isRawMapping := false
@@ -1127,11 +1133,11 @@ func processConfig(config *Config) error {
 					// Only assign to non-raw servers (HTTP)
 					if serverConfig, ok := config.Servers[name]; ok {
 						if serverConfig.Type == ServerTypeHTTP || serverConfig.Type == ServerTypeHTTPUDP {
-							mapping.serverNames = append(mapping.serverNames, name)
+							mapping.ServerNames = append(mapping.ServerNames, name)
 						}
 					}
 				}
-				if len(mapping.serverNames) == 0 {
+				if len(mapping.ServerNames) == 0 {
 					log.Printf("Warning: mapping %d skipped - 'servers' is not specified and no HTTP/HTTPS servers are defined", i+1)
 					continue
 				}
@@ -1139,7 +1145,7 @@ func processConfig(config *Config) error {
 			// For TCP mappings, leave serverNames empty - they will be matched by port at runtime
 		} else {
 			// 验证 server names 是否存在
-			for _, name := range mapping.serverNames {
+			for _, name := range mapping.ServerNames {
 				if _, ok := config.Servers[name]; !ok {
 					log.Printf("Warning: mapping %d skipped - server name '%s' not found in servers config", i+1, name)
 					continue
@@ -1167,7 +1173,7 @@ func processConfig(config *Config) error {
 					}
 				}
 				if len(allProxies) > 0 {
-					mapping.resolvedProxy = NewProxyManager(allProxies)
+					mapping.ResolvedProxy = NewProxyManager(allProxies)
 				}
 			}
 
@@ -1288,7 +1294,7 @@ func (c *Config) Reload(filename string) (map[string]*ListenConfig, error) {
 
 	log.Printf("Configuration reloaded: %d valid mapping rules", len(newConfig.Mappings))
 	for _, mapping := range c.Mappings {
-		log.Printf("  Rule: %s -> %s on servers: %v", mapping.GetFromURL(), mapping.GetToURL(), mapping.serverNames)
+		log.Printf("  Rule: %s -> %s on servers: %v", mapping.GetFromURL(), mapping.GetToURL(), mapping.ServerNames)
 	}
 
 	// Log firewall rules reload

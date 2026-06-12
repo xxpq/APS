@@ -110,14 +110,14 @@ func (sm *ServerManager) Start(name string, serverConfig *ListenConfig, isACMEEn
 	for i := range sm.config.Mappings {
 		mapping := &sm.config.Mappings[i]
 		// First, add mappings that explicitly specify this server
-		for _, serverName := range mapping.serverNames {
+		for _, serverName := range mapping.ServerNames {
 			serverMappings[serverName] = append(serverMappings[serverName], mapping)
 		}
 
 		// For rawTCP servers, also match by port if no explicit server assignment
-		if (serverConfig.Type == ServerTypeTCP || serverConfig.Type == ServerTypeTCPUDP) && len(mapping.serverNames) == 0 {
+		if (serverConfig.Type == ServerTypeTCP || serverConfig.Type == ServerTypeTCPUDP) && len(mapping.ServerNames) == 0 {
 			fromURL := mapping.GetFromURL()
-			DebugLog("[TCP MAPPING] Checking mapping %s for server '%s' (port %d), serverNames=%v", fromURL, name, serverConfig.Port, mapping.serverNames)
+			DebugLog("[TCP MAPPING] Checking mapping %s for server '%s' (port %d), serverNames=%v", fromURL, name, serverConfig.Port, mapping.ServerNames)
 			if strings.HasPrefix(fromURL, "tcp://") {
 				// Parse the from URL to get the port
 				if u, err := url.Parse(fromURL); err == nil {
@@ -135,7 +135,7 @@ func (sm *ServerManager) Start(name string, serverConfig *ListenConfig, isACMEEn
 		}
 
 		// For rawUDP servers, also match by port if no explicit server assignment
-		if (serverConfig.Type == ServerTypeUDP || serverConfig.Type == ServerTypeTCPUDP || serverConfig.Type == ServerTypeHTTPUDP) && len(mapping.serverNames) == 0 {
+		if (serverConfig.Type == ServerTypeUDP || serverConfig.Type == ServerTypeTCPUDP || serverConfig.Type == ServerTypeHTTPUDP) && len(mapping.ServerNames) == 0 {
 			fromURL := mapping.GetFromURL()
 			if strings.HasPrefix(fromURL, "udp://") {
 				// Parse the from URL to get the port
@@ -261,7 +261,7 @@ func (sm *ServerManager) UpdateRawTCPMappings() {
 	// First, collect mappings that explicitly specify servers
 	for i := range sm.config.Mappings {
 		mapping := &sm.config.Mappings[i]
-		for _, serverName := range mapping.serverNames {
+		for _, serverName := range mapping.ServerNames {
 			serverMappings[serverName] = append(serverMappings[serverName], mapping)
 		}
 	}
@@ -275,7 +275,7 @@ func (sm *ServerManager) UpdateRawTCPMappings() {
 			mapping := &sm.config.Mappings[i]
 
 			// Skip if already assigned via serverNames
-			if len(mapping.serverNames) > 0 {
+			if len(mapping.ServerNames) > 0 {
 				continue
 			}
 
@@ -324,7 +324,7 @@ func (sm *ServerManager) UpdateUDPMappings() {
 	// First, collect mappings that explicitly specify servers
 	for i := range sm.config.Mappings {
 		mapping := &sm.config.Mappings[i]
-		for _, serverName := range mapping.serverNames {
+		for _, serverName := range mapping.ServerNames {
 			serverMappings[serverName] = append(serverMappings[serverName], mapping)
 		}
 	}
@@ -338,7 +338,7 @@ func (sm *ServerManager) UpdateUDPMappings() {
 			mapping := &sm.config.Mappings[i]
 
 			// Skip if already assigned via serverNames
-			if len(mapping.serverNames) > 0 {
+			if len(mapping.ServerNames) > 0 {
 				continue
 			}
 
@@ -499,7 +499,7 @@ func main() {
 	log.Println("===========================================")
 	log.Printf("Loaded %d mapping rules:", len(config.Mappings))
 	for i, mapping := range config.Mappings {
-		log.Printf("  [%d] %s -> %s (on %v)", i+1, mapping.GetFromURL(), mapping.GetToURL(), mapping.serverNames)
+		log.Printf("  [%d] %s -> %s (on %v)", i+1, mapping.GetFromURL(), mapping.GetToURL(), mapping.ServerNames)
 	}
 	log.Println("===========================================")
 	fmt.Println()
@@ -549,7 +549,7 @@ func (sm *ServerManager) StartAll() {
 	serverMappings := make(map[string][]*Mapping)
 	for i := range sm.config.Mappings {
 		mapping := &sm.config.Mappings[i]
-		for _, serverName := range mapping.serverNames {
+		for _, serverName := range mapping.ServerNames {
 			serverMappings[serverName] = append(serverMappings[serverName], mapping)
 		}
 	}

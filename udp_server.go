@@ -300,7 +300,7 @@ func (s *RawUDPServer) cleanupLoop() {
 func (s *RawUDPServer) findMapping() *Mapping {
 	// Similar to TCP, find mapping by server name or port
 	for _, m := range s.mappings {
-		for _, serverName := range m.serverNames {
+		for _, serverName := range m.ServerNames {
 			if serverName == s.name {
 				fromURL := m.GetFromURL()
 				if strings.HasPrefix(fromURL, "udp://") {

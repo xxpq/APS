@@ -57,7 +57,7 @@ func TestRawTCPServer_FirewallBlock(t *testing.T) {
 	// Add a mapping that would match if firewall didn't block
 	server.mappings = []*Mapping{
 		{
-			serverNames: []string{"test_server"},
+			ServerNames: []string{"test_server"},
 			From:        "tcp://:8080",
 			To:          "tcp://127.0.0.1:9090",
 		},

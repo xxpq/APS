@@ -12,7 +12,7 @@ func makeTestMapping(serverName, fromURL, toURL string) Mapping {
 	parsedTo, _ := url.Parse(toURL)
 
 	return Mapping{
-		serverNames: []string{serverName},
+		ServerNames: []string{serverName},
 		fromConfig: &EndpointConfig{
 			URLs:       []string{fromURL},
 			ParsedURLs: []*url.URL{parsedFrom},
