@@ -1,0 +1,37 @@
+# Go build artifacts
+/aps
+/aps.exe
+/aps.test
+*.test
+*.out
+
+# Runtime data
+/aps.db
+*.db
+
+# Endpoint binary (独立可执行)
+/endpoint
+/endpoint.exe
+
+# macOS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Local cert cache
+/.cert/
+
+# Local config overrides (keep examples tracked)
+config.local.json
+config.local.*.json
+
+# Logs
+*.log
+
+# Build/test cache
+.cache/
