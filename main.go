@@ -535,8 +535,8 @@ func main() {
 }
 
 func (sm *ServerManager) StartAll() {
-	sm.config.mu.RLock()
-	defer sm.config.mu.RUnlock()
+	sm.config.RLock()
+	defer sm.config.RUnlock()
 
 	// 濡偓閺屻儲妲搁崥锔芥箒閺堝秴濮熼柊宥囩枂娴滃挜CME
 	needsACMEChallengeServer := false

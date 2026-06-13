@@ -40,7 +40,8 @@ func TestRawTCPServer_FirewallBlock(t *testing.T) {
 				},
 			},
 		},
-		mu: sync.RWMutex{},
+		// mu is unexported in aps/config; sync.RWMutex zero-value is fine
+		// so we just leave it implicit here.
 	}
 	// Parse the rule
 	firewall.ParseFirewallRule(appConfig.Firewalls["block_rule"])
