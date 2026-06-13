@@ -21,6 +21,7 @@ import (
 "aps/util"
 	"aps/tunnel"
 	cfg "aps/config"
+	"aps/util/httpx"
 )
 
 // RawTCPServer manages a raw TCP server for forwarding connections
@@ -186,7 +187,7 @@ func (s *RawTCPServer) handleConnection(clientConn net.Conn) {
 			Intercepted:  isIntercepted,
 			Protocol:     "rawtcp",
 			StatusCode:   0, // TCP has no status code
-			ClientIP:     extractIPFromAddr(clientConn.RemoteAddr().String()),
+			ClientIP:     httpx.ExtractIPFromAddr(clientConn.RemoteAddr().String()),
 		})
 
 		// Request logging (async)
@@ -225,7 +226,7 @@ func (s *RawTCPServer) handleConnection(clientConn net.Conn) {
 					ServerName:   s.name,
 					TunnelName:   tunnelKey,
 					EndpointName: endpointKey,
-					ClientIP:     extractIPFromAddr(clientConn.RemoteAddr().String()),
+					ClientIP:     httpx.ExtractIPFromAddr(clientConn.RemoteAddr().String()),
 				}
 				// If we have a mapping, use its ToURL as destination
 				if m := s.findMapping(); m != nil {

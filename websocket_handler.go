@@ -20,6 +20,7 @@ import (
 "aps/util"
 	"aps/security"
 	cfg "aps/config"
+	"aps/util/httpx"
 )
 
 func shouldUseLegacyBackendTLS(host string, insecureMode bool) bool {
@@ -81,7 +82,7 @@ func (p *MapRemoteProxy) handleWebSocket(w http.ResponseWriter, r *http.Request)
 			IsError:      isError,
 			Protocol:     "http", // WebSocket is HTTP upgrade
 			StatusCode:   101,    // WebSocket upgrade status code
-			ClientIP:     getClientIP(r),
+			ClientIP:     httpx.GetClientIP(r),
 		})
 		log.Printf("%s[WS] WebSocket request finished for %s. Duration: %v, Sent: %d, Recv: %d, Error: %v",
 			logPrefix, originalURL, responseTime, bytesSent, bytesRecv, isError)
@@ -343,7 +344,7 @@ func (p *MapRemoteProxy) handleWebSocket(w http.ResponseWriter, r *http.Request)
 	} else {
 		// Direct connection (original behavior)
 		serverHeader := http.Header{}
-		copyHeaders(serverHeader, r.Header)
+		httpx.CopyHeaders(serverHeader, r.Header)
 
 		dialer := *websocket.DefaultDialer
 		var ToConfig *cfg.EndpointConfig
@@ -382,7 +383,7 @@ func (p *MapRemoteProxy) handleWebSocket(w http.ResponseWriter, r *http.Request)
 		negotiatedProtocol := serverConn.Subprotocol()
 		util.DebugLog("%s[WS] Negotiated subprotocol (direct): %s", logPrefix, negotiatedProtocol)
 
-		// We need to pass this to upgrader, but we need a variable accessible outside if/else
+		// We need to pass this to httpx.UtilUpgrader, but we need a variable accessible outside if/else
 		// Refactoring to declare upgradeHeader outside
 	}
 	defer serverConn.Close()
@@ -395,9 +396,9 @@ func (p *MapRemoteProxy) handleWebSocket(w http.ResponseWriter, r *http.Request)
 		upgradeHeader.Set("Sec-WebSocket-Protocol", serverConn.Subprotocol())
 	}
 
-	// Upgrade the client connection using the global upgrader from utils.go
+	// Upgrade the client connection using the global httpx.UtilUpgrader from utils.go
 	// We do this AFTER establishing the backend connection to ensure we don't upgrade if backend is unavailable
-	clientConn, err := upgrader.Upgrade(w, r, upgradeHeader)
+	clientConn, err := httpx.UtilUpgrader.Upgrade(w, r, upgradeHeader)
 	if err != nil {
 		isError = true
 		log.Printf("%s[WS] Failed to upgrade client connection: %v", logPrefix, err)
@@ -487,7 +488,7 @@ func processWebSocketMessage(msg []byte, direction string, rules []cfg.WebSocket
 
 	for _, rule := range rules {
 		if rule.Match != "" {
-			re, err := compileRegex(rule.Match)
+			re, err := httpx.CompileRegex(rule.Match)
 			if err != nil {
 				log.Printf("[WS] %s: Invalid regex in rule: %v", direction, err)
 				continue
@@ -505,7 +506,7 @@ func processWebSocketMessage(msg []byte, direction string, rules []cfg.WebSocket
 				if len(rule.Replace) > 0 {
 					tempBody := string(modifiedMsg)
 					for key, value := range rule.Replace {
-						replaceRe, err := compileRegex(key)
+						replaceRe, err := httpx.CompileRegex(key)
 						if err != nil {
 							log.Printf("[WS] %s: Invalid replace regex: %v", direction, err)
 							continue

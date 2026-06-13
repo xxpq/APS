@@ -9,13 +9,14 @@ import (
 	"path/filepath"
 	"strings"
 	cfg "aps/config"
+	"aps/util/httpx"
 )
 
 func (p *MapRemoteProxy) serveFile(w http.ResponseWriter, r *http.Request, mapping *cfg.Mapping) {
 	toURL := mapping.GetToURL()
 
 	// Resolve file:// URL to local path (supports relative and absolute paths)
-	localPath, err := resolveFileURL(toURL)
+	localPath, err := httpx.ResolveFileURL(toURL)
 	if err != nil {
 		http.Error(w, "Invalid file path", http.StatusInternalServerError)
 		log.Printf("Error resolving file URL %s: %v", toURL, err)
@@ -33,7 +34,7 @@ func (p *MapRemoteProxy) serveFile(w http.ResponseWriter, r *http.Request, mappi
 		localPath = filepath.Join(basePath, requestedPath)
 	}
 
-	localPath = findIndexFile(localPath)
+	localPath = httpx.FindIndexFile(localPath)
 
 	content, err := os.ReadFile(localPath)
 	if err != nil {
@@ -47,7 +48,7 @@ func (p *MapRemoteProxy) serveFile(w http.ResponseWriter, r *http.Request, mappi
 		contentType = "application/octet-stream"
 	}
 	w.Header().Set("Content-Type", contentType)
-	setCorsHeaders(w.Header())
+	httpx.SetCorsHeaders(w.Header())
 	w.WriteHeader(http.StatusOK)
 	w.Write(content)
 }

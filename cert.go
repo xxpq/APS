@@ -21,6 +21,7 @@ import (
 	"golang.org/x/crypto/ocsp"
 
 	cfg "aps/config"
+	"aps/util/httpx"
 )
 
 var (
@@ -247,7 +248,7 @@ func refreshDomainIndexes(config *cfg.Config) {
 
 			for _, rawFromURL := range mappingFromURLs(mapping) {
 				if isACME {
-					domain := strings.ToLower(extractDomain(rawFromURL))
+					domain := strings.ToLower(httpx.ExtractDomain(rawFromURL))
 					if domain != "" {
 						if _, exists := newACMEDomainSet[domain]; !exists {
 							newACMEDomainSet[domain] = struct{}{}

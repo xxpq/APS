@@ -7,6 +7,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"strings"
 	"net/url"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 	"aps/logging"
 	"aps/stats"
 	"aps/tunnel"
+	"aps/util/httpx"
 	"aps/scripting"
 	cfg "aps/config"
 )
@@ -160,7 +162,7 @@ func (p *MapRemoteProxy) createProxyClient(proxyURL string) (*http.Client, error
 func (p *MapRemoteProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Check rate limit (Server level)
 	if p.rateLimiter != nil {
-		clientIP := getClientIP(r)
+		clientIP := httpx.GetClientIP(r)
 
 		// Get server rules
 		serverConfig := p.config.Servers[p.serverName]
@@ -200,7 +202,7 @@ func (p *MapRemoteProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if r.Method == http.MethodOptions {
-		setCorsHeaders(w.Header())
+		httpx.SetCorsHeaders(w.Header())
 		w.WriteHeader(http.StatusOK)
 		log.Printf("[OPTIONS] %s - Handled with CORS headers", r.URL.String())
 		return
@@ -214,4 +216,22 @@ func (p *MapRemoteProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	p.handleHTTP(w, r)
+}
+
+// buildOriginalURL constructs the absolute URL for the request, falling
+// back to the request's scheme + Host when the URL is relative.
+//
+// This is a MapRemoteProxy method that wraps httpx.GetScheme; it lives
+// here rather than in aps/util/httpx because it is specific to the
+// reverse-proxy's URL building (httpx is a generic utility package).
+// Stage 9.5 will move this together with MapRemoteProxy into aps/proxy.
+func (p *MapRemoteProxy) buildOriginalURL(r *http.Request) string {
+	originalURL := r.URL.String()
+
+	if !strings.HasPrefix(originalURL, "http://") && !strings.HasPrefix(originalURL, "https://") {
+		scheme := httpx.GetScheme(r)
+		originalURL = scheme + "://" + r.Host + originalURL
+	}
+
+	return originalURL
 }

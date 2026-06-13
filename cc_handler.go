@@ -4,6 +4,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"aps/util/httpx"
 )
 
 func (p *MapRemoteProxy) carbonCopyRequest(req *http.Request, ccTargets []string) {
@@ -37,7 +38,7 @@ func (p *MapRemoteProxy) carbonCopyRequest(req *http.Request, ccTargets []string
 				log.Printf("[CC] Error creating request for %s: %v", targetURL, err)
 				return
 			}
-			copyHeaders(ccReq.Header, req.Header)
+			httpx.CopyHeaders(ccReq.Header, req.Header)
 
 			resp, err := p.client.Do(ccReq)
 			if err != nil {

@@ -34,6 +34,7 @@ import (
 "aps/util"
 	"aps/tunnel"
 	cfg "aps/config"
+	"aps/util/httpx"
 )
 
 // 对象池 - 用于高并发场景下复用对象，减少 GC 压力
@@ -163,7 +164,7 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 			Intercepted:  isIntercepted,
 			Protocol:     "http",
 			StatusCode:   statusCode,
-			ClientIP:     getClientIP(r),
+			ClientIP:     httpx.GetClientIP(r),
 			URL:          p.buildOriginalURL(r),
 		})
 
@@ -212,12 +213,12 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 			// Only log if LogLevel > 0
 			if logConfig.LogLevel > 0 {
 				// Capture variables for closure
-				logProto := getScheme(r)
+				logProto := httpx.GetScheme(r)
 				logURL := p.buildOriginalURL(r)
 				logMethod := r.Method
 				logStatus := statusCode
 				logDuration := responseTime.Milliseconds()
-				logClientIP := getClientIP(r)
+				logClientIP := httpx.GetClientIP(r)
 				logToken := p.extractToken(r)
 
 				logHeaders := ""
@@ -361,7 +362,7 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 			redirectUrl += separator + "callback=" + url.QueryEscape(originalURL)
 
 			http.Redirect(w, r, redirectUrl, http.StatusFound)
-			log.Printf("[%s] Auth failed, redirecting to %s", getClientIP(r), redirectUrl)
+			log.Printf("[%s] Auth failed, redirecting to %s", httpx.GetClientIP(r), redirectUrl)
 			return
 		} else {
 			// Extract token again for header manipulation
@@ -436,7 +437,7 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Rate Limiting Check (cfg.Mapping and cfg.User level)
 	if p.rateLimiter != nil {
-		clientIP := getClientIP(r)
+		clientIP := httpx.GetClientIP(r)
 		token := p.extractToken(r)
 
 		bindings := make(map[string][]string)
@@ -488,7 +489,7 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Check if client IP is allowed
-	clientIP := getClientIP(r)
+	clientIP := httpx.GetClientIP(r)
 	clientLocation := formatLocationTagHTTP(clientIP)
 	if !firewall.CheckFirewall(clientIP, firewallRule) {
 		isIntercepted = true
@@ -609,7 +610,7 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	if user != nil {
 		limiterKey = username
 	} else {
-		limiterKey = getClientIP(r)
+		limiterKey = httpx.GetClientIP(r)
 	}
 	limiter, err := p.trafficShaper.GetLimiter(limiterKey, rateLimit)
 	if err != nil {
@@ -654,7 +655,7 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 
 		if needsModification {
 			contentType := r.Header.Get("Content-Type")
-			if isTextContentType(contentType) {
+			if httpx.IsTextContentType(contentType) {
 				originalBody, err := io.ReadAll(r.Body)
 				if err != nil {
 					isError = true
@@ -684,9 +685,9 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		if ToConfig != nil {
 			ips := ToConfig.GetIPs()
 			if len(ips) > 0 {
-				selectedIP = pickRandomIP(ips)
+				selectedIP = httpx.PickRandomIP(ips)
 				if selectedIP != "" {
-					newURL, err := replaceHostWithIP(targetURL, selectedIP)
+					newURL, err := httpx.ReplaceHostWithIP(targetURL, selectedIP)
 					if err != nil {
 						log.Printf("[IPS] Error replacing host with IP: %v", err)
 					} else {
@@ -723,7 +724,7 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		proxyReq = proxyReq.WithContext(ctx)
 	}
 
-	copyHeaders(proxyReq.Header, r.Header)
+	httpx.CopyHeaders(proxyReq.Header, r.Header)
 	// Correctly set the Host header. When using IP substitution, the request's Host
 	// header must contain the original domain name for the target server to identify
 	// the correct virtual host.
@@ -748,9 +749,9 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		log.Printf("[IPS] Preserving original Host header: %s", originalParsed.Host)
 	}
 
-	proxyReq.Header.Set("X-Forwarded-For", getClientIP(r))
+	proxyReq.Header.Set("X-Forwarded-For", httpx.GetClientIP(r))
 	proxyReq.Header.Set("X-Forwarded-Host", r.Host)
-	proxyReq.Header.Set("X-Forwarded-Proto", getScheme(r))
+	proxyReq.Header.Set("X-Forwarded-Proto", httpx.GetScheme(r))
 
 	client := &http.Client{
 		Transport: p.client.Transport,
@@ -1063,8 +1064,8 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	copyHeaders(w.Header(), resp.Header)
-	setCorsHeaders(w.Header())
+	httpx.CopyHeaders(w.Header(), resp.Header)
+	httpx.SetCorsHeaders(w.Header())
 
 	if matched && mapping != nil {
 		ToConfig := mapping.GetToConfig()
@@ -1103,7 +1104,7 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	// We read if:
 	// 1. Modification is needed AND it's a text content type AND NOT streaming
 	// 2. Caching is enabled AND it's a cacheable file (regardless of type) AND NOT streaming
-	readBody := !isStreaming && ((needsModification && isTextContentType(contentType)) || shouldCache)
+	readBody := !isStreaming && ((needsModification && httpx.IsTextContentType(contentType)) || shouldCache)
 
 	if isStreaming {
 		util.DebugLog("[STREAM] Detected streaming response (SSE=%v, Chunked=%v). Bypassing buffering.", isSSE, isChunked)
@@ -1112,7 +1113,7 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if readBody {
-		if needsModification && isTextContentType(resp.Header.Get("Content-Type")) {
+		if needsModification && httpx.IsTextContentType(resp.Header.Get("Content-Type")) {
 			body, err = p.modifyResponseBody(resp, mapping)
 			if err != nil {
 				isError = true
@@ -1284,7 +1285,7 @@ func (p *MapRemoteProxy) modifyRequestBody(r *http.Request, mapping *cfg.Mapping
 		return body, nil
 	}
 	if FromConfig.Match != "" {
-		re, err := compileRegex(FromConfig.Match)
+		re, err := httpx.CompileRegex(FromConfig.Match)
 		if err != nil {
 			log.Printf("Invalid match regex in 'from' config: %v", err)
 			return body, nil
@@ -1299,7 +1300,7 @@ func (p *MapRemoteProxy) modifyRequestBody(r *http.Request, mapping *cfg.Mapping
 	if len(FromConfig.Replace) > 0 {
 		tempBody := string(body)
 		for key, value := range FromConfig.Replace {
-			re, err := compileRegex(key)
+			re, err := httpx.CompileRegex(key)
 			if err != nil {
 				log.Printf("Invalid replace regex in 'from' config: %v", err)
 				continue
@@ -1337,7 +1338,7 @@ func (p *MapRemoteProxy) modifyResponseBody(resp *http.Response, mapping *cfg.Ma
 	}
 
 	encodingHeader := resp.Header.Get("Content-Encoding")
-	decodedBody, encoding, decoded, err := decodeBodyWithEncoding(body, encodingHeader)
+	decodedBody, encoding, decoded, err := httpx.DecodeBodyWithEncoding(body, encodingHeader)
 	if err != nil {
 		log.Printf("[RESPONSE DECODE] Failed to decode body (%s): %v", encodingHeader, err)
 	} else if decoded {
@@ -1345,7 +1346,7 @@ func (p *MapRemoteProxy) modifyResponseBody(resp *http.Response, mapping *cfg.Ma
 	}
 
 	if ToConfig.Match != "" {
-		re, err := compileRegex(ToConfig.Match)
+		re, err := httpx.CompileRegex(ToConfig.Match)
 		if err != nil {
 			log.Printf("Invalid match regex in 'to' config: %v", err)
 			return body, nil
@@ -1363,7 +1364,7 @@ func (p *MapRemoteProxy) modifyResponseBody(resp *http.Response, mapping *cfg.Ma
 	if len(ToConfig.Replace) > 0 {
 		tempBody := string(body)
 		for key, value := range ToConfig.Replace {
-			re, err := compileRegex(key)
+			re, err := httpx.CompileRegex(key)
 			if err != nil {
 				log.Printf("Invalid replace regex in 'to' config: %v", err)
 				continue
@@ -1376,7 +1377,7 @@ func (p *MapRemoteProxy) modifyResponseBody(resp *http.Response, mapping *cfg.Ma
 	}
 
 	if decoded && encoding != "" {
-		reencodedBody, err := encodeBodyWithEncoding(body, encoding)
+		reencodedBody, err := httpx.EncodeBodyWithEncoding(body, encoding)
 		if err != nil {
 			log.Printf("[RESPONSE ENCODE] Failed to re-encode body (%s): %v", encoding, err)
 			resp.Header.Del("Content-Encoding")
