@@ -1,4 +1,4 @@
-package main
+package transport
 
 import (
 	"context"
@@ -88,6 +88,13 @@ func (s *RawUDPServer) Start() error {
 	go s.readLoop()
 	go s.cleanupLoop()
 	return nil
+}
+
+// Config returns the server's ListenConfig. Stage 9.4 added this getter
+// so the root-main ServerManager can read .Port without depending on
+// the unexported config field.
+func (s *RawUDPServer) Config() *cfg.ListenConfig {
+	return s.config
 }
 
 // Stop stops the UDP server

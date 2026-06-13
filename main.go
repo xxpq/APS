@@ -31,6 +31,7 @@ import (
 	"aps/server"
 	"aps/stats"
 	"aps/tcptunnel"
+	"aps/transport"
 	"aps/tunnel"
 	"aps/security"
 	tlsx "aps/tls"
@@ -41,8 +42,8 @@ import (
 // ServerManager manages the lifecycle of multiple HTTP servers.
 type ServerManager struct {
 	servers    map[string]*http.Server
-	tcpServers map[string]*RawTCPServer  // Raw TCP servers
-	udpServers map[string]*RawUDPServer  // Raw UDP servers
+	tcpServers map[string]*transport.RawTCPServer  // Raw TCP servers
+	udpServers map[string]*transport.RawUDPServer  // Raw UDP servers
 	muxes      map[string]*server.ConnectionMux // Connection multiplexers
 	mu         sync.Mutex
 	wg         sync.WaitGroup
@@ -81,8 +82,8 @@ func NewServerManager(config *cfg.Config, configFile string, tunnelManager tunne
 
 	return &ServerManager{
 		servers:        make(map[string]*http.Server),
-		tcpServers:     make(map[string]*RawTCPServer),
-		udpServers:     make(map[string]*RawUDPServer),
+		tcpServers:     make(map[string]*transport.RawTCPServer),
+		udpServers:     make(map[string]*transport.RawUDPServer),
 		muxes:          make(map[string]*server.ConnectionMux),
 		config:         config,
 		configFile:     configFile,
@@ -167,7 +168,7 @@ func (sm *ServerManager) Start(name string, serverConfig *cfg.ListenConfig, isAC
 
 	// Start TCP Server if enabled (Type 1 or 4)
 	if serverConfig.Type == cfg.ServerTypeTCP || serverConfig.Type == cfg.ServerTypeTCPUDP {
-		tcpServer := NewRawTCPServer(name, serverConfig, sm.config, serverMappings[name],
+		tcpServer := transport.NewRawTCPServer(name, serverConfig, sm.config, serverMappings[name],
 			sm.tunnelManager, sm.trafficShaper, sm.stats, sm.loggingDB)
 		if err := tcpServer.Start(); err != nil {
 			log.Printf("Failed to start TCP server '%s': %v", name, err)
@@ -185,7 +186,7 @@ func (sm *ServerManager) Start(name string, serverConfig *cfg.ListenConfig, isAC
 
 	// Start UDP Server if enabled (Type 3, 4, or 5)
 	if serverConfig.Type == cfg.ServerTypeUDP || serverConfig.Type == cfg.ServerTypeTCPUDP || serverConfig.Type == cfg.ServerTypeHTTPUDP {
-		udpServer := NewRawUDPServer(name, serverConfig, sm.config, serverMappings[name],
+		udpServer := transport.NewRawUDPServer(name, serverConfig, sm.config, serverMappings[name],
 			sm.tunnelManager, sm.trafficShaper, sm.stats, sm.loggingDB)
 		if err := udpServer.Start(); err != nil {
 			log.Printf("Failed to start UDP server '%s': %v", name, err)
@@ -280,7 +281,7 @@ func (sm *ServerManager) UpdateRawTCPMappings() {
 
 	// Then, for each rawTCP server, also match TCP mappings by port
 	for name, tcpServer := range sm.tcpServers {
-		serverPort := tcpServer.config.Port
+		serverPort := tcpServer.Config().Port
 
 		// Look for TCP mappings without explicit server assignment that match this port
 		for i := range sm.config.Mappings {
@@ -343,7 +344,7 @@ func (sm *ServerManager) UpdateUDPMappings() {
 
 	// Then, for each rawUDP server, also match UDP mappings by port
 	for name, udpServer := range sm.udpServers {
-		serverPort := udpServer.config.Port
+		serverPort := udpServer.Config().Port
 
 		// Look for UDP mappings without explicit server assignment that match this port
 		for i := range sm.config.Mappings {

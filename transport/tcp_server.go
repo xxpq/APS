@@ -1,4 +1,4 @@
-package main
+package transport
 
 import (
 	"context"
@@ -100,6 +100,13 @@ func (s *RawTCPServer) Start() error {
 
 	go s.acceptLoop()
 	return nil
+}
+
+// Config returns the server's ListenConfig. Stage 9.4 added this getter
+// so the root-main ServerManager can read .Port without depending on
+// the unexported config field.
+func (s *RawTCPServer) Config() *cfg.ListenConfig {
+	return s.config
 }
 
 // Stop stops the TCP server
