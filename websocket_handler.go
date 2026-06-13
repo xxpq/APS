@@ -18,6 +18,7 @@ import (
 
 	"aps/stats"
 "aps/util"
+	cfg "aps/config"
 )
 
 func shouldUseLegacyBackendTLS(host string, insecureMode bool) bool {
@@ -86,7 +87,7 @@ func (p *MapRemoteProxy) handleWebSocket(w http.ResponseWriter, r *http.Request)
 	}()
 
 	// Auth check
-	_, user, username := p.checkAuth(r, nil) // Mapping will be checked later
+	_, user, username := p.checkAuth(r, nil) // cfg.Mapping will be checked later
 	if user != nil {
 		userKey = username
 	}
@@ -236,7 +237,7 @@ func (p *MapRemoteProxy) handleWebSocket(w http.ResponseWriter, r *http.Request)
 		// - For invalid/self-signed certificates (insecure mode): use target hostname or IP
 		//   This avoids SNI mismatch errors with certificates like ESXi's "localhost.localdomain"
 		if useTLS {
-			var ToConfig *EndpointConfig
+			var ToConfig *cfg.EndpointConfig
 			if mapping != nil {
 				ToConfig = mapping.GetToConfig()
 			}
@@ -280,7 +281,7 @@ func (p *MapRemoteProxy) handleWebSocket(w http.ResponseWriter, r *http.Request)
 			"Origin",
 			"Sec-WebSocket-Protocol",
 			// "Sec-WebSocket-Extensions", // Handled by Dialer, duplicate not allowed
-			"User-Agent",
+			"cfg.User-Agent",
 			"Accept-Language",
 			"Accept-Encoding",
 			"Cache-Control",
@@ -339,7 +340,7 @@ func (p *MapRemoteProxy) handleWebSocket(w http.ResponseWriter, r *http.Request)
 		copyHeaders(serverHeader, r.Header)
 
 		dialer := *websocket.DefaultDialer
-		var ToConfig *EndpointConfig
+		var ToConfig *cfg.EndpointConfig
 		if mapping != nil {
 			ToConfig = mapping.GetToConfig()
 		}
@@ -395,7 +396,7 @@ func (p *MapRemoteProxy) handleWebSocket(w http.ResponseWriter, r *http.Request)
 
 	util.DebugLog("%s[WS] Client connection upgraded. Starting proxy loops...", logPrefix)
 
-	var wsConfig *WebSocketConfig
+	var wsConfig *cfg.WebSocketConfig
 	if mapping != nil {
 		FromConfig := mapping.GetFromConfig()
 		if FromConfig != nil {
@@ -409,7 +410,7 @@ func (p *MapRemoteProxy) handleWebSocket(w http.ResponseWriter, r *http.Request)
 	// Goroutine to proxy messages from client to server
 	go func() {
 		defer wg.Done()
-		var rules []WebSocketMessageConfig
+		var rules []cfg.WebSocketMessageConfig
 		if wsConfig != nil {
 			rules = wsConfig.InterceptClientMessages
 		}
@@ -422,7 +423,7 @@ func (p *MapRemoteProxy) handleWebSocket(w http.ResponseWriter, r *http.Request)
 	// Goroutine to proxy messages from server to client
 	go func() {
 		defer wg.Done()
-		var rules []WebSocketMessageConfig
+		var rules []cfg.WebSocketMessageConfig
 		if wsConfig != nil {
 			rules = wsConfig.InterceptServerMessages
 		}
@@ -438,7 +439,7 @@ func (p *MapRemoteProxy) handleWebSocket(w http.ResponseWriter, r *http.Request)
 
 // proxyWebSocketMessages reads messages from the source, processes them, and writes to the destination.
 // It returns the total number of bytes successfully written to the destination.
-func proxyWebSocketMessages(src, dest *websocket.Conn, direction string, rules []WebSocketMessageConfig) uint64 {
+func proxyWebSocketMessages(src, dest *websocket.Conn, direction string, rules []cfg.WebSocketMessageConfig) uint64 {
 	var bytesTransferred uint64
 	for {
 		msgType, msg, err := src.ReadMessage()
@@ -464,7 +465,7 @@ func proxyWebSocketMessages(src, dest *websocket.Conn, direction string, rules [
 }
 
 // processWebSocketMessage applies interception rules to a single WebSocket message.
-func processWebSocketMessage(msg []byte, direction string, rules []WebSocketMessageConfig) ([]byte, bool) {
+func processWebSocketMessage(msg []byte, direction string, rules []cfg.WebSocketMessageConfig) ([]byte, bool) {
 	if len(rules) == 0 {
 		return msg, false
 	}

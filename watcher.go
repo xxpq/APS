@@ -7,18 +7,19 @@ import (
 	"time"
 
 	"aps/util"
+	cfg "aps/config"
 )
 
 type ConfigWatcher struct {
 	filename          string
-	config            *Config
+	config            *cfg.Config
 	lastModTime       time.Time
 	stopChan          chan struct{}
 	serverManager     *ServerManager
 	lastTunnelBinding map[string]bool
 }
 
-func NewConfigWatcher(filename string, config *Config, serverManager *ServerManager) (*ConfigWatcher, error) {
+func NewConfigWatcher(filename string, config *cfg.Config, serverManager *ServerManager) (*ConfigWatcher, error) {
 	info, err := os.Stat(filename)
 	if err != nil {
 		return nil, err
@@ -56,7 +57,7 @@ func (w *ConfigWatcher) watch() {
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 
-	util.DebugLog("Config file watcher started for: %s", w.filename)
+	util.DebugLog("cfg.Config file watcher started for: %s", w.filename)
 
 	for {
 		select {
@@ -68,14 +69,14 @@ func (w *ConfigWatcher) watch() {
 			}
 
 			if info.ModTime().After(w.lastModTime) {
-				log.Printf("Config file changed, reloading...")
+				log.Printf("cfg.Config file changed, reloading...")
 				w.lastModTime = info.ModTime()
 
 				oldServers, err := w.config.Reload(w.filename)
 				if err != nil {
 					log.Printf("Error reloading config: %v", err)
 				} else {
-					util.DebugLog("Config reloaded successfully, synchronizing servers...")
+					util.DebugLog("cfg.Config reloaded successfully, synchronizing servers...")
 
 					// Update tunnel manager with new tunnel configurations
 					if w.serverManager != nil && w.serverManager.tunnelManager != nil {
@@ -123,13 +124,13 @@ func (w *ConfigWatcher) watch() {
 			}
 
 		case <-w.stopChan:
-			util.DebugLog("Config file watcher stopped")
+			util.DebugLog("cfg.Config file watcher stopped")
 			return
 		}
 	}
 }
 
-func (w *ConfigWatcher) syncServers(oldServers, newServers map[string]*ListenConfig, isACMEEnabled bool) {
+func (w *ConfigWatcher) syncServers(oldServers, newServers map[string]*cfg.ListenConfig, isACMEEnabled bool) {
 	// Stop servers that are in the old config but not in the new one
 	for name := range oldServers {
 		if _, exists := newServers[name]; !exists {

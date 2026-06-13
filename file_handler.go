@@ -8,9 +8,10 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	cfg "aps/config"
 )
 
-func (p *MapRemoteProxy) serveFile(w http.ResponseWriter, r *http.Request, mapping *Mapping) {
+func (p *MapRemoteProxy) serveFile(w http.ResponseWriter, r *http.Request, mapping *cfg.Mapping) {
 	toURL := mapping.GetToURL()
 
 	// Resolve file:// URL to local path (supports relative and absolute paths)

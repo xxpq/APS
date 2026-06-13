@@ -3,11 +3,12 @@ package main
 import (
 	"encoding/json"
 	"testing"
+	"aps/config"
 )
 
 func TestEndpointPortMappingLocalListenNumber(t *testing.T) {
 	raw := []byte(`{"localListen":8080,"targetEndpoint":"node-b","remoteTarget":"127.0.0.1:80"}`)
-	var mapping EndpointPortMapping
+	var mapping config.EndpointPortMapping
 	if err := json.Unmarshal(raw, &mapping); err != nil {
 		t.Fatalf("unmarshal failed: %v", err)
 	}
@@ -36,7 +37,7 @@ func TestEndpointPortMappingLocalListenStringForms(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			var mapping EndpointPortMapping
+			var mapping config.EndpointPortMapping
 			if err := json.Unmarshal([]byte(tc.raw), &mapping); err != nil {
 				t.Fatalf("unmarshal failed: %v", err)
 			}
@@ -49,7 +50,7 @@ func TestEndpointPortMappingLocalListenStringForms(t *testing.T) {
 
 func TestEndpointPortMappingRequiresLocalListen(t *testing.T) {
 	raw := []byte(`{"localPort":8080,"targetEndpoint":"node-b","remoteTarget":"127.0.0.1:80"}`)
-	var mapping EndpointPortMapping
+	var mapping config.EndpointPortMapping
 	if err := json.Unmarshal(raw, &mapping); err == nil {
 		t.Fatal("expected unmarshal to fail when localListen is missing")
 	}

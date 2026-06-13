@@ -1,20 +1,19 @@
-// Root config.go (Stage 9.1a)
+// Root config.go (Stage 9.1b)
 //
-// Most type definitions and their methods now live in the aps/config
+// All type definitions and their methods now live in the aps/config
 // sub-package (see config/types.go, config/process.go, config/endpoint_aps.go,
 // config/helpers.go). This file keeps a thin compatibility layer for
 // root main:
 //
-//   1. Go type aliases (so existing call-sites that reference the bare
-//      names like `Config`, `Mapping`, `*ListenConfig` compile unchanged).
-//   2. Wrapper functions for the few helpers that the root main's
-//      http_handler.go / proxy.go / webserver.go / main.go still call
-//      by their old unexported names (parseStringOrArray, maskToken).
-//   3. LoadConfig wrapper that delegates to config.LoadConfig and also
+//   1. LoadConfig wrapper that delegates to config.LoadConfig and also
 //      sets the global debug flag (Stage 8: util.IsDebugMode is canonical).
-//   4. An init() that wires the root's *ProxyManager into
+//   2. An init() that wires the root's *ProxyManager into
 //      aps/config.NewProxyManagerFn so processConfig can resolve
 //      mapping proxy lists without depending on the concrete type.
+//   3. parseStringOrArray, stringPtr, maskToken, normalizeAPSConfiguredGatewayAddresses
+//      wrappers so root-main call-sites (http_handler.go, proxy.go,
+//      webserver.go, config_gateway_defaults_test.go) compile without
+//      forcing them to import aps/config directly.
 package main
 
 import (
@@ -36,69 +35,11 @@ func init() {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Type aliases
-// ---------------------------------------------------------------------------
-
-type (
-	Config                 = config.Config
-	ListenConfig           = config.ListenConfig
-	ServerAuth             = config.ServerAuth
-	CertFiles              = config.CertFiles
-	Mapping                = config.Mapping
-	ViaConfig              = config.ViaConfig
-	RuleAuth               = config.RuleAuth
-	EndpointConfig         = config.EndpointConfig
-	EndpointConfig_APS     = config.EndpointConfig_APS
-	EndpointPortMapping    = config.EndpointPortMapping
-	EndpointSSHConfig      = config.EndpointSSHConfig
-	EndpointSSHUser        = config.EndpointSSHUser
-	EndpointSSHKeyValues   = config.EndpointSSHKeyValues
-	User                   = config.User
-	Group                  = config.Group
-	ProxyConfig            = config.ProxyConfig
-	TunnelConfig           = config.TunnelConfig
-	AuthConfig             = config.AuthConfig
-	AuthProviderConfig     = config.AuthProviderConfig
-	TokenLocation          = config.TokenLocation
-	StaticCacheConfig      = config.StaticCacheConfig
-	CacheSizeLimit         = config.CacheSizeLimit
-	ScriptingConfig        = config.ScriptingConfig
-	P12Config              = config.P12Config
-	ConnectionPolicies     = config.ConnectionPolicies
-	TrafficPolicies        = config.TrafficPolicies
-	GRPCConfig             = config.GRPCConfig
-	RestToGrpcConfig       = config.RestToGrpcConfig
-	WebSocketConfig        = config.WebSocketConfig
-	WebSocketMessageConfig = config.WebSocketMessageConfig
-	FinalPolicies          = config.FinalPolicies
-	ProxyResolver          = config.ProxyResolver
-)
-
-// ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
-
-const (
-	ServerTypeTCP             = config.ServerTypeTCP
-	ServerTypeHTTP            = config.ServerTypeHTTP
-	ServerTypeUDP             = config.ServerTypeUDP
-	ServerTypeTCPUDP          = config.ServerTypeTCPUDP
-	ServerTypeHTTPUDP         = config.ServerTypeHTTPUDP
-	ServerTypeHTTP3           = config.ServerTypeHTTP3
-	DefaultGatewayDiscoverPort = config.DefaultGatewayDiscoverPort
-)
-
-// ---------------------------------------------------------------------------
-// Wrappers for the helpers still used by root-main call-sites
-// (http_handler.go, proxy.go, webserver.go, main.go).
-// ---------------------------------------------------------------------------
-
 // LoadConfig reads the JSON file, processes it, and sets the global
 // debug flag. The actual loading + processing happens in
 // aps/config.LoadConfig; this wrapper additionally updates the root
 // IsDebugMode var and util.IsDebugMode.
-func LoadConfig(filename string) (*Config, error) {
+func LoadConfig(filename string) (*config.Config, error) {
 	cfg, err := config.LoadConfig(filename)
 	if err != nil {
 		return nil, err

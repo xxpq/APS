@@ -7,6 +7,7 @@ import (
 
 	"aps/firewall"
 	"aps/stats"
+	"aps/config"
 )
 
 // Mock connection to simulate client
@@ -32,7 +33,7 @@ func (m *mockConn) RemoteAddr() net.Addr {
 
 func TestRawTCPServer_FirewallBlock(t *testing.T) {
 	// Setup config with firewall rule
-	appConfig := &Config{
+	appConfig := &config.Config{
 		Firewalls: map[string]*firewall.FirewallRule{
 			"block_rule": {
 				Block: &firewall.FilterRules{
@@ -46,7 +47,7 @@ func TestRawTCPServer_FirewallBlock(t *testing.T) {
 	// Parse the rule
 	firewall.ParseFirewallRule(appConfig.Firewalls["block_rule"])
 
-	serverConfig := &ListenConfig{
+	serverConfig := &config.ListenConfig{
 		Firewall: "block_rule",
 		Port:     8080,
 	}
@@ -59,7 +60,7 @@ func TestRawTCPServer_FirewallBlock(t *testing.T) {
 	}
 
 	// Add a mapping that would match if firewall didn't block
-	server.mappings = []*Mapping{
+	server.mappings = []*config.Mapping{
 		{
 			ServerNames: []string{"test_server"},
 			From:        "tcp://:8080",

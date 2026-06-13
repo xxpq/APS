@@ -20,20 +20,21 @@ import (
 	"aps/stats"
 "aps/util"
 	"aps/tunnel"
+	cfg "aps/config"
 )
 
 // RawTCPServer manages a raw TCP server for forwarding connections
 type RawTCPServer struct {
 	name          string
-	config        *ListenConfig
-	appConfig     *Config
+	config        *cfg.ListenConfig
+	appConfig     *cfg.Config
 	listener      net.Listener
 	tunnelManager tunnel.TunnelManagerInterface
 	trafficShaper *stats.TrafficShaper
 	stats         *stats.StatsCollector
 	loggingDB     *logging.LoggingDB
 	// dataStore     *DataStore // Removed, no longer needed
-	mappings []*Mapping
+	mappings []*cfg.Mapping
 	mu       sync.Mutex
 	closed   bool
 }
@@ -65,7 +66,7 @@ func formatLocationTag(ipWithPort string) string {
 }
 
 // NewRawTCPServer creates a new raw TCP server
-func NewRawTCPServer(name string, config *ListenConfig, appConfig *Config, mappings []*Mapping,
+func NewRawTCPServer(name string, config *cfg.ListenConfig, appConfig *cfg.Config, mappings []*cfg.Mapping,
 	tunnelManager tunnel.TunnelManagerInterface, trafficShaper *stats.TrafficShaper, stats *stats.StatsCollector, loggingDB *logging.LoggingDB) *RawTCPServer {
 	return &RawTCPServer{
 		name:          name,
@@ -117,7 +118,7 @@ func (s *RawTCPServer) Stop() error {
 }
 
 // UpdateMappings updates the mappings for this server (for config hot reload)
-func (s *RawTCPServer) UpdateMappings(mappings []*Mapping) {
+func (s *RawTCPServer) UpdateMappings(mappings []*cfg.Mapping) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.mappings = mappings
@@ -190,8 +191,8 @@ func (s *RawTCPServer) handleConnection(clientConn net.Conn) {
 
 		// Request logging (async)
 		if s.loggingDB != nil {
-			var tunnelConfig *TunnelConfig
-			var proxyConfig *ProxyConfig
+			var tunnelConfig *cfg.TunnelConfig
+			var proxyConfig *cfg.ProxyConfig
 			// Attempt to resolve tunnel/proxy configs if keys are set
 			if tunnelKey != "" && s.appConfig.Tunnels != nil {
 				tunnelConfig = s.appConfig.Tunnels[tunnelKey]
@@ -358,7 +359,7 @@ func (s *RawTCPServer) handleConnection(clientConn net.Conn) {
 }
 
 // findMapping finds a matching mapping for this TCP server
-func (s *RawTCPServer) findMapping() *Mapping {
+func (s *RawTCPServer) findMapping() *cfg.Mapping {
 	util.DebugLog("[RAW TCP] findMapping: Server '%s' (port %d) has %d mappings", s.name, s.config.Port, len(s.mappings))
 
 	// First, try to find a mapping explicitly assigned to this server
@@ -405,7 +406,7 @@ func (s *RawTCPServer) findMapping() *Mapping {
 			continue
 		}
 
-		util.DebugLog("[RAW TCP] findMapping: Mapping %d port %d vs server port %d", i, mappingPort, serverPort)
+		util.DebugLog("[RAW TCP] findMapping: cfg.Mapping %d port %d vs server port %d", i, mappingPort, serverPort)
 		// If ports match, use this mapping
 		if mappingPort == serverPort {
 			// Logging moved to caller after firewall checks
@@ -467,7 +468,7 @@ func (s *RawTCPServer) forwardDirect(clientConn net.Conn, targetHost string, tar
 }
 
 // forwardViaProxy forwards the connection via HTTP CONNECT proxy
-func (s *RawTCPServer) forwardViaProxy(clientConn net.Conn, mapping *Mapping, targetHost string, targetPort int, bytesSent, bytesRecv *uint64) {
+func (s *RawTCPServer) forwardViaProxy(clientConn net.Conn, mapping *cfg.Mapping, targetHost string, targetPort int, bytesSent, bytesRecv *uint64) {
 	proxyURL := mapping.ResolvedProxy.GetRandomProxy()
 	if proxyURL == "" {
 		log.Printf("[RAW TCP] No proxy available")
@@ -538,7 +539,7 @@ func (s *RawTCPServer) forwardViaProxy(clientConn net.Conn, mapping *Mapping, ta
 }
 
 // forwardViaTunnel forwards the connection via the tunnel
-func (s *RawTCPServer) forwardViaTunnel(clientConn net.Conn, mapping *Mapping, targetHost string, targetPort int, useTLS bool, clientAddr string, bytesSent, bytesRecv *uint64) {
+func (s *RawTCPServer) forwardViaTunnel(clientConn net.Conn, mapping *cfg.Mapping, targetHost string, targetPort int, useTLS bool, clientAddr string, bytesSent, bytesRecv *uint64) {
 	clientLocation := formatLocationTag(clientAddr)
 	log.Printf("%s[RAW TCP] Forwarding to %s:%d via tunnel (client: %s)", clientLocation, targetHost, targetPort, clientAddr)
 
@@ -591,7 +592,7 @@ func (s *RawTCPServer) sendProxyConnectViaDataPlane(ctx context.Context, tunnelN
 }
 
 // getTunnelAndEndpoint gets the tunnel and endpoint names from mapping configuration
-func (s *RawTCPServer) getTunnelAndEndpoint(mapping *Mapping) (tunnelName, endpointName string, err error) {
+func (s *RawTCPServer) getTunnelAndEndpoint(mapping *cfg.Mapping) (tunnelName, endpointName string, err error) {
 	// First try to get from tunnel manager using endpoint names
 	if len(mapping.EndpointNames) > 0 {
 		// Pick a random endpoint name

@@ -20,6 +20,7 @@ import (
 	"golang.org/x/crypto/acme/autocert"
 	"golang.org/x/crypto/ocsp"
 
+	cfg "aps/config"
 )
 
 var (
@@ -32,7 +33,7 @@ var (
 	// Fast-reject domain index shared with mapping.go.
 	mappingDomainSet      = make(map[string]struct{})
 	mappingHasDynamicHost bool
-	mappingDomainConfig   *Config
+	mappingDomainConfig   *cfg.Config
 )
 
 const (
@@ -203,7 +204,7 @@ func EnsureOCSPStaple(cert *tls.Certificate, contextLabel string) {
 // the server's own TLS via InitACME/GetACMETLSConfig.
 
 // InitACME initializes or refreshes the ACME certificate manager.
-func InitACME(config *Config) {
+func InitACME(config *cfg.Config) {
 	refreshDomainIndexes(config)
 
 	acmeDomainsMutex.RLock()
@@ -233,7 +234,7 @@ func InitACME(config *Config) {
 }
 
 // refreshDomainIndexes rebuilds ACME whitelist and request-mapping fast-reject domains in one pass.
-func refreshDomainIndexes(config *Config) {
+func refreshDomainIndexes(config *cfg.Config) {
 	newACMEDomains := make([]string, 0)
 	newACMEDomainSet := make(map[string]struct{})
 	newMappingDomainSet := make(map[string]struct{})
@@ -279,7 +280,7 @@ func refreshDomainIndexes(config *Config) {
 	acmeDomainsMutex.Unlock()
 }
 
-func mappingUsesACMEServer(config *Config, mapping *Mapping) bool {
+func mappingUsesACMEServer(config *cfg.Config, mapping *cfg.Mapping) bool {
 	for _, serverName := range mapping.ServerNames {
 		if server, ok := config.Servers[serverName]; ok {
 			if certStr, ok := server.Cert.(string); ok && certStr == "acme" {
@@ -290,7 +291,7 @@ func mappingUsesACMEServer(config *Config, mapping *Mapping) bool {
 	return false
 }
 
-func mappingFromURLs(mapping *Mapping) []string {
+func mappingFromURLs(mapping *cfg.Mapping) []string {
 	fromConfig := mapping.GetFromConfig()
 	if fromConfig != nil && len(fromConfig.URLs) > 0 {
 		return fromConfig.URLs
@@ -354,7 +355,7 @@ func containsURLScheme(rawURL string) bool {
 		strings.Contains(lower, "*://")
 }
 
-func shouldFastRejectByDomain(config *Config, host string) bool {
+func shouldFastRejectByDomain(config *cfg.Config, host string) bool {
 	if config == nil || host == "" {
 		return false
 	}

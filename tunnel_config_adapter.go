@@ -2,13 +2,14 @@ package main
 
 import (
 	"aps/tcptunnel"
+	cfg "aps/config"
 )
 
-// buildTCPTunnelConfig projects the main package's monolithic *Config into the
+// buildTCPTunnelConfig projects the main package's monolithic *cfg.Config into the
 // minimal tcptunnel.Config projection that the tunnel manager and TCP server
 // need. Adding new fields here is the integration point for any additional
 // configuration the tunnel server needs to read.
-func buildTCPTunnelConfig(c *Config) *tcptunnel.Config {
+func buildTCPTunnelConfig(c *cfg.Config) *tcptunnel.Config {
 	if c == nil {
 		return nil
 	}

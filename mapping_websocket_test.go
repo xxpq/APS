@@ -5,19 +5,20 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"testing"
+	"aps/config"
 )
 
-func makeTestMapping(serverName, fromURL, toURL string) Mapping {
+func makeTestMapping(serverName, fromURL, toURL string) config.Mapping {
 	parsedFrom, _ := url.Parse(fromURL)
 	parsedTo, _ := url.Parse(toURL)
 
-	return Mapping{
+	return config.Mapping{
 		ServerNames: []string{serverName},
-		FromConfig: &EndpointConfig{
+		FromConfig: &config.EndpointConfig{
 			URLs:       []string{fromURL},
 			ParsedURLs: []*url.URL{parsedFrom},
 		},
-		ToConfig: &EndpointConfig{
+		ToConfig: &config.EndpointConfig{
 			URLs:       []string{toURL},
 			ParsedURLs: []*url.URL{parsedTo},
 		},
@@ -28,8 +29,8 @@ func TestMapRequest_WSSMappingRequiresUpgrade(t *testing.T) {
 	globalRouteCache.clear()
 
 	const serverName = "test_server"
-	cfg := &Config{
-		Mappings: []Mapping{
+	cfg := &config.Config{
+		Mappings: []config.Mapping{
 			makeTestMapping(serverName, "wss://vps.sucdri.p-q.co/*", "wss://10.1.105.33/*"),
 		},
 	}
@@ -53,8 +54,8 @@ func TestMapRequest_WSSMappingMatchesWebSocketUpgrade(t *testing.T) {
 	globalRouteCache.clear()
 
 	const serverName = "test_server"
-	cfg := &Config{
-		Mappings: []Mapping{
+	cfg := &config.Config{
+		Mappings: []config.Mapping{
 			makeTestMapping(serverName, "wss://vps.sucdri.p-q.co/*", "wss://10.1.105.33/*"),
 		},
 	}
@@ -80,8 +81,8 @@ func TestMapRequest_CacheSeparatesWebSocketAndPlainHTTP(t *testing.T) {
 	globalRouteCache.clear()
 
 	const serverName = "test_server"
-	cfg := &Config{
-		Mappings: []Mapping{
+	cfg := &config.Config{
+		Mappings: []config.Mapping{
 			makeTestMapping(serverName, "wss://vps.sucdri.p-q.co/*", "wss://10.1.105.33/*"),
 		},
 	}

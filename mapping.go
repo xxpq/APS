@@ -9,12 +9,13 @@ import (
 	"time"
 
 	"aps/util"
+	cfg "aps/config"
 )
 
 // routeCacheEntry represents a cached route match result
 type routeCacheEntry struct {
 	finalURL       string
-	mapping        *Mapping
+	mapping        *cfg.Mapping
 	matchedFromURL string
 	expireAt       time.Time
 }
@@ -54,7 +55,7 @@ func (c *routeCache) get(key string) (*routeCacheEntry, bool) {
 }
 
 // set stores a cache entry
-func (c *routeCache) set(key string, finalURL string, mapping *Mapping, matchedFromURL string) {
+func (c *routeCache) set(key string, finalURL string, mapping *cfg.Mapping, matchedFromURL string) {
 	c.mu.Lock()
 	c.entries[key] = &routeCacheEntry{
 		finalURL:       finalURL,
@@ -91,7 +92,7 @@ func (c *routeCache) size() int {
 	return len(c.entries)
 }
 
-func (p *MapRemoteProxy) mapRequest(r *http.Request) (string, bool, *Mapping, string) {
+func (p *MapRemoteProxy) mapRequest(r *http.Request) (string, bool, *cfg.Mapping, string) {
 	originalURL := p.buildOriginalURL(r)
 	isWebSocketUpgrade := isWebSocketUpgradeRequest(r)
 
@@ -113,7 +114,7 @@ func (p *MapRemoteProxy) mapRequest(r *http.Request) (string, bool, *Mapping, st
 	// Cache miss - perform full matching
 	mappings := p.config.GetMappings()
 
-	var bestMatch *Mapping
+	var bestMatch *cfg.Mapping
 	var bestScore = -1
 	var finalURL string
 	var matchedFromURL string
@@ -162,7 +163,7 @@ func (p *MapRemoteProxy) shouldFastRejectRequestByDomain(originalURL string) boo
 	return shouldFastRejectByDomain(p.config, host)
 }
 
-func (p *MapRemoteProxy) calculateMatchScore(mapping *Mapping, r *http.Request, originalURL string, isWebSocketUpgrade bool) (int, string, string) {
+func (p *MapRemoteProxy) calculateMatchScore(mapping *cfg.Mapping, r *http.Request, originalURL string, isWebSocketUpgrade bool) (int, string, string) {
 	// Check if the mapping is for the current server
 	isForThisServer := false
 	for _, name := range mapping.ServerNames {

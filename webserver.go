@@ -29,6 +29,7 @@ import (
 	"aps/stats"
 	"aps/tunnel"
 	tlsx "aps/tls"
+	cfg "aps/config"
 )
 
 const apsTLSPinTokenPrefix = "apspt1."
@@ -109,7 +110,7 @@ var AdminSessions = &SessionStore{sessions: make(map[string]Session)}
 
 // AdminHandlers contains the HTTP handlers for the admin panel.
 type AdminHandlers struct {
-	config        *Config
+	config        *cfg.Config
 	configPath    string
 	serverName    string
 	configMux     sync.RWMutex
@@ -124,7 +125,7 @@ type AdminHandlers struct {
 }
 
 // NewAdminHandlers creates a new AdminHandlers instance.
-func NewAdminHandlers(config *Config, configPath string, serverName string, statsCollector *stats.StatsCollector, statsDB *stats.StatsDB, loggingDB *logging.LoggingDB, logBroadcaster *logging.LogBroadcaster, rateLimiter *stats.RateLimitEngine) *AdminHandlers {
+func NewAdminHandlers(config *cfg.Config, configPath string, serverName string, statsCollector *stats.StatsCollector, statsDB *stats.StatsDB, loggingDB *logging.LoggingDB, logBroadcaster *logging.LogBroadcaster, rateLimiter *stats.RateLimitEngine) *AdminHandlers {
 	return &AdminHandlers{
 		config:         config,
 		configPath:     configPath,
@@ -286,7 +287,7 @@ func (h *AdminHandlers) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !user.Admin {
-		http.Error(w, "User is not an administrator", http.StatusForbidden)
+		http.Error(w, "cfg.User is not an administrator", http.StatusForbidden)
 		return
 	}
 
@@ -453,7 +454,7 @@ func extractToken(r *http.Request) string {
 }
 
 // isAdminRequest checks admin via session token (cookie) or user.token (Bearer) with admin=true
-func isAdminRequest(r *http.Request, config *Config) bool {
+func isAdminRequest(r *http.Request, config *cfg.Config) bool {
 	// Prefer Authorization: Bearer <token>
 	token := extractToken(r)
 	if token == "" {
@@ -463,7 +464,7 @@ func isAdminRequest(r *http.Request, config *Config) bool {
 	if sess, ok := AdminSessions.Get(token); ok {
 		return sess.Admin && sess.Expires.After(time.Now())
 	}
-	// Config-defined API tokens
+	// cfg.Config-defined API tokens
 	if config != nil && config.Auth != nil && config.Auth.Users != nil {
 		for _, u := range config.Auth.Users {
 			if u != nil && u.Token == token && u.Admin {
@@ -538,7 +539,7 @@ func (h *AdminHandlers) setConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var newConfig Config
+	var newConfig cfg.Config
 	if err := json.NewDecoder(r.Body).Decode(&newConfig); err != nil {
 		http.Error(w, "Invalid config format", http.StatusBadRequest)
 		return
@@ -642,7 +643,7 @@ func appendNormalizedFromEntries(dst []string, seen map[string]struct{}, raw int
 	}
 }
 
-func mappingFromEntries(mapping Mapping) ([]string, error) {
+func mappingFromEntries(mapping cfg.Mapping) ([]string, error) {
 	seen := make(map[string]struct{})
 	entries := make([]string, 0)
 
@@ -658,10 +659,10 @@ func mappingFromEntries(mapping Mapping) ([]string, error) {
 		if urlsVal, ok := v["urls"]; ok {
 			entries = appendNormalizedFromEntries(entries, seen, urlsVal)
 		}
-	case EndpointConfig:
+	case cfg.EndpointConfig:
 		entries = appendNormalizedFromEntries(entries, seen, v.URL)
 		entries = appendNormalizedFromEntries(entries, seen, v.URLs)
-	case *EndpointConfig:
+	case *cfg.EndpointConfig:
 		if v != nil {
 			entries = appendNormalizedFromEntries(entries, seen, v.URL)
 			entries = appendNormalizedFromEntries(entries, seen, v.URLs)
@@ -673,7 +674,7 @@ func mappingFromEntries(mapping Mapping) ([]string, error) {
 	return entries, nil
 }
 
-func findConflictingFromEntry(mappings []Mapping, target Mapping, ignoreIndex int) (int, string, error) {
+func findConflictingFromEntry(mappings []cfg.Mapping, target cfg.Mapping, ignoreIndex int) (int, string, error) {
 	targetEntries, err := mappingFromEntries(target)
 	if err != nil {
 		return -1, "", err
@@ -736,8 +737,8 @@ func (h *AdminHandlers) handleUsers(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(resp)
 	case http.MethodPost:
 		var req struct {
-			Name string `json:"name"`
-			User User   `json:"user"`
+			Name string     `json:"name"`
+			User cfg.User `json:"user"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" {
 			http.Error(w, "Invalid payload", http.StatusBadRequest)
@@ -746,10 +747,10 @@ func (h *AdminHandlers) handleUsers(w http.ResponseWriter, r *http.Request) {
 		h.configMux.Lock()
 		defer h.configMux.Unlock()
 		if h.config.Auth == nil {
-			h.config.Auth = &AuthConfig{}
+			h.config.Auth = &cfg.AuthConfig{}
 		}
 		if h.config.Auth.Users == nil {
-			h.config.Auth.Users = make(map[string]*User)
+			h.config.Auth.Users = make(map[string]*cfg.User)
 		}
 		// 覆盖或新增
 		u := req.User
@@ -801,7 +802,7 @@ func (h *AdminHandlers) handleProxies(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		h.configMux.RLock()
 		defer h.configMux.RUnlock()
-		resp := make(map[string]*ProxyConfig)
+		resp := make(map[string]*cfg.ProxyConfig)
 		if h.config.Proxies != nil {
 			for name, p := range h.config.Proxies {
 				resp[name] = p
@@ -812,7 +813,7 @@ func (h *AdminHandlers) handleProxies(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPost:
 		var req struct {
 			Name  string      `json:"name"`
-			Proxy ProxyConfig `json:"proxy"`
+			Proxy cfg.ProxyConfig `json:"proxy"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" {
 			http.Error(w, "Invalid payload", http.StatusBadRequest)
@@ -821,7 +822,7 @@ func (h *AdminHandlers) handleProxies(w http.ResponseWriter, r *http.Request) {
 		h.configMux.Lock()
 		defer h.configMux.Unlock()
 		if h.config.Proxies == nil {
-			h.config.Proxies = make(map[string]*ProxyConfig)
+			h.config.Proxies = make(map[string]*cfg.ProxyConfig)
 		}
 		p := req.Proxy
 		h.config.Proxies[req.Name] = &p
@@ -863,7 +864,7 @@ func (h *AdminHandlers) handleTunnels(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		h.configMux.RLock()
 		defer h.configMux.RUnlock()
-		resp := make(map[string]*TunnelConfig)
+		resp := make(map[string]*cfg.TunnelConfig)
 		if h.config.Tunnels != nil {
 			for name, t := range h.config.Tunnels {
 				resp[name] = t
@@ -874,7 +875,7 @@ func (h *AdminHandlers) handleTunnels(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPost:
 		var req struct {
 			Name   string       `json:"name"`
-			Tunnel TunnelConfig `json:"tunnel"`
+			Tunnel cfg.TunnelConfig `json:"tunnel"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" {
 			http.Error(w, "Invalid payload", http.StatusBadRequest)
@@ -883,7 +884,7 @@ func (h *AdminHandlers) handleTunnels(w http.ResponseWriter, r *http.Request) {
 		h.configMux.Lock()
 		defer h.configMux.Unlock()
 		if h.config.Tunnels == nil {
-			h.config.Tunnels = make(map[string]*TunnelConfig)
+			h.config.Tunnels = make(map[string]*cfg.TunnelConfig)
 		}
 		t := req.Tunnel
 		// 如果是更新已存在隧道,且password为空,则保留原密码
@@ -1148,7 +1149,7 @@ func (h *AdminHandlers) handleEndpointConfigs(w http.ResponseWriter, r *http.Req
 	case http.MethodGet:
 		h.configMux.RLock()
 		defer h.configMux.RUnlock()
-		resp := make(map[string]*EndpointConfig_APS)
+		resp := make(map[string]*cfg.EndpointConfig_APS)
 		if h.config.Endpoints != nil {
 			for name, ep := range h.config.Endpoints {
 				resp[name] = ep
@@ -1160,7 +1161,7 @@ func (h *AdminHandlers) handleEndpointConfigs(w http.ResponseWriter, r *http.Req
 	case http.MethodPost:
 		var req struct {
 			Name     string             `json:"name"`
-			Endpoint EndpointConfig_APS `json:"endpoint"`
+			Endpoint cfg.EndpointConfig_APS `json:"endpoint"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" {
 			http.Error(w, "Invalid payload", http.StatusBadRequest)
@@ -1168,7 +1169,7 @@ func (h *AdminHandlers) handleEndpointConfigs(w http.ResponseWriter, r *http.Req
 		}
 		h.configMux.Lock()
 		if h.config.Endpoints == nil {
-			h.config.Endpoints = make(map[string]*EndpointConfig_APS)
+			h.config.Endpoints = make(map[string]*cfg.EndpointConfig_APS)
 		}
 		ep := req.Endpoint
 		// If updating existing endpoint and password is empty, preserve original password
@@ -1228,7 +1229,7 @@ func (h *AdminHandlers) handleEndpointConfigs(w http.ResponseWriter, r *http.Req
 
 // pushConfigToEndpoint sends a config update message to a connected endpoint.
 // It always issues a fresh one-time session credential instead of pushing static passwords.
-func (h *AdminHandlers) pushConfigToEndpoint(configID, tunnelName, endpointName string, config *EndpointConfig_APS) {
+func (h *AdminHandlers) pushConfigToEndpoint(configID, tunnelName, endpointName string, config *cfg.EndpointConfig_APS) {
 	if h.tunnelManager == nil {
 		log.Println("[CONFIG] Cannot push config: tunnel manager not set")
 		return
@@ -1276,7 +1277,7 @@ func (h *AdminHandlers) pushConfigToEndpoint(configID, tunnelName, endpointName 
 		return
 	}
 
-	log.Printf("[CONFIG] Config update pushed to endpoint %s/%s", tunnelName, endpointName)
+	log.Printf("[CONFIG] cfg.Config update pushed to endpoint %s/%s", tunnelName, endpointName)
 }
 
 // ===== 服务器管理 =====
@@ -1289,7 +1290,7 @@ func (h *AdminHandlers) handleServers(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		h.configMux.RLock()
 		defer h.configMux.RUnlock()
-		resp := make(map[string]*ListenConfig)
+		resp := make(map[string]*cfg.ListenConfig)
 		if h.config.Servers != nil {
 			for name, s := range h.config.Servers {
 				resp[name] = s
@@ -1300,7 +1301,7 @@ func (h *AdminHandlers) handleServers(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPost:
 		var req struct {
 			Name   string       `json:"name"`
-			Server ListenConfig `json:"server"`
+			Server cfg.ListenConfig `json:"server"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" {
 			http.Error(w, "Invalid payload", http.StatusBadRequest)
@@ -1315,12 +1316,12 @@ func (h *AdminHandlers) handleServers(w http.ResponseWriter, r *http.Request) {
 
 		// Read current config from memory to build new file content
 		if h.config.Servers == nil {
-			h.config.Servers = make(map[string]*ListenConfig)
+			h.config.Servers = make(map[string]*cfg.ListenConfig)
 		}
 		s := req.Server
 
 		// Create a temporary copy for saving to file
-		updatedServers := make(map[string]*ListenConfig)
+		updatedServers := make(map[string]*cfg.ListenConfig)
 		for name, srv := range h.config.Servers {
 			updatedServers[name] = srv
 		}
@@ -1383,8 +1384,8 @@ func (h *AdminHandlers) handleRules(w http.ResponseWriter, r *http.Request) {
 
 		// Try to decode as wrapped format first
 		var req struct {
-			Index   *int    `json:"index,omitempty"`
-			Mapping Mapping `json:"mapping"`
+			Index   *int          `json:"index,omitempty"`
+			Mapping cfg.Mapping `json:"mapping"`
 		}
 
 		// Check if "mapping" key exists in JSON
@@ -1397,7 +1398,7 @@ func (h *AdminHandlers) handleRules(w http.ResponseWriter, r *http.Request) {
 		h.configMux.Lock()
 		defer h.configMux.Unlock()
 
-		var mapping Mapping
+		var mapping cfg.Mapping
 		var index *int
 
 		if _, hasMapping := rawMap["mapping"]; hasMapping {
@@ -1417,7 +1418,7 @@ func (h *AdminHandlers) handleRules(w http.ResponseWriter, r *http.Request) {
 					index = &idx
 				}
 			}
-			// Unmarshal entire body as Mapping
+			// Unmarshal entire body as cfg.Mapping
 			if err := json.Unmarshal(body, &mapping); err != nil {
 				http.Error(w, "Invalid mapping format", http.StatusBadRequest)
 				return
@@ -1559,7 +1560,7 @@ func (h *AdminHandlers) handleAuthProviders(w http.ResponseWriter, r *http.Reque
 	case http.MethodGet:
 		h.configMux.RLock()
 		defer h.configMux.RUnlock()
-		resp := make(map[string]*AuthProviderConfig)
+		resp := make(map[string]*cfg.AuthProviderConfig)
 		if h.config.AuthProviders != nil {
 			for name, ap := range h.config.AuthProviders {
 				resp[name] = ap
@@ -1570,7 +1571,7 @@ func (h *AdminHandlers) handleAuthProviders(w http.ResponseWriter, r *http.Reque
 	case http.MethodPost:
 		var req struct {
 			Name         string             `json:"name"`
-			AuthProvider AuthProviderConfig `json:"authProvider"`
+			AuthProvider cfg.AuthProviderConfig `json:"authProvider"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" {
 			http.Error(w, "Invalid payload", http.StatusBadRequest)
@@ -1579,7 +1580,7 @@ func (h *AdminHandlers) handleAuthProviders(w http.ResponseWriter, r *http.Reque
 		h.configMux.Lock()
 		defer h.configMux.Unlock()
 		if h.config.AuthProviders == nil {
-			h.config.AuthProviders = make(map[string]*AuthProviderConfig)
+			h.config.AuthProviders = make(map[string]*cfg.AuthProviderConfig)
 		}
 		ap := req.AuthProvider
 		h.config.AuthProviders[req.Name] = &ap

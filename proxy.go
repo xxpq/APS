@@ -15,10 +15,11 @@ import (
 	"aps/stats"
 	"aps/tunnel"
 	"aps/scripting"
+	cfg "aps/config"
 )
 
 type MapRemoteProxy struct {
-	config *Config
+	config *cfg.Config
 	// dataStore          *DataStore // Removed, no longer needed
 	tunnelManager tunnel.TunnelManagerInterface
 	scriptRunner  *scripting.ScriptRunner
@@ -34,10 +35,10 @@ type MapRemoteProxy struct {
 	endpointTunnelMap  map[string]string // endpointName -> tunnelName
 }
 
-func NewMapRemoteProxy(config *Config, tunnelManager tunnel.TunnelManagerInterface, scriptRunner *scripting.ScriptRunner, trafficShaper *stats.TrafficShaper, stats *stats.StatsCollector, staticCache *cache.StaticCacheManager, loggingDB *logging.LoggingDB, serverName string, rateLimiter *stats.RateLimitEngine) *MapRemoteProxy {
+func NewMapRemoteProxy(config *cfg.Config, tunnelManager tunnel.TunnelManagerInterface, scriptRunner *scripting.ScriptRunner, trafficShaper *stats.TrafficShaper, stats *stats.StatsCollector, staticCache *cache.StaticCacheManager, loggingDB *logging.LoggingDB, serverName string, rateLimiter *stats.RateLimitEngine) *MapRemoteProxy {
 	// Default policies from the server config, if they exist
 	serverConfig := config.Servers[serverName]
-	policies := config.ResolvePolicies(serverConfig, &Mapping{}, nil, "") // Get server-level or default policies
+	policies := config.ResolvePolicies(serverConfig, &cfg.Mapping{}, nil, "") // Get server-level or default policies
 
 	transport := &http.Transport{
 		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
@@ -93,7 +94,7 @@ func NewMapRemoteProxy(config *Config, tunnelManager tunnel.TunnelManagerInterfa
 				tunnels := parseStringOrArray(group.Tunnel)
 				if len(endpoints) > 0 && len(tunnels) > 0 {
 					for _, ep := range endpoints {
-						// User config takes precedence over group config
+						// cfg.User config takes precedence over group config
 						if _, exists := p.endpointTunnelMap[ep]; !exists {
 							p.endpointTunnelMap[ep] = tunnels[0]
 						}

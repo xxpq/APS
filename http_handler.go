@@ -31,6 +31,7 @@ import (
 	"aps/stats"
 "aps/util"
 	"aps/tunnel"
+	cfg "aps/config"
 )
 
 // 对象池 - 用于高并发场景下复用对象，减少 GC 压力
@@ -135,9 +136,9 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		endpointKey   string // Format: "tunnelName:endpointName"
 		proxyKey      string
 		statusCode    int // HTTP status code
-		serverConfig  *ListenConfig
-		mapping       *Mapping
-		user          *User
+		serverConfig  *cfg.ListenConfig
+		mapping       *cfg.Mapping
+		user          *cfg.User
 		firewallRule  *firewall.FirewallRule
 	)
 
@@ -167,7 +168,7 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		// Request logging (async, non-blocking)
 		if p.loggingDB != nil {
 			// Collect all matched configuration dimensions
-			var matchedGroups []*Group
+			var matchedGroups []*cfg.Group
 			if user != nil && p.config.Auth != nil && p.config.Auth.Groups != nil {
 				for _, groupName := range user.Groups {
 					if group, ok := p.config.Auth.Groups[groupName]; ok {
@@ -177,8 +178,8 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 
 			// Get tunnel and proxy configs if matched
-			var tunnelConfig *TunnelConfig
-			var proxyConfig *ProxyConfig
+			var tunnelConfig *cfg.TunnelConfig
+			var proxyConfig *cfg.ProxyConfig
 			if tunnelKey != "" && p.config.Tunnels != nil {
 				// tunnelKey might be just the tunnel name or "tunnelName:endpointName"
 				parts := strings.Split(tunnelKey, ":")
@@ -367,11 +368,11 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 			// Auth Level Logic
 			// 0: No Token (Default)
 			// 1: Hash Only
-			// 2: User Info Only
-			// 3: Hash + User Info
+			// 2: cfg.User Info Only
+			// 3: Hash + cfg.User Info
 			// 4: Token Only
 			// 5: Token + Hash
-			// 6: Token + Hash + User Info
+			// 6: Token + Hash + cfg.User Info
 
 			// Handle Token (Levels 4, 5, 6)
 			if authLevel == 4 || authLevel == 5 || authLevel == 6 {
@@ -388,7 +389,7 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 				r.Header.Set("APS-AUTH-HASH", hash)
 			}
 
-			// Handle User Info (Levels 2, 3, 6)
+			// Handle cfg.User Info (Levels 2, 3, 6)
 			if authLevel == 2 || authLevel == 3 || authLevel == 6 {
 				// info is already a JSON string from checkThirdPartyAuth
 				// Base64 encode the JSON info to ensure safe header transmission
@@ -431,7 +432,7 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Rate Limiting Check (Mapping and User level)
+	// Rate Limiting Check (cfg.Mapping and cfg.User level)
 	if p.rateLimiter != nil {
 		clientIP := getClientIP(r)
 		token := p.extractToken(r)
@@ -549,7 +550,7 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		if tunnelConfig, ok := p.config.Tunnels[tunnelKey]; ok && tunnelConfig.Auth != nil {
 			if !p.checkTunnelAccess(user, username, tunnelConfig.Auth) {
 				isError = true
-				log.Printf("[%s]%s[TUNNEL] User '%s' is not authorized for tunnel '%s'", clientIP, clientLocation, username, tunnelKey)
+				log.Printf("[%s]%s[TUNNEL] cfg.User '%s' is not authorized for tunnel '%s'", clientIP, clientLocation, username, tunnelKey)
 				http.Error(w, "Forbidden by tunnel access rule", http.StatusForbidden)
 				return
 			}
@@ -558,11 +559,11 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 
 	policies := p.config.ResolvePolicies(serverConfig, mapping, user, username)
 
-	var tunnelConfig *TunnelConfig
+	var tunnelConfig *cfg.TunnelConfig
 	if tunnelKey != "" {
 		tunnelConfig = p.config.Tunnels[tunnelKey]
 	}
-	var proxyConfig *ProxyConfig
+	var proxyConfig *cfg.ProxyConfig
 	if proxyKey != "" {
 		proxyConfig = p.config.Proxies[proxyKey]
 	}
@@ -827,8 +828,8 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		foundTunnel, ok := p.tunnelManager.FindTunnelForEndpoint(randomEndpoint)
 		if !ok {
 			isError = true
-			http.Error(w, "User-level endpoint not found or not connected: "+randomEndpoint, http.StatusBadGateway)
-			log.Printf("[%s]%s[TUNNEL] User-level specified endpoint '%s' not found in any active tunnel", clientIP, clientLocation, randomEndpoint)
+			http.Error(w, "cfg.User-level endpoint not found or not connected: "+randomEndpoint, http.StatusBadGateway)
+			log.Printf("[%s]%s[TUNNEL] cfg.User-level specified endpoint '%s' not found in any active tunnel", clientIP, clientLocation, randomEndpoint)
 			return
 		}
 		tunnelName = foundTunnel
@@ -920,7 +921,7 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if isTunnelRequest {
-		var ToConfig *EndpointConfig
+		var ToConfig *cfg.EndpointConfig
 		if mapping != nil {
 			ToConfig = mapping.GetToConfig()
 		}
@@ -971,7 +972,7 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		// For HTTPS, build a per-request transport when:
 		// - we are using IP substitution (to preserve correct SNI), or
 		// - backend is in insecure mode (explicit or internal-IP auto mode).
-		var ToConfig *EndpointConfig
+		var ToConfig *cfg.EndpointConfig
 		if mapping != nil {
 			ToConfig = mapping.GetToConfig()
 		}
@@ -1241,7 +1242,7 @@ func (w *ByteCounterWriter) Write(p []byte) (n int, err error) {
 }
 
 // needsResponseModification 检查是否需要修改响应
-func needsResponseModification(mapping *Mapping) bool {
+func needsResponseModification(mapping *cfg.Mapping) bool {
 	if mapping == nil {
 		return false
 	}
@@ -1253,7 +1254,7 @@ func needsResponseModification(mapping *Mapping) bool {
 	return ToConfig.Match != "" || len(ToConfig.Replace) > 0
 }
 
-func (p *MapRemoteProxy) modifyRequestBody(r *http.Request, mapping *Mapping) ([]byte, error) {
+func (p *MapRemoteProxy) modifyRequestBody(r *http.Request, mapping *cfg.Mapping) ([]byte, error) {
 	if r.Body == nil {
 		return nil, nil
 	}
@@ -1298,7 +1299,7 @@ func (p *MapRemoteProxy) modifyRequestBody(r *http.Request, mapping *Mapping) ([
 	return body, nil
 }
 
-func (p *MapRemoteProxy) modifyResponseBody(resp *http.Response, mapping *Mapping) ([]byte, error) {
+func (p *MapRemoteProxy) modifyResponseBody(resp *http.Response, mapping *cfg.Mapping) ([]byte, error) {
 	if resp.Body == nil {
 		return nil, nil
 	}
@@ -1438,7 +1439,7 @@ func unescapeReplacementString(s string) string {
 	return sb.String()
 }
 
-func (p *MapRemoteProxy) createClientWithP12(p12Path, password string, policies FinalPolicies) (*http.Client, error) {
+func (p *MapRemoteProxy) createClientWithP12(p12Path, password string, policies cfg.FinalPolicies) (*http.Client, error) {
 	p12Bytes, err := os.ReadFile(p12Path)
 	if err != nil {
 		return nil, err
@@ -1470,7 +1471,7 @@ func (p *MapRemoteProxy) createClientWithP12(p12Path, password string, policies 
 
 // resolveAuthConfig resolves the auth URL and level from mapping or referenced provider
 // Returns (authUrl, loginUrl, authLevel, provider)
-func (p *MapRemoteProxy) resolveAuthConfig(mapping *Mapping) (string, string, int, *AuthProviderConfig) {
+func (p *MapRemoteProxy) resolveAuthConfig(mapping *cfg.Mapping) (string, string, int, *cfg.AuthProviderConfig) {
 	if mapping == nil || mapping.Auth == nil {
 		return "", "", 0, nil
 	}
@@ -1478,7 +1479,7 @@ func (p *MapRemoteProxy) resolveAuthConfig(mapping *Mapping) (string, string, in
 	var authUrl string
 	var loginUrl string
 	var authLevel int
-	var provider *AuthProviderConfig
+	var provider *cfg.AuthProviderConfig
 
 	// 1. Check referenced AuthProvider
 	if mapping.Auth.AuthProvider != "" && p.config.AuthProviders != nil {
@@ -1544,7 +1545,7 @@ func (p *MapRemoteProxy) extractToken(r *http.Request) string {
 
 // extractTokenFromProvider extracts token from request based on provider configuration
 // If provider has custom tokenSource configuration, use it; otherwise fall back to default extractToken
-func (p *MapRemoteProxy) extractTokenFromProvider(r *http.Request, provider *AuthProviderConfig) string {
+func (p *MapRemoteProxy) extractTokenFromProvider(r *http.Request, provider *cfg.AuthProviderConfig) string {
 	if provider == nil || provider.TokenSource == nil {
 		// Default: try Authorization Bearer, then common headers, then cookie, then querystring
 		return p.extractToken(r)
@@ -1577,7 +1578,7 @@ func (p *MapRemoteProxy) extractTokenFromProvider(r *http.Request, provider *Aut
 
 // checkThirdPartyAuth performs third-party authentication
 // Returns (authorized, info, hash)
-func (p *MapRemoteProxy) checkThirdPartyAuth(r *http.Request, authUrl string, provider *AuthProviderConfig) (bool, string, string) {
+func (p *MapRemoteProxy) checkThirdPartyAuth(r *http.Request, authUrl string, provider *cfg.AuthProviderConfig) (bool, string, string) {
 	token := p.extractTokenFromProvider(r, provider)
 	if token == "" {
 		log.Printf("[AUTH] No token found in request")

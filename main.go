@@ -34,6 +34,7 @@ import (
 	"aps/security"
 	tlsx "aps/tls"
 	"aps/scripting"
+	cfg "aps/config"
 )
 
 // ServerManager manages the lifecycle of multiple HTTP servers.
@@ -44,7 +45,7 @@ type ServerManager struct {
 	muxes      map[string]*server.ConnectionMux // Connection multiplexers
 	mu         sync.Mutex
 	wg         sync.WaitGroup
-	config     *Config
+	config     *cfg.Config
 	configFile string
 	// dataStore     *DataStore // Removed, replaced by statsDB for persistence
 	tunnelManager  tunnel.TunnelManagerInterface
@@ -68,7 +69,7 @@ func (c *tunnelInboundConn) TunnelServerName() string {
 	return c.serverName
 }
 
-func NewServerManager(config *Config, configFile string, tunnelManager tunnel.TunnelManagerInterface, scriptRunner *scripting.ScriptRunner, trafficShaper *stats.TrafficShaper, statsCol *stats.StatsCollector, staticCache *cache.StaticCacheManager, replayManager *security.ReplayManager, statsDB *stats.StatsDB, loggingDB *logging.LoggingDB, logBroadcaster *logging.LogBroadcaster) *ServerManager {
+func NewServerManager(config *cfg.Config, configFile string, tunnelManager tunnel.TunnelManagerInterface, scriptRunner *scripting.ScriptRunner, trafficShaper *stats.TrafficShaper, statsCol *stats.StatsCollector, staticCache *cache.StaticCacheManager, replayManager *security.ReplayManager, statsDB *stats.StatsDB, loggingDB *logging.LoggingDB, logBroadcaster *logging.LogBroadcaster) *ServerManager {
 	rateLimiter := stats.NewRateLimitEngine(config.RateLimitRules)
 	// go rateLimiter.CleanupExpired() // stats.RateLimitEngine handles cleanup internally or doesn't need explicit cleanup loop yet?
 	// The new engine uses sync.Map and doesn't have a cleanup loop yet.
@@ -97,7 +98,7 @@ func NewServerManager(config *Config, configFile string, tunnelManager tunnel.Tu
 	}
 }
 
-func (sm *ServerManager) Start(name string, serverConfig *ListenConfig, isACMEEnabled bool) {
+func (sm *ServerManager) Start(name string, serverConfig *cfg.ListenConfig, isACMEEnabled bool) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
@@ -116,7 +117,7 @@ func (sm *ServerManager) Start(name string, serverConfig *ListenConfig, isACMEEn
 	}
 
 	// Re-calculate mappings for this specific server
-	serverMappings := make(map[string][]*Mapping)
+	serverMappings := make(map[string][]*cfg.Mapping)
 	for i := range sm.config.Mappings {
 		mapping := &sm.config.Mappings[i]
 		// First, add mappings that explicitly specify this server
@@ -125,7 +126,7 @@ func (sm *ServerManager) Start(name string, serverConfig *ListenConfig, isACMEEn
 		}
 
 		// For rawTCP servers, also match by port if no explicit server assignment
-		if (serverConfig.Type == ServerTypeTCP || serverConfig.Type == ServerTypeTCPUDP) && len(mapping.ServerNames) == 0 {
+		if (serverConfig.Type == cfg.ServerTypeTCP || serverConfig.Type == cfg.ServerTypeTCPUDP) && len(mapping.ServerNames) == 0 {
 			fromURL := mapping.GetFromURL()
 			util.DebugLog("[TCP MAPPING] Checking mapping %s for server '%s' (port %d), serverNames=%v", fromURL, name, serverConfig.Port, mapping.ServerNames)
 			if strings.HasPrefix(fromURL, "tcp://") {
@@ -145,7 +146,7 @@ func (sm *ServerManager) Start(name string, serverConfig *ListenConfig, isACMEEn
 		}
 
 		// For rawUDP servers, also match by port if no explicit server assignment
-		if (serverConfig.Type == ServerTypeUDP || serverConfig.Type == ServerTypeTCPUDP || serverConfig.Type == ServerTypeHTTPUDP) && len(mapping.ServerNames) == 0 {
+		if (serverConfig.Type == cfg.ServerTypeUDP || serverConfig.Type == cfg.ServerTypeTCPUDP || serverConfig.Type == cfg.ServerTypeHTTPUDP) && len(mapping.ServerNames) == 0 {
 			fromURL := mapping.GetFromURL()
 			if strings.HasPrefix(fromURL, "udp://") {
 				// Parse the from URL to get the port
@@ -164,7 +165,7 @@ func (sm *ServerManager) Start(name string, serverConfig *ListenConfig, isACMEEn
 	}
 
 	// Start TCP Server if enabled (Type 1 or 4)
-	if serverConfig.Type == ServerTypeTCP || serverConfig.Type == ServerTypeTCPUDP {
+	if serverConfig.Type == cfg.ServerTypeTCP || serverConfig.Type == cfg.ServerTypeTCPUDP {
 		tcpServer := NewRawTCPServer(name, serverConfig, sm.config, serverMappings[name],
 			sm.tunnelManager, sm.trafficShaper, sm.stats, sm.loggingDB)
 		if err := tcpServer.Start(); err != nil {
@@ -172,7 +173,7 @@ func (sm *ServerManager) Start(name string, serverConfig *ListenConfig, isACMEEn
 			// If TCP fails, we might still want to try UDP if it's combined?
 			// For now, let's just log and continue, or return?
 			// If it's pure TCP, we should probably return.
-			if serverConfig.Type == ServerTypeTCP {
+			if serverConfig.Type == cfg.ServerTypeTCP {
 				return
 			}
 		} else {
@@ -182,12 +183,12 @@ func (sm *ServerManager) Start(name string, serverConfig *ListenConfig, isACMEEn
 	}
 
 	// Start UDP Server if enabled (Type 3, 4, or 5)
-	if serverConfig.Type == ServerTypeUDP || serverConfig.Type == ServerTypeTCPUDP || serverConfig.Type == ServerTypeHTTPUDP {
+	if serverConfig.Type == cfg.ServerTypeUDP || serverConfig.Type == cfg.ServerTypeTCPUDP || serverConfig.Type == cfg.ServerTypeHTTPUDP {
 		udpServer := NewRawUDPServer(name, serverConfig, sm.config, serverMappings[name],
 			sm.tunnelManager, sm.trafficShaper, sm.stats, sm.loggingDB)
 		if err := udpServer.Start(); err != nil {
 			log.Printf("Failed to start UDP server '%s': %v", name, err)
-			if serverConfig.Type == ServerTypeUDP {
+			if serverConfig.Type == cfg.ServerTypeUDP {
 				return
 			}
 		} else {
@@ -198,7 +199,7 @@ func (sm *ServerManager) Start(name string, serverConfig *ListenConfig, isACMEEn
 
 	// Start HTTP Server if enabled (Type 2 or 5)
 	// Note: Type 0 defaults to HTTP in config processing, but here we check explicitly
-	if serverConfig.Type == ServerTypeHTTP || serverConfig.Type == ServerTypeHTTPUDP {
+	if serverConfig.Type == cfg.ServerTypeHTTP || serverConfig.Type == cfg.ServerTypeHTTPUDP {
 		handler := createServerHandler(name, serverMappings[name], serverConfig, sm.config, sm.configFile, sm.tunnelManager, sm.scriptRunner, sm.trafficShaper, sm.stats, sm.staticCache, sm.replayManager, isACMEEnabled, sm.statsDB, sm.loggingDB, sm.logBroadcaster, sm.rateLimiter)
 		server, mux := startServer(name, serverConfig, handler, sm.rateLimiter)
 		if server != nil {
@@ -266,7 +267,7 @@ func (sm *ServerManager) UpdateRawTCPMappings() {
 	defer sm.mu.Unlock()
 
 	// Re-calculate mappings for all servers using the same logic as server startup
-	serverMappings := make(map[string][]*Mapping)
+	serverMappings := make(map[string][]*cfg.Mapping)
 
 	// First, collect mappings that explicitly specify servers
 	for i := range sm.config.Mappings {
@@ -329,7 +330,7 @@ func (sm *ServerManager) UpdateRawTCPMappings() {
 // UpdateUDPMappings updates mappings for all rawUDP servers
 func (sm *ServerManager) UpdateUDPMappings() {
 	// Re-calculate mappings for all servers using the same logic as server startup
-	serverMappings := make(map[string][]*Mapping)
+	serverMappings := make(map[string][]*cfg.Mapping)
 
 	// First, collect mappings that explicitly specify servers
 	for i := range sm.config.Mappings {
@@ -409,19 +410,19 @@ func (sm *ServerManager) StopAll() {
 }
 
 func main() {
-	configFile := flag.String("config", "config.json", "Path to configuration file")
+	configFile := flag.String("cfg", "cfg.json", "Path to configuration file")
 	flag.Parse()
 
 	log.Println("===========================================")
 	log.Println("  Any Proxy Service (APS) v1.0.0")
 	log.Println("===========================================")
 
-	config, err := LoadConfig(*configFile)
+	cfg, err := LoadConfig(*configFile)
 	if err != nil {
-		log.Fatalf("Failed to load config: %v", err)
+		log.Fatalf("Failed to load cfg: %v", err)
 	}
 
-	InitACME(config)
+	InitACME(cfg)
 
 	// Initialize shared database
 	db, err := sql.Open("sqlite", "aps.db")
@@ -468,12 +469,12 @@ func main() {
 		log.Fatalf("Failed to load initial quota usage from DB: %v", err)
 	}
 
-	tunnelManager := tunnel.NewHybridTunnelManager(buildTCPTunnelConfig(config), nil, statsDB) // 娴ｈ法鏁ゅǎ宄版値闂呇囦壕缁狅紕鎮婇崳?
+	tunnelManager := tunnel.NewHybridTunnelManager(buildTCPTunnelConfig(cfg), nil, statsDB) // 娴ｈ法鏁ゅǎ宄版値闂呇囦壕缁狅紕鎮婇崳?
 	var scriptingConfig *scripting.ScriptConfig
-	if config.Scripting != nil {
+	if cfg.Scripting != nil {
 		scriptingConfig = &scripting.ScriptConfig{
-			PythonPath: config.Scripting.PythonPath,
-			NodePath:   config.Scripting.NodePath,
+			PythonPath: cfg.Scripting.PythonPath,
+			NodePath:   cfg.Scripting.NodePath,
 		}
 	}
 	scriptRunner := scripting.NewScriptRunner(scriptingConfig)
@@ -481,18 +482,18 @@ func main() {
 	statsCollector := stats.NewStatsCollector()
 	// 设置 stats endpoint 的 admin 鉴权（适配 stats 包解耦后的 AdminAuthFunc 字段）
 	statsCollector.AdminAuthFunc = func(r *http.Request) bool {
-		return isAdminRequest(r, config)
+		return isAdminRequest(r, cfg)
 	}
 	defer statsCollector.Close() // Ensure graceful shutdown of async stats workers
 
 	// 閸掓繂顫愰崠鏍饯閹焦鏋冩禒鍓佺处鐎涙顓搁悶鍡楁珤
 	// 閸掓繂顫愰崠鏍饯閹焦鏋冩禒鍓佺处鐎涙顓搁悶鍡楁珤
 	var cacheConfig *cache.CacheConfig
-	if config.StaticCache != nil {
+	if cfg.StaticCache != nil {
 		cacheConfig = &cache.CacheConfig{
-			Enabled:  config.StaticCache.Enabled,
-			CacheDir: config.StaticCache.CacheDir,
-			FileType: config.StaticCache.FileType,
+			Enabled:  cfg.StaticCache.Enabled,
+			CacheDir: cfg.StaticCache.CacheDir,
+			FileType: cfg.StaticCache.FileType,
 		}
 	}
 	staticCache := cache.NewStaticCacheManager(cacheConfig)
@@ -502,11 +503,11 @@ func main() {
 	tunnelManager.SetStatsCollector(statsCollector)
 	replayManager := security.NewReplayManager()
 
-	serverManager := NewServerManager(config, *configFile, tunnelManager, scriptRunner, trafficShaper, statsCollector, staticCache, replayManager, statsDB, loggingDB, logBroadcaster)
+	serverManager := NewServerManager(cfg, *configFile, tunnelManager, scriptRunner, trafficShaper, statsCollector, staticCache, replayManager, statsDB, loggingDB, logBroadcaster)
 
-	watcher, err := NewConfigWatcher(*configFile, config, serverManager)
+	watcher, err := NewConfigWatcher(*configFile, cfg, serverManager)
 	if err != nil {
-		log.Fatalf("Failed to create config watcher: %v", err)
+		log.Fatalf("Failed to create cfg watcher: %v", err)
 	}
 	watcher.Start()
 	defer watcher.Stop()
@@ -516,11 +517,11 @@ func main() {
 	// Start quota persistence (now saving to DB)
 	startQuotaPersistence(trafficShaper, statsDB)
 	startStatsCollection(statsCollector, statsDB)
-	startLogCleanup(config, loggingDB)
+	startLogCleanup(cfg, loggingDB)
 
 	log.Println("===========================================")
-	log.Printf("Loaded %d mapping rules:", len(config.Mappings))
-	for i, mapping := range config.Mappings {
+	log.Printf("Loaded %d mapping rules:", len(cfg.Mappings))
+	for i, mapping := range cfg.Mappings {
 		log.Printf("  [%d] %s -> %s (on %v)", i+1, mapping.GetFromURL(), mapping.GetToURL(), mapping.ServerNames)
 	}
 	log.Println("===========================================")
@@ -560,15 +561,15 @@ func (sm *ServerManager) StartAll() {
 			log.Println("[ACME] No public server on port 80 found, creating one for ACME challenge.")
 			acmeServerName := "acme_challenge_server"
 			t := true
-			sm.config.Servers[acmeServerName] = &ListenConfig{
+			sm.config.Servers[acmeServerName] = &cfg.ListenConfig{
 				Port:   80,
 				Public: &t,
 			}
 		}
 	}
 
-	// Group mappings by server name.
-	serverMappings := make(map[string][]*Mapping)
+	// cfg.Group mappings by server name.
+	serverMappings := make(map[string][]*cfg.Mapping)
 	for i := range sm.config.Mappings {
 		mapping := &sm.config.Mappings[i]
 		for _, serverName := range mapping.ServerNames {
@@ -585,7 +586,7 @@ func (sm *ServerManager) StartAll() {
 	}
 }
 
-func createServerHandler(serverName string, mappings []*Mapping, serverConfig *ListenConfig, config *Config, configFile string, tunnelManager tunnel.TunnelManagerInterface, scriptRunner *scripting.ScriptRunner, trafficShaper *stats.TrafficShaper, statsCol *stats.StatsCollector, staticCache *cache.StaticCacheManager, replayManager *security.ReplayManager, isACMEEnabled bool, statsDB *stats.StatsDB, loggingDB *logging.LoggingDB, logBroadcaster *logging.LogBroadcaster, rateLimiter *stats.RateLimitEngine) http.Handler {
+func createServerHandler(serverName string, mappings []*cfg.Mapping, serverConfig *cfg.ListenConfig, config *cfg.Config, configFile string, tunnelManager tunnel.TunnelManagerInterface, scriptRunner *scripting.ScriptRunner, trafficShaper *stats.TrafficShaper, statsCol *stats.StatsCollector, staticCache *cache.StaticCacheManager, replayManager *security.ReplayManager, isACMEEnabled bool, statsDB *stats.StatsDB, loggingDB *logging.LoggingDB, logBroadcaster *logging.LogBroadcaster, rateLimiter *stats.RateLimitEngine) http.Handler {
 	mux := http.NewServeMux()
 	proxy := NewMapRemoteProxy(config, tunnelManager, scriptRunner, trafficShaper, statsCol, staticCache, loggingDB, serverName, rateLimiter)
 
@@ -741,7 +742,7 @@ func isTunnelConnectRequest(r *http.Request) bool {
 	return false
 }
 
-func isServerBoundToAnyTunnel(config *Config, serverName string) bool {
+func isServerBoundToAnyTunnel(config *cfg.Config, serverName string) bool {
 	if config == nil || config.Tunnels == nil || strings.TrimSpace(serverName) == "" {
 		return false
 	}
@@ -758,7 +759,7 @@ func isServerBoundToAnyTunnel(config *Config, serverName string) bool {
 	return false
 }
 
-func configureTunnelMTLSForServer(name string, serverConfig *ListenConfig, tlsConfig *tls.Config) error {
+func configureTunnelMTLSForServer(name string, serverConfig *cfg.ListenConfig, tlsConfig *tls.Config) error {
 	if serverConfig == nil || tlsConfig == nil {
 		return nil
 	}
@@ -796,7 +797,7 @@ func configureTunnelMTLSForServer(name string, serverConfig *ListenConfig, tlsCo
 	return nil
 }
 
-func startServer(name string, config *ListenConfig, handler http.Handler, rateLimiter *stats.RateLimitEngine) (*http.Server, *server.ConnectionMux) {
+func startServer(name string, config *cfg.ListenConfig, handler http.Handler, rateLimiter *stats.RateLimitEngine) (*http.Server, *server.ConnectionMux) {
 	// Determine bind address based on 'public' (default: true)
 	host := "127.0.0.1"
 	if config.Public == nil || *config.Public {
@@ -839,7 +840,7 @@ func startServer(name string, config *ListenConfig, handler http.Handler, rateLi
 			tlsConfig := &tls.Config{}
 			var err error
 
-			if cert, ok := config.Cert.(CertFiles); ok {
+			if cert, ok := config.Cert.(cfg.CertFiles); ok {
 				tlsConfig.Certificates = make([]tls.Certificate, 1)
 				tlsConfig.Certificates[0], err = tls.LoadX509KeyPair(cert.Cert, cert.Key)
 				if err != nil {
@@ -1019,7 +1020,7 @@ func extractDimensionStats(m *stats.Metrics) *stats.DimensionStats {
 }
 
 // startLogCleanup starts a goroutine that periodically cleans up old logs
-func startLogCleanup(config *Config, loggingDB *logging.LoggingDB) {
+func startLogCleanup(config *cfg.Config, loggingDB *logging.LoggingDB) {
 	ticker := time.NewTicker(1 * time.Hour)
 	go func() {
 		for range ticker.C {

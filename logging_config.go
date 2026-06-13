@@ -2,6 +2,7 @@ package main
 
 import (
 	"aps/firewall"
+	cfg "aps/config"
 )
 
 // LoggingConfig holds the effective logging configuration for a request
@@ -14,13 +15,13 @@ type LoggingConfig struct {
 // Returns: highest LogLevel, longest RetentionHours
 // Falls back to global config if no dimension has values set
 func collectLoggingConfig(
-	globalConfig *Config,
-	server *ListenConfig,
-	mapping *Mapping,
-	user *User,
-	groups []*Group,
-	tunnel *TunnelConfig,
-	proxy *ProxyConfig,
+	globalConfig *cfg.Config,
+	server *cfg.ListenConfig,
+	mapping *cfg.Mapping,
+	user *cfg.User,
+	groups []*cfg.Group,
+	tunnel *cfg.TunnelConfig,
+	proxy *cfg.ProxyConfig,
 	firewall *firewall.FirewallRule,
 ) LoggingConfig {
 	// Default values from global config
@@ -84,7 +85,7 @@ func collectLoggingConfig(
 
 // getMaxRetentionHours scans all configs and returns the maximum retention hours
 // Used for cleanup to ensure we don't delete logs that should be retained
-func getMaxRetentionHours(config *Config) int {
+func getMaxRetentionHours(config *cfg.Config) int {
 	maxRetention := 24 // default
 
 	// Global config

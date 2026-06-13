@@ -3,11 +3,12 @@ package main
 import (
 	"encoding/json"
 	"testing"
+	"aps/config"
 )
 
 func TestEndpointConfigAPSGatewayDefaults(t *testing.T) {
 	raw := []byte(`{"tunnelName":"t1","endpointName":"e1"}`)
-	var cfg EndpointConfig_APS
+	var cfg config.EndpointConfig_APS
 	if err := json.Unmarshal(raw, &cfg); err != nil {
 		t.Fatalf("unmarshal failed: %v", err)
 	}
@@ -15,14 +16,14 @@ func TestEndpointConfigAPSGatewayDefaults(t *testing.T) {
 	if !cfg.GatewayDiscovery {
 		t.Fatal("expected gatewayDiscovery default to true")
 	}
-	if cfg.GatewayDiscoverPort != DefaultGatewayDiscoverPort {
-		t.Fatalf("expected default gatewayDiscoverPort=%d got %d", DefaultGatewayDiscoverPort, cfg.GatewayDiscoverPort)
+	if cfg.GatewayDiscoverPort != config.DefaultGatewayDiscoverPort {
+		t.Fatalf("expected default gatewayDiscoverPort=%d got %d", config.DefaultGatewayDiscoverPort, cfg.GatewayDiscoverPort)
 	}
 }
 
 func TestEndpointConfigAPSGatewayExplicitOverride(t *testing.T) {
 	raw := []byte(`{"tunnelName":"t1","endpointName":"e1","gatewayDiscovery":false,"gatewayDiscoverPort":40001}`)
-	var cfg EndpointConfig_APS
+	var cfg config.EndpointConfig_APS
 	if err := json.Unmarshal(raw, &cfg); err != nil {
 		t.Fatalf("unmarshal failed: %v", err)
 	}
@@ -37,7 +38,7 @@ func TestEndpointConfigAPSGatewayExplicitOverride(t *testing.T) {
 
 func TestEndpointConfigAPSGatewayAddressCommaSeparated(t *testing.T) {
 	raw := []byte(`{"tunnelName":"t1","endpointName":"e1","gatewayAddress":"10.2.2.2:37990,10.2.2.3:37990"}`)
-	var cfg EndpointConfig_APS
+	var cfg config.EndpointConfig_APS
 	if err := json.Unmarshal(raw, &cfg); err != nil {
 		t.Fatalf("unmarshal failed: %v", err)
 	}
@@ -63,7 +64,7 @@ func TestNormalizeAPSGatewayAddressesFromSingleField(t *testing.T) {
 
 func TestEndpointConfigAPSGatewayAddressArray(t *testing.T) {
 	raw := []byte(`{"tunnelName":"t1","endpointName":"e1","gatewayAddress":["10.2.2.2:37990","10.2.2.3:37990"]}`)
-	var cfg EndpointConfig_APS
+	var cfg config.EndpointConfig_APS
 	if err := json.Unmarshal(raw, &cfg); err != nil {
 		t.Fatalf("unmarshal failed: %v", err)
 	}

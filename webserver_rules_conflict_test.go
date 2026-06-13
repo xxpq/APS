@@ -1,13 +1,16 @@
 package main
 
-import "testing"
+import (
+	"aps/config"
+	"testing"
+)
 
 func TestFindConflictingFromEntry_AddConflictDifferentTo(t *testing.T) {
-	mappings := []Mapping{
+	mappings := []config.Mapping{
 		{From: "/api/*", To: "http://backend-a/*"},
 	}
 
-	idx, from, err := findConflictingFromEntry(mappings, Mapping{From: "/api/*", To: "http://backend-b/*"}, -1)
+	idx, from, err := findConflictingFromEntry(mappings, config.Mapping{From: "/api/*", To: "http://backend-b/*"}, -1)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -20,11 +23,11 @@ func TestFindConflictingFromEntry_AddConflictDifferentTo(t *testing.T) {
 }
 
 func TestFindConflictingFromEntry_AddUnique(t *testing.T) {
-	mappings := []Mapping{
+	mappings := []config.Mapping{
 		{From: "/api/*", To: "http://backend-a/*"},
 	}
 
-	idx, from, err := findConflictingFromEntry(mappings, Mapping{From: "/v2/*", To: "http://backend-a/*"}, -1)
+	idx, from, err := findConflictingFromEntry(mappings, config.Mapping{From: "/v2/*", To: "http://backend-a/*"}, -1)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -37,11 +40,11 @@ func TestFindConflictingFromEntry_AddUnique(t *testing.T) {
 }
 
 func TestFindConflictingFromEntry_AnyEntryOverlapTriggersConflict(t *testing.T) {
-	mappings := []Mapping{
+	mappings := []config.Mapping{
 		{From: "/api/*", To: "http://backend-a/*"},
 	}
 
-	idx, from, err := findConflictingFromEntry(mappings, Mapping{
+	idx, from, err := findConflictingFromEntry(mappings, config.Mapping{
 		From: []string{"/v2/*", "/api/*"},
 		To:   "http://backend-b/*",
 	}, -1)
@@ -57,12 +60,12 @@ func TestFindConflictingFromEntry_AnyEntryOverlapTriggersConflict(t *testing.T) 
 }
 
 func TestFindConflictingFromEntry_EditIgnoreCurrentIndex(t *testing.T) {
-	mappings := []Mapping{
+	mappings := []config.Mapping{
 		{From: "/api/*", To: "http://backend-a/*"},
 		{From: "/static/*", To: "http://backend-static/*"},
 	}
 
-	idx, from, err := findConflictingFromEntry(mappings, Mapping{From: "/api/*", To: "http://backend-a/*"}, 0)
+	idx, from, err := findConflictingFromEntry(mappings, config.Mapping{From: "/api/*", To: "http://backend-a/*"}, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -75,12 +78,12 @@ func TestFindConflictingFromEntry_EditIgnoreCurrentIndex(t *testing.T) {
 }
 
 func TestFindConflictingFromEntry_EditConflictWithOtherEntry(t *testing.T) {
-	mappings := []Mapping{
+	mappings := []config.Mapping{
 		{From: "/api/*", To: "http://backend-a/*"},
 		{From: "/static/*", To: "http://backend-static/*"},
 	}
 
-	idx, from, err := findConflictingFromEntry(mappings, Mapping{From: "/static/*", To: "http://backend-a/*"}, 0)
+	idx, from, err := findConflictingFromEntry(mappings, config.Mapping{From: "/static/*", To: "http://backend-a/*"}, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -93,7 +96,7 @@ func TestFindConflictingFromEntry_EditConflictWithOtherEntry(t *testing.T) {
 }
 
 func TestFindConflictingFromEntry_ObjectUrlsConflict(t *testing.T) {
-	mappings := []Mapping{
+	mappings := []config.Mapping{
 		{
 			From: map[string]interface{}{
 				"url": []interface{}{"https://a.example/*", "https://b.example/*"},
@@ -102,7 +105,7 @@ func TestFindConflictingFromEntry_ObjectUrlsConflict(t *testing.T) {
 		},
 	}
 
-	idx, from, err := findConflictingFromEntry(mappings, Mapping{
+	idx, from, err := findConflictingFromEntry(mappings, config.Mapping{
 		From: map[string]interface{}{
 			"url": []interface{}{"https://x.example/*", "https://b.example/*"},
 		},

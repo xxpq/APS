@@ -1,6 +1,7 @@
 package main
 
 import (
+	"aps/config"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -10,8 +11,8 @@ func TestMapRequest_DomainPrefilterAllowsKnownHost(t *testing.T) {
 	globalRouteCache.clear()
 
 	const serverName = "test_server"
-	cfg := &Config{
-		Mappings: []Mapping{
+	cfg := &config.Config{
+		Mappings: []config.Mapping{
 			makeTestMapping(serverName, "https://known.example.com/*", "https://backend.internal/*"),
 		},
 	}
@@ -41,8 +42,8 @@ func TestMapRequest_DomainPrefilterRejectsUnknownHost(t *testing.T) {
 	globalRouteCache.clear()
 
 	const serverName = "test_server"
-	cfg := &Config{
-		Mappings: []Mapping{
+	cfg := &config.Config{
+		Mappings: []config.Mapping{
 			makeTestMapping(serverName, "https://known.example.com/*", "https://backend.internal/*"),
 		},
 	}
@@ -73,8 +74,8 @@ func TestMapRequest_DomainPrefilterSkipsWhenIndexFromDifferentConfig(t *testing.
 
 	const serverName = "test_server"
 
-	cfgA := &Config{
-		Mappings: []Mapping{
+	cfgA := &config.Config{
+		Mappings: []config.Mapping{
 			makeTestMapping(serverName, "https://alpha.example.com/*", "https://backend-a.internal/*"),
 		},
 	}
@@ -83,8 +84,8 @@ func TestMapRequest_DomainPrefilterSkipsWhenIndexFromDifferentConfig(t *testing.
 		refreshDomainIndexes(nil)
 	})
 
-	cfgB := &Config{
-		Mappings: []Mapping{
+	cfgB := &config.Config{
+		Mappings: []config.Mapping{
 			makeTestMapping(serverName, "https://beta.example.com/*", "https://backend-b.internal/*"),
 		},
 	}
@@ -111,14 +112,14 @@ func TestMapRequest_DomainPrefilterDisabledForDynamicHostRules(t *testing.T) {
 	const serverName = "test_server"
 	regexFrom := `https://(.*)\.example\.com/.*`
 
-	cfg := &Config{
-		Mappings: []Mapping{
+	cfg := &config.Config{
+		Mappings: []config.Mapping{
 			{
 				ServerNames: []string{serverName},
-				FromConfig: &EndpointConfig{
+				FromConfig: &config.EndpointConfig{
 					URLs: []string{regexFrom},
 				},
-				ToConfig: &EndpointConfig{
+				ToConfig: &config.EndpointConfig{
 					URLs: []string{regexFrom},
 				},
 			},

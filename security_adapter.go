@@ -2,6 +2,7 @@ package main
 
 import (
 	"aps/security"
+	cfg "aps/config"
 )
 
 // shouldUseInsecureBackendMode is a thin main-package wrapper that projects
@@ -13,7 +14,7 @@ import (
 // Projecting (rather than letting security import main.EndpointConfig) keeps
 // the aps/security package free of main-package types and lets it be reused
 // from other call sites in the future.
-func shouldUseInsecureBackendMode(toConfig *EndpointConfig, rawTargetURL string) bool {
+func shouldUseInsecureBackendMode(toConfig *cfg.EndpointConfig, rawTargetURL string) bool {
 	var projection *security.EndpointConfigProjection
 	if toConfig != nil {
 		projection = &security.EndpointConfigProjection{

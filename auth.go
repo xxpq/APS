@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"net/http"
 	"strings"
+	cfg "aps/config"
 )
 
 // checkAuth 检查请求是否满足认证要求
@@ -13,7 +14,7 @@ import (
 // 支持两种认证方式：
 // 1. 用户名:密码 - 标准的 Basic 认证
 // 2. x-access-token:token - 使用 token 进行认证
-func (p *MapRemoteProxy) checkAuth(r *http.Request, mapping *Mapping) (bool, *User, string) {
+func (p *MapRemoteProxy) checkAuth(r *http.Request, mapping *cfg.Mapping) (bool, *cfg.User, string) {
 	serverConfig := p.config.Servers[p.serverName]
 	if serverConfig == nil {
 		return true, nil, "" // 理论上不应发生
@@ -130,7 +131,7 @@ func (p *MapRemoteProxy) checkAuth(r *http.Request, mapping *Mapping) (bool, *Us
 }
 
 // checkTunnelAccess 检查已认证的用户是否有权访问特定的隧道
-func (p *MapRemoteProxy) checkTunnelAccess(user *User, username string, tunnelAuth *RuleAuth) bool {
+func (p *MapRemoteProxy) checkTunnelAccess(user *cfg.User, username string, tunnelAuth *cfg.RuleAuth) bool {
 	// 如果隧道没有配置认证，则允许所有用户访问
 	if tunnelAuth == nil || (len(tunnelAuth.Users) == 0 && len(tunnelAuth.Groups) == 0) {
 		return true

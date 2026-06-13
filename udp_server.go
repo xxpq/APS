@@ -16,19 +16,20 @@ import (
 	"aps/stats"
 "aps/util"
 	"aps/tunnel"
+	cfg "aps/config"
 )
 
 // RawUDPServer manages a raw UDP server for forwarding packets
 type RawUDPServer struct {
 	name          string
-	config        *ListenConfig
-	appConfig     *Config
+	config        *cfg.ListenConfig
+	appConfig     *cfg.Config
 	conn          *net.UDPConn
 	tunnelManager tunnel.TunnelManagerInterface
 	trafficShaper *stats.TrafficShaper
 	stats         *stats.StatsCollector
 	loggingDB     *logging.LoggingDB
-	mappings      []*Mapping
+	mappings      []*cfg.Mapping
 	mu            sync.RWMutex
 	sessions      map[string]*UDPSession // ClientAddr -> Session
 	closed        bool
@@ -45,7 +46,7 @@ type UDPSession struct {
 }
 
 // NewRawUDPServer creates a new raw UDP server
-func NewRawUDPServer(name string, config *ListenConfig, appConfig *Config, mappings []*Mapping,
+func NewRawUDPServer(name string, config *cfg.ListenConfig, appConfig *cfg.Config, mappings []*cfg.Mapping,
 	tunnelManager tunnel.TunnelManagerInterface, trafficShaper *stats.TrafficShaper, stats *stats.StatsCollector, loggingDB *logging.LoggingDB) *RawUDPServer {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &RawUDPServer{
@@ -107,7 +108,7 @@ func (s *RawUDPServer) Stop() error {
 }
 
 // UpdateMappings updates the mappings for this server (for config hot reload)
-func (s *RawUDPServer) UpdateMappings(mappings []*Mapping) {
+func (s *RawUDPServer) UpdateMappings(mappings []*cfg.Mapping) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.mappings = mappings
@@ -303,7 +304,7 @@ func (s *RawUDPServer) cleanupLoop() {
 }
 
 // findMapping finds a matching mapping for this UDP server
-func (s *RawUDPServer) findMapping() *Mapping {
+func (s *RawUDPServer) findMapping() *cfg.Mapping {
 	// Similar to TCP, find mapping by server name or port
 	for _, m := range s.mappings {
 		for _, serverName := range m.ServerNames {
