@@ -1,4 +1,4 @@
-// Root config.go (Stage 9.1b)
+// Root config.go (Stage 9.1b + Stage 9.2)
 //
 // All type definitions and their methods now live in the aps/config
 // sub-package (see config/types.go, config/process.go, config/endpoint_aps.go,
@@ -7,7 +7,7 @@
 //
 //   1. LoadConfig wrapper that delegates to config.LoadConfig and also
 //      sets the global debug flag (Stage 8: util.IsDebugMode is canonical).
-//   2. An init() that wires the root's *ProxyManager into
+//   2. An init() that wires aps/proxy.Manager into
 //      aps/config.NewProxyManagerFn so processConfig can resolve
 //      mapping proxy lists without depending on the concrete type.
 //   3. parseStringOrArray, stringPtr, maskToken, normalizeAPSConfiguredGatewayAddresses
@@ -18,6 +18,7 @@ package main
 
 import (
 	"aps/config"
+	"aps/proxy"
 	"aps/util"
 )
 
@@ -26,12 +27,11 @@ import (
 var IsDebugMode = util.IsDebugMode
 
 func init() {
-	// Inject the root main's *ProxyManager into aps/config so the
-	// mapping processor can resolve ResolvedProxy without importing
-	// the concrete type. Stage 9.2 will move *ProxyManager into
-	// aps/proxy, at which point this binding is no longer needed.
+	// Inject aps/proxy.Manager into aps/config so the mapping processor
+	// can resolve ResolvedProxy without importing the concrete type.
+	// *proxy.Manager implements config.ProxyResolver via GetRandomProxy.
 	config.NewProxyManagerFn = func(urls []string) config.ProxyResolver {
-		return NewProxyManager(urls)
+		return proxy.NewManager(urls)
 	}
 }
 

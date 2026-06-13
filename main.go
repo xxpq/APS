@@ -30,6 +30,7 @@ import (
 	"aps/logging"
 	"aps/server"
 	"aps/stats"
+	"aps/tcptunnel"
 	"aps/tunnel"
 	"aps/security"
 	tlsx "aps/tls"
@@ -469,7 +470,7 @@ func main() {
 		log.Fatalf("Failed to load initial quota usage from DB: %v", err)
 	}
 
-	tunnelManager := tunnel.NewHybridTunnelManager(buildTCPTunnelConfig(cfg), nil, statsDB) // 娴ｈ法鏁ゅǎ宄版値闂呇囦壕缁狅紕鎮婇崳?
+	tunnelManager := tunnel.NewHybridTunnelManager(tcptunnel.BuildConfig(cfg), nil, statsDB) // 娴ｈ法鏁ゅǎ宄版値闂呇囦壕缁狅紕鎮婇崳?
 	var scriptingConfig *scripting.ScriptConfig
 	if cfg.Scripting != nil {
 		scriptingConfig = &scripting.ScriptConfig{
@@ -1026,7 +1027,7 @@ func startLogCleanup(config *cfg.Config, loggingDB *logging.LoggingDB) {
 		for range ticker.C {
 			// Get maximum retention hours from all dimensions
 			// This ensures we don't delete logs that should still be retained
-			retentionHours := getMaxRetentionHours(config)
+			retentionHours := logging.MaxRetentionHours(config)
 
 			if err := loggingDB.CleanupOldLogs(retentionHours); err != nil {
 				log.Printf("[LOGGING] Error cleaning up old logs: %v", err)

@@ -1,27 +1,31 @@
-package main
+package logging
 
 import (
+	"aps/config"
 	"aps/firewall"
-	cfg "aps/config"
 )
 
-// LoggingConfig holds the effective logging configuration for a request
+// LoggingConfig holds the effective logging configuration for a request.
 type LoggingConfig struct {
 	LogLevel       int
 	RetentionHours int
 }
 
-// collectLoggingConfig merges logging settings from all matched dimension configs
-// Returns: highest LogLevel, longest RetentionHours
-// Falls back to global config if no dimension has values set
-func collectLoggingConfig(
-	globalConfig *cfg.Config,
-	server *cfg.ListenConfig,
-	mapping *cfg.Mapping,
-	user *cfg.User,
-	groups []*cfg.Group,
-	tunnel *cfg.TunnelConfig,
-	proxy *cfg.ProxyConfig,
+// Collect merges logging settings from all matched dimension configs.
+// Returns: highest LogLevel, longest RetentionHours.
+// Falls back to global config if no dimension has values set.
+//
+// Stage 9.2 moved this from root main into the logging sub-package.
+// Callers invoke logging.Collect(global, server, mapping, user, groups,
+// tunnel, proxy, firewall) directly.
+func Collect(
+	globalConfig *config.Config,
+	server *config.ListenConfig,
+	mapping *config.Mapping,
+	user *config.User,
+	groups []*config.Group,
+	tunnel *config.TunnelConfig,
+	proxy *config.ProxyConfig,
 	firewall *firewall.FirewallRule,
 ) LoggingConfig {
 	// Default values from global config
@@ -37,20 +41,15 @@ func collectLoggingConfig(
 		}
 	}
 
-	// Helper to update with max LogLevel and max RetentionHours
 	updateConfig := func(dimLogLevel, dimRetention *int) {
-		if dimLogLevel != nil {
-			if *dimLogLevel > logLevel {
-				logLevel = *dimLogLevel
-			}
+		if dimLogLevel != nil && *dimLogLevel > logLevel {
+			logLevel = *dimLogLevel
 		}
-		if dimRetention != nil {
-			if *dimRetention > retentionHours {
-				retentionHours = *dimRetention
-			}
+		if dimRetention != nil && *dimRetention > retentionHours {
+			retentionHours = *dimRetention
 		}
 	}
-	// Collect from all dimensions
+
 	if server != nil {
 		updateConfig(server.LogLevel, server.LogRetentionHours)
 	}
@@ -83,65 +82,61 @@ func collectLoggingConfig(
 	}
 }
 
-// getMaxRetentionHours scans all configs and returns the maximum retention hours
-// Used for cleanup to ensure we don't delete logs that should be retained
-func getMaxRetentionHours(config *cfg.Config) int {
+// MaxRetentionHours scans all configs and returns the maximum retention
+// hours. Used for cleanup to ensure we don't delete logs that should be
+// retained.
+//
+// Stage 9.2: this used to be getMaxRetentionHours in root main. Renamed
+// to logging.MaxRetentionHours to expose a clearer public name.
+func MaxRetentionHours(c *config.Config) int {
 	maxRetention := 24 // default
 
-	// Global config
-	if config.LogRetentionHours != nil && *config.LogRetentionHours > maxRetention {
-		maxRetention = *config.LogRetentionHours
+	if c.LogRetentionHours != nil && *c.LogRetentionHours > maxRetention {
+		maxRetention = *c.LogRetentionHours
 	}
 
-	// Servers
-	for _, server := range config.Servers {
+	for _, server := range c.Servers {
 		if server != nil && server.LogRetentionHours != nil && *server.LogRetentionHours > maxRetention {
 			maxRetention = *server.LogRetentionHours
 		}
 	}
 
-	// Mappings
-	for i := range config.Mappings {
-		mapping := &config.Mappings[i]
+	for i := range c.Mappings {
+		mapping := &c.Mappings[i]
 		if mapping.LogRetentionHours != nil && *mapping.LogRetentionHours > maxRetention {
 			maxRetention = *mapping.LogRetentionHours
 		}
 	}
 
-	// Users
-	if config.Auth != nil && config.Auth.Users != nil {
-		for _, user := range config.Auth.Users {
+	if c.Auth != nil && c.Auth.Users != nil {
+		for _, user := range c.Auth.Users {
 			if user != nil && user.LogRetentionHours != nil && *user.LogRetentionHours > maxRetention {
 				maxRetention = *user.LogRetentionHours
 			}
 		}
 	}
 
-	// Groups
-	if config.Auth != nil && config.Auth.Groups != nil {
-		for _, group := range config.Auth.Groups {
+	if c.Auth != nil && c.Auth.Groups != nil {
+		for _, group := range c.Auth.Groups {
 			if group != nil && group.LogRetentionHours != nil && *group.LogRetentionHours > maxRetention {
 				maxRetention = *group.LogRetentionHours
 			}
 		}
 	}
 
-	// Tunnels
-	for _, tunnel := range config.Tunnels {
+	for _, tunnel := range c.Tunnels {
 		if tunnel != nil && tunnel.LogRetentionHours != nil && *tunnel.LogRetentionHours > maxRetention {
 			maxRetention = *tunnel.LogRetentionHours
 		}
 	}
 
-	// Proxies
-	for _, proxy := range config.Proxies {
+	for _, proxy := range c.Proxies {
 		if proxy != nil && proxy.LogRetentionHours != nil && *proxy.LogRetentionHours > maxRetention {
 			maxRetention = *proxy.LogRetentionHours
 		}
 	}
 
-	// Firewalls
-	for _, fw := range config.Firewalls {
+	for _, fw := range c.Firewalls {
 		if fw != nil && fw.LogRetentionHours != nil && *fw.LogRetentionHours > maxRetention {
 			maxRetention = *fw.LogRetentionHours
 		}

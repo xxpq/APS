@@ -203,7 +203,7 @@ func (s *RawTCPServer) handleConnection(clientConn net.Conn) {
 			// For now, let's assume if mapping has via proxy, we might want to log it.
 
 			// Collect logging config
-			logConfig := collectLoggingConfig(
+			logConfig := logging.Collect(
 				s.appConfig,
 				s.config,
 				s.findMapping(), // Re-find mapping or pass it? Better to use 'mapping' var if available, but it's local to handleConnection

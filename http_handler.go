@@ -28,6 +28,8 @@ import (
 	"aps/cache"
 	"aps/firewall"
 	"aps/logging"
+	"aps/proxy"
+	"aps/security"
 	"aps/stats"
 "aps/util"
 	"aps/tunnel"
@@ -196,7 +198,7 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 
 			// Collect logging configuration
-			logConfig := collectLoggingConfig(
+			logConfig := logging.Collect(
 				p.config,
 				serverConfig,
 				mapping,
@@ -796,7 +798,7 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 				proxyReq.URL = parsedURL
 			}
 			if FromConfig.Proxy != nil {
-				proxyManager := NewProxyManager(FromConfig.Proxy)
+				proxyManager := proxy.NewManager(FromConfig.Proxy)
 				defer proxyManager.Close()
 				proxyURL := proxyManager.GetRandomProxy()
 				if proxyURL != "" {
@@ -925,9 +927,15 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		if mapping != nil {
 			ToConfig = mapping.GetToConfig()
 		}
+		// Project the main-package EndpointConfig into the security package's
+		// minimal projection so the security code does not depend on aps/config.
+		var insecureProjection *security.EndpointConfigProjection
+		if ToConfig != nil {
+			insecureProjection = &security.EndpointConfigProjection{Insecure: ToConfig.Insecure}
+		}
 		// If insecure mode is enabled (explicitly or by internal https target auto-detection),
 		// add a header to signal the endpoint to skip strict TLS verification.
-		if shouldUseInsecureBackendMode(ToConfig, proxyReq.URL.String()) {
+		if security.ShouldUseInsecureBackendMode(insecureProjection, proxyReq.URL.String()) {
 			proxyReq.Header.Set("X-Aps-Insecure", "true")
 		}
 
@@ -976,7 +984,12 @@ func (p *MapRemoteProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		if mapping != nil {
 			ToConfig = mapping.GetToConfig()
 		}
-		insecureMode := shouldUseInsecureBackendMode(ToConfig, proxyReq.URL.String())
+		// Project EndpointConfig into the security package's projection.
+		var insecureProjection *security.EndpointConfigProjection
+		if ToConfig != nil {
+			insecureProjection = &security.EndpointConfigProjection{Insecure: ToConfig.Insecure}
+		}
+		insecureMode := security.ShouldUseInsecureBackendMode(insecureProjection, proxyReq.URL.String())
 		if proxyReq.URL.Scheme == "https" && (selectedIP != "" || insecureMode) {
 			// Clone the default transport and set the ServerName for SNI.
 			baseTransport, ok := p.client.Transport.(*http.Transport)

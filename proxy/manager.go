@@ -1,4 +1,11 @@
-package main
+// Package proxy holds the outbound proxy manager used by mapping routing.
+//
+// Stage 9.2 moved *ProxyManager from root main into this sub-package so
+// aps/proxy can be reused by Stage 9.5 (the reverse-proxy core). The
+// Manager implements the aps/config.ProxyResolver interface (via
+// GetRandomProxy) and is wired into aps/config.NewProxyManagerFn by
+// root main's init() so the config processor can construct it.
+package proxy
 
 import (
 	"bufio"
@@ -14,45 +21,42 @@ import (
 	"time"
 )
 
-// ProxyManager 管理代理配置
-type ProxyManager struct {
-	proxyConfig interface{} // 原始配置：string、[]string 或 nil
-	proxyList   []string    // 解析后的代理列表
+// Manager manages the proxy configuration for outbound requests.
+type Manager struct {
+	proxyConfig interface{} // Original config: string, []string, or nil
+	proxyList   []string    // Resolved proxy list
 	mu          sync.RWMutex
 	updateTimer *time.Timer
 	ctx         context.Context
 	cancel      context.CancelFunc
 }
 
-// NewProxyManager 创建新的代理管理器
-func NewProxyManager(proxyConfig interface{}) *ProxyManager {
+// NewManager creates a new proxy manager and resolves the initial list.
+func NewManager(proxyConfig interface{}) *Manager {
 	ctx, cancel := context.WithCancel(context.Background())
-	pm := &ProxyManager{
+	pm := &Manager{
 		proxyConfig: proxyConfig,
 		proxyList:   make([]string, 0),
 		ctx:         ctx,
 		cancel:      cancel,
 	}
-
-	// 初始化代理列表
 	pm.loadProxies()
-
 	return pm
 }
 
-// loadProxies 加载代理配置
-func (pm *ProxyManager) loadProxies() {
+// loadProxies loads the proxy list from the configured source.
+func (pm *Manager) loadProxies() {
 	if pm.proxyConfig == nil {
 		return
 	}
 
-	// 情况 1: 字符串
+	// Case 1: string
 	if strValue, ok := pm.proxyConfig.(string); ok {
 		pm.handleStringProxy(strValue)
 		return
 	}
 
-	// 情况 2: 字符串数组
+	// Case 2: []interface{}
 	if arrValue, ok := pm.proxyConfig.([]interface{}); ok {
 		proxies := make([]string, 0)
 		for _, item := range arrValue {
@@ -67,7 +71,7 @@ func (pm *ProxyManager) loadProxies() {
 		return
 	}
 
-	// 情况 3: []string 类型
+	// Case 3: []string
 	if arrValue, ok := pm.proxyConfig.([]string); ok {
 		proxies := make([]string, 0)
 		for _, str := range arrValue {
@@ -81,47 +85,45 @@ func (pm *ProxyManager) loadProxies() {
 	}
 }
 
-// handleStringProxy 处理字符串类型的代理配置
-func (pm *ProxyManager) handleStringProxy(proxyStr string) {
+// handleStringProxy dispatches based on whether the string is a remote URL,
+// a local file path, or a single proxy URI.
+func (pm *Manager) handleStringProxy(proxyStr string) {
 	proxyStr = strings.TrimSpace(proxyStr)
 
-	// 检查是否是远程 URL（以 http 开头，且后缀是 .json 或 .txt，不含 ?）
+	// Check for remote URL config
 	if strings.HasPrefix(proxyStr, "http://") || strings.HasPrefix(proxyStr, "https://") {
-		// 提取路径部分（不含查询参数）
 		if parsed, err := url.Parse(proxyStr); err == nil {
 			path := parsed.Path
 			if strings.HasSuffix(path, ".json") || strings.HasSuffix(path, ".txt") {
-				// 这是远程配置文件
 				log.Printf("[PROXY MANAGER] Detected remote proxy config: %s", proxyStr)
 				pm.loadRemoteProxies(proxyStr)
 				pm.startAutoUpdate(proxyStr)
 				return
 			}
 		}
-		// 否则就是单个代理 URL
 		pm.mu.Lock()
 		pm.proxyList = []string{proxyStr}
 		pm.mu.Unlock()
-		log.Printf("[PROXY MANAGER] Loaded 1 proxy from string: %s", maskProxyURL(proxyStr))
+		log.Printf("[PROXY MANAGER] Loaded 1 proxy from string: %s", MaskURL(proxyStr))
 		return
 	}
 
-	// 检查是否是本地文件路径
+	// Check for local file path
 	if _, err := os.Stat(proxyStr); err == nil {
 		log.Printf("[PROXY MANAGER] Detected local proxy file: %s", proxyStr)
 		pm.loadLocalProxies(proxyStr)
 		return
 	}
 
-	// 否则当作单个代理 URI
+	// Otherwise treat as a single proxy URI
 	pm.mu.Lock()
 	pm.proxyList = []string{proxyStr}
 	pm.mu.Unlock()
-	log.Printf("[PROXY MANAGER] Loaded 1 proxy from string: %s", maskProxyURL(proxyStr))
+	log.Printf("[PROXY MANAGER] Loaded 1 proxy from string: %s", MaskURL(proxyStr))
 }
 
-// loadLocalProxies 从本地文件加载代理列表
-func (pm *ProxyManager) loadLocalProxies(filePath string) {
+// loadLocalProxies reads the proxy list from a local file.
+func (pm *Manager) loadLocalProxies(filePath string) {
 	file, err := os.Open(filePath)
 	if err != nil {
 		log.Printf("[PROXY MANAGER] Error opening local proxy file %s: %v", filePath, err)
@@ -149,8 +151,8 @@ func (pm *ProxyManager) loadLocalProxies(filePath string) {
 	log.Printf("[PROXY MANAGER] Loaded %d proxies from local file: %s", len(proxies), filePath)
 }
 
-// loadRemoteProxies 从远程 URL 加载代理列表
-func (pm *ProxyManager) loadRemoteProxies(remoteURL string) {
+// loadRemoteProxies fetches the proxy list from a remote URL.
+func (pm *Manager) loadRemoteProxies(remoteURL string) {
 	resp, err := http.Get(remoteURL)
 	if err != nil {
 		log.Printf("[PROXY MANAGER] Error fetching remote proxy config from %s: %v", remoteURL, err)
@@ -184,9 +186,8 @@ func (pm *ProxyManager) loadRemoteProxies(remoteURL string) {
 	log.Printf("[PROXY MANAGER] Loaded %d proxies from remote URL: %s", len(proxies), remoteURL)
 }
 
-// startAutoUpdate 启动自动更新定时器（每 5 分钟）
-func (pm *ProxyManager) startAutoUpdate(remoteURL string) {
-	// 取消之前的定时器
+// startAutoUpdate schedules periodic reloads every 5 minutes.
+func (pm *Manager) startAutoUpdate(remoteURL string) {
 	if pm.updateTimer != nil {
 		pm.updateTimer.Stop()
 	}
@@ -198,34 +199,32 @@ func (pm *ProxyManager) startAutoUpdate(remoteURL string) {
 		default:
 			log.Printf("[PROXY MANAGER] Auto-updating proxies from %s", remoteURL)
 			pm.loadRemoteProxies(remoteURL)
-			pm.startAutoUpdate(remoteURL) // 递归调度下一次更新
+			pm.startAutoUpdate(remoteURL)
 		}
 	})
 
 	log.Printf("[PROXY MANAGER] Scheduled auto-update every 5 minutes for %s", remoteURL)
 }
 
-// GetRandomProxy 随机获取一个代理 URL
-func (pm *ProxyManager) GetRandomProxy() string {
+// GetRandomProxy returns a random proxy URL from the list.
+func (pm *Manager) GetRandomProxy() string {
 	pm.mu.RLock()
 	defer pm.mu.RUnlock()
 
 	if len(pm.proxyList) == 0 {
 		return ""
 	}
-
 	if len(pm.proxyList) == 1 {
 		return pm.proxyList[0]
 	}
-
 	index := rand.Intn(len(pm.proxyList))
 	proxyURL := pm.proxyList[index]
-	log.Printf("[PROXY] Selected proxy [%d/%d]: %s", index+1, len(pm.proxyList), maskProxyURL(proxyURL))
+	log.Printf("[PROXY] Selected proxy [%d/%d]: %s", index+1, len(pm.proxyList), MaskURL(proxyURL))
 	return proxyURL
 }
 
-// Close 关闭代理管理器
-func (pm *ProxyManager) Close() {
+// Close stops the auto-update timer and cancels the context.
+func (pm *Manager) Close() {
 	if pm.cancel != nil {
 		pm.cancel()
 	}
@@ -234,14 +233,12 @@ func (pm *ProxyManager) Close() {
 	}
 }
 
-// maskProxyURL 遮蔽代理 URL 中的敏感信息
-func maskProxyURL(proxyURL string) string {
+// MaskURL masks the password portion of a proxy URL for safe log output.
+func MaskURL(proxyURL string) string {
 	parsed, err := url.Parse(proxyURL)
 	if err != nil {
 		return proxyURL
 	}
-
-	// 如果有用户信息，遮蔽密码部分
 	if parsed.User != nil {
 		username := parsed.User.Username()
 		if password, ok := parsed.User.Password(); ok {
@@ -252,6 +249,5 @@ func maskProxyURL(proxyURL string) string {
 			parsed.User = url.UserPassword(username, maskedPassword)
 		}
 	}
-
 	return parsed.String()
 }

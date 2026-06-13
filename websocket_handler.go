@@ -18,6 +18,7 @@ import (
 
 	"aps/stats"
 "aps/util"
+	"aps/security"
 	cfg "aps/config"
 )
 
@@ -241,7 +242,12 @@ func (p *MapRemoteProxy) handleWebSocket(w http.ResponseWriter, r *http.Request)
 			if mapping != nil {
 				ToConfig = mapping.GetToConfig()
 			}
-			insecureMode := shouldUseInsecureBackendMode(ToConfig, targetWsURL.String())
+			// Project EndpointConfig into the security package's projection.
+			var insecureProjection *security.EndpointConfigProjection
+			if ToConfig != nil {
+				insecureProjection = &security.EndpointConfigProjection{Insecure: ToConfig.Insecure}
+			}
+			insecureMode := security.ShouldUseInsecureBackendMode(insecureProjection, targetWsURL.String())
 
 			legacyTLSMode := shouldUseLegacyBackendTLS(host, insecureMode)
 
@@ -344,7 +350,12 @@ func (p *MapRemoteProxy) handleWebSocket(w http.ResponseWriter, r *http.Request)
 		if mapping != nil {
 			ToConfig = mapping.GetToConfig()
 		}
-		insecureMode := shouldUseInsecureBackendMode(ToConfig, targetWsURL.String())
+		// Project EndpointConfig into the security package's projection.
+		var insecureProjection *security.EndpointConfigProjection
+		if ToConfig != nil {
+			insecureProjection = &security.EndpointConfigProjection{Insecure: ToConfig.Insecure}
+		}
+		insecureMode := security.ShouldUseInsecureBackendMode(insecureProjection, targetWsURL.String())
 		if targetWsURL.Scheme == "wss" {
 			legacyTLSMode := shouldUseLegacyBackendTLS(targetWsURL.Hostname(), insecureMode)
 			tlsConfig := &tls.Config{
